@@ -193,7 +193,7 @@ jobs:
 
           if ! java -jar "$sign_tool" verify-app \
             -inFile "$signed_app" \
-            -outCertchain "$signing_dir/verified.cer" \
+            -outCertChain "$signing_dir/verified.cer" \
             -outProfile "$signing_dir/verified.p7b" > "$signing_dir/verify.log" 2>&1 ||
             [[ ! -s "$signing_dir/verified.cer" || ! -s "$signing_dir/verified.p7b" ]]; then
             echo '::error::The signed APP did not pass signature verification.'
