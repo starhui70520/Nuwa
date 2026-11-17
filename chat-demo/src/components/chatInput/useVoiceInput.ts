@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { TranslationMessage } from '../../i18n/index.js'
 import { canUseCloudAsr, transcribe } from '../../services/api/speech.js'
-import { DeepSeekMigration, isNativeAndroid } from '../../services/nativeBridge.js'
+import { DeepSeekMigration, isNativeAndroid, isNativeIos } from '../../services/nativeBridge.js'
 import { MAX_SECONDS, startRecording, type Recording } from '../../services/speech/recorder.js'
 import { getActiveSecret, useSettings } from '../../services/settings.js'
 import { showToast } from '../base/toastState.js'
@@ -9,16 +9,28 @@ import { showToast } from '../base/toastState.js'
 export type VoiceInputStatus = 'idle' | 'recording' | 'transcribing'
 
 /**
- * 录音依赖 getUserMedia 或原生安卓语音识别，只在安全上下文可用（HTTPS、localhost、file://）。
+ * 录音依赖 getUserMedia 或原生语音识别，只在安全上下文可用（HTTPS、localhost、file://）。
  * 普通 HTTP 页面上直接禁用入口，避免点击后必然失败。
  */
 const AVAILABLE = typeof window === 'undefined' || window.isSecureContext
+
+/** 原生壳（Android/iOS）走设备语音识别：speechEngine=native 强制原生；无 API Key 时云端不可用回落原生 */
+const useNativeAsr = (): boolean => {
+  if (!isNativeAndroid() && !isNativeIos()) {
+    return false
+  }
+  const engine = useSettings.getState().speechEngine
+  return engine === 'native' || !canUseCloudAsr()
+}
 
 const describeRecordingError = (error: unknown): TranslationMessage => {
   if (error instanceof DOMException) {
     if (error.name === 'NotAllowedError' || error.name === 'SecurityError') {
       return {
-        key: isNativeAndroid() ? 'voiceInputPermissionDeniedAndroid' : 'voiceInputPermissionDenied',
+        key:
+          isNativeAndroid() || isNativeIos()
+            ? 'voiceInputPermissionDeniedAndroid'
+            : 'voiceInputPermissionDenied',
       }
     }
     if (error.name === 'NotFoundError') {
@@ -27,7 +39,10 @@ const describeRecordingError = (error: unknown): TranslationMessage => {
   }
   if (error instanceof Error && error.message.includes('PERMISSION_DENIED')) {
     return {
-      key: isNativeAndroid() ? 'voiceInputPermissionDeniedAndroid' : 'voiceInputPermissionDenied',
+      key:
+        isNativeAndroid() || isNativeIos()
+          ? 'voiceInputPermissionDeniedAndroid'
+          : 'voiceInputPermissionDenied',
     }
   }
   return { key: 'voiceInputFailed' }
@@ -159,7 +174,7 @@ export const useVoiceInput = (onText: (text: string) => void) => {
     setStatus('recording')
     levelRef.current = 0
 
-    if (isNativeAndroid() && !canUseCloudAsr()) {
+    if (useNativeAsr()) {
       try {
         const permission = await DeepSeekMigration.ensureMicrophonePermission()
         if (operationRef.current !== operation) {

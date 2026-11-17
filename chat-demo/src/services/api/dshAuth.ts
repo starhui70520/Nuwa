@@ -1,5 +1,5 @@
 import { showToast } from '../../components/base/toastState.js'
-import { DeepSeekMigration, isNativeAndroid } from '../nativeBridge.js'
+import { DeepSeekMigration, isNativeAndroid, isNativeIos } from '../nativeBridge.js'
 import { clearDeepSeekAccountAuth, setDeepSeekAccountAuth, useSettings } from '../settings.js'
 
 const WEB_PKCE_STORAGE_KEY = 'nuwa:dsh-pkce-state'
@@ -176,6 +176,14 @@ export const startDeepSeekAccountLogin = async (): Promise<void> => {
     window.__NUWA_HARMONY__.startPlatformAuth()
     return
   }
+  if (isNativeIos()) {
+    const result = await DeepSeekMigration.startPlatformAuth()
+    if (result?.token) {
+      setDeepSeekAccountAuth(result.token, result.accountLabel ?? null)
+      showToast({ key: 'dshLoginSuccess' })
+    }
+    return
+  }
 
   if (!window.crypto?.subtle) {
     throw new PlatformAuthUnavailableError()
@@ -208,9 +216,14 @@ export const startDeepSeekAccountLogin = async (): Promise<void> => {
   if (!res.ok) {
     throw new PlatformAuthUnavailableError()
   }
-  const payload = (await res.json()) as {
+  let payload: {
     code?: number
     data?: { biz_code?: number; biz_data?: { authorize_url?: string } }
+  }
+  try {
+    payload = await res.json()
+  } catch {
+    throw new PlatformAuthUnavailableError()
   }
   const authorizeUrl = payload.data?.biz_data?.authorize_url
   if (payload.code !== 0 || payload.data?.biz_code !== 0 || !authorizeUrl) {
@@ -227,7 +240,7 @@ export const logoutDeepSeekAccount = async (): Promise<void> => {
   if (!token) {
     return
   }
-  if (isNativeAndroid()) {
+  if (isNativeAndroid() || isNativeIos()) {
     await DeepSeekMigration.logoutPlatformAuth({ token }).catch(() => {})
     return
   }

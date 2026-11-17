@@ -3,7 +3,7 @@ import type { TranslationMessage } from '../../i18n/index.js'
 import { ApiError } from '../api/client.js'
 import { classifyApiError } from '../api/errors.js'
 import { synthesize, TTS_SAMPLE_RATE } from '../api/speech.js'
-import { DeepSeekMigration, isNativeAndroid } from '../nativeBridge.js'
+import { DeepSeekMigration, isNativeAndroid, isNativeIos } from '../nativeBridge.js'
 import { getActiveSecret, isUsingDeepSeekAccount, useSettings } from '../settings.js'
 
 /**
@@ -33,6 +33,14 @@ const canUseCloudTts = (): boolean => {
     Boolean(state.apiKey) &&
     (isUsingDeepSeekAccount(state) || state.apiBaseUrl.includes('deepseek.com'))
   )
+}
+
+/** 原生壳（Android/iOS）走设备朗读：speechEngine=native 强制原生；云端不可用（无 API Key）回落原生 */
+const useNativeTts = (): boolean => {
+  if (!isNativeAndroid() && !isNativeIos()) {
+    return false
+  }
+  return useSettings.getState().speechEngine === 'native' || !canUseCloudTts()
 }
 
 const stripMarkdownForTts = (raw: string): string =>
@@ -118,7 +126,7 @@ export const toggleReadAloud = (
     return
   }
 
-  if (isNativeAndroid() && !canUseCloudTts()) {
+  if (useNativeTts()) {
     const cleaned = stripMarkdownForTts(text)
     if (!cleaned) {
       onError(new ApiError('http', 'empty', 400))

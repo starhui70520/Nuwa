@@ -1,7 +1,7 @@
 import { Capacitor } from '@capacitor/core'
 import { showToast } from '../../components/base/toastState.js'
 import { checkPendingAndroidPlatformAuth, handleWebOAuthCallback } from '../api/dshAuth.js'
-import { DeepSeekMigration, isNativeAndroid } from '../nativeBridge.js'
+import { DeepSeekMigration, isNativeAndroid, isNativeIos } from '../nativeBridge.js'
 import { setDeepSeekAccountAuth } from '../settings.js'
 import { BackupError, importHistory, importHistoryFromBytes } from './backup.js'
 
@@ -38,7 +38,7 @@ let consumingPending = false
 
 /** 检查并导入安卓原生下载接管落盘的导出包（即使 MainActivity 被系统重启也不会丢失） */
 export const checkPendingAndroidMigration = async (): Promise<void> => {
-  if (!isNativeAndroid() || consumingPending) {
+  if ((!isNativeAndroid() && !isNativeIos()) || consumingPending) {
     return
   }
   consumingPending = true
@@ -145,10 +145,29 @@ export const launchAndroidMigrationBrowser = async (): Promise<void> => {
   await DeepSeekMigration.openExportBrowser()
 }
 
+/** iOS 原生内嵌浏览器迁移：打开官方页自动导出，导出包落盘后直接导入 */
+export const launchIosMigrationBrowser = async (): Promise<void> => {
+  const result = await DeepSeekMigration.openExportBrowser()
+  if (!result?.filePath) {
+    return
+  }
+  const res = await fetch(Capacitor.convertFileSrc(result.filePath))
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`)
+  }
+  const buffer = await res.arrayBuffer()
+  await DeepSeekMigration.clearPendingExport()
+  await runZipImport(buffer, result.fileName || 'deepseek_data.zip')
+}
+
 /** 跨端统一一键迁移入口 */
 export const triggerOneClickMigration = async (): Promise<void> => {
   if (isNativeAndroid()) {
     await launchAndroidMigrationBrowser()
+    return
+  }
+  if (isNativeIos()) {
+    await launchIosMigrationBrowser()
     return
   }
   if (window.__NUWA_HARMONY__?.openExportBrowser) {

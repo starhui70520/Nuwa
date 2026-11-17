@@ -31,12 +31,15 @@ import {
   setAuthMode,
   setLocale,
   setLocation,
+  setSpeechEngine,
   setThemePreference,
   setTtsVoice,
   useSettings,
   type ApiProtocol,
+  type SpeechEngine,
   type ThemePreference,
 } from '../../services/settings.js'
+import { isNativeAndroid, isNativeIos } from '../../services/nativeBridge.js'
 import { Button } from '../base/Button.js'
 import {
   IconChevronLeftOutline18,
@@ -228,6 +231,7 @@ const SettingsContent = () => {
                   <span className={styles.rowLabel}>{t('settingsTtsVoice')}</span>
                   <TtsVoiceInlineSelect />
                 </div>
+                <SpeechEngineRow />
               </div>
               <div className={styles.groupFooter}>{t('settingsVoiceHint')}</div>
 
@@ -655,6 +659,43 @@ const AppearanceInlineSelect = () => {
         { value: 'dark', label: t('avatarMenuSettingsDialogThemeSelectDarkOption') },
       ]}
       onChange={(value) => setThemePreference(value as ThemePreference)}
+    />
+  )
+}
+
+/** 语音引擎行：仅原生壳且已配置 API Key 时提供选择（无 Key 时固定走设备原生） */
+const SpeechEngineRow = () => {
+  const t = useTranslate()
+  const hasApiKey = useSettings((state) => Boolean(state.apiKey))
+  if ((!isNativeAndroid() && !isNativeIos()) || !hasApiKey) {
+    return null
+  }
+  return (
+    <div className={styles.groupRow}>
+      <span className={styles.rowIcon}>
+        <IconVolumeOutline18 />
+      </span>
+      <span className={styles.rowLabel}>{t('settingsSpeechEngine')}</span>
+      <SpeechEngineInlineSelect />
+    </div>
+  )
+}
+
+/** 语音引擎：auto 有 API Key 时云端、否则设备原生；仅在原生壳且有 Key 时提供选择 */
+const SpeechEngineInlineSelect = () => {
+  const t = useTranslate()
+  const speechEngine = useSettings((state) => state.speechEngine)
+  return (
+    <Select
+      variant="inline"
+      ariaLabel={t('settingsSpeechEngine')}
+      value={speechEngine}
+      options={[
+        { value: 'auto', label: t('settingsSpeechEngineAuto') },
+        { value: 'native', label: t('settingsSpeechEngineNative') },
+        { value: 'cloud', label: t('settingsSpeechEngineCloud') },
+      ]}
+      onChange={(value) => setSpeechEngine(value as SpeechEngine)}
     />
   )
 }

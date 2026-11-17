@@ -29,6 +29,7 @@ type Settings = {
   location: UserLocation | null
   ttsVoice: TtsVoice
   ttsMuted: boolean
+  speechEngine: SpeechEngine
   thinking: boolean
   search: boolean
   siderCollapsed: boolean
@@ -48,6 +49,7 @@ const KEYS = {
   themePreference: 'chat-demo:theme-preference',
   ttsVoice: 'chat-demo:tts-voice',
   ttsMuted: 'chat-demo:tts-muted',
+  speechEngine: 'chat-demo:speech-engine',
   thinking: 'chat-demo:thinking',
   search: 'chat-demo:search',
   siderCollapsed: 'chat-demo:sider-collapsed',
@@ -110,6 +112,13 @@ const initialThemePreference = (): ThemePreference => {
 /** 未保存过时使用服务端默认音色 stella（海星） */
 const initialTtsVoice = (): TtsVoice => (read(KEYS.ttsVoice) === 'tide' ? 'tide' : 'stella')
 
+/** 语音引擎：auto 有 API Key 时云端、否则设备原生；native 强制原生（仅原生壳可选）；cloud 强制云端 */
+export type SpeechEngine = 'auto' | 'native' | 'cloud'
+const initialSpeechEngine = (): SpeechEngine => {
+  const saved = read(KEYS.speechEngine)
+  return saved === 'native' || saved === 'cloud' ? saved : 'auto'
+}
+
 const initialApiProtocol = (): ApiProtocol =>
   read(KEYS.apiProtocol) === 'anthropic' ? 'anthropic' : 'openai'
 
@@ -141,6 +150,7 @@ export const useSettings = create<Settings>(() => ({
   themePreference: initialThemePreference(),
   ttsVoice: initialTtsVoice(),
   ttsMuted: read(KEYS.ttsMuted) !== 'false',
+  speechEngine: initialSpeechEngine(),
   thinking: read(KEYS.thinking) === 'true',
   search: read(KEYS.search) === 'true',
   siderCollapsed: read(KEYS.siderCollapsed) === 'true',
@@ -174,6 +184,11 @@ export const setThemePreference = (themePreference: ThemePreference) => {
 export const setTtsVoice = (ttsVoice: TtsVoice) => {
   write(KEYS.ttsVoice, ttsVoice)
   useSettings.setState({ ttsVoice })
+}
+
+export const setSpeechEngine = (speechEngine: SpeechEngine) => {
+  write(KEYS.speechEngine, speechEngine)
+  useSettings.setState({ speechEngine })
 }
 
 export const setTtsMuted = (ttsMuted: boolean) => {

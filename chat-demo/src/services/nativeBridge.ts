@@ -1,14 +1,14 @@
 import { Capacitor, registerPlugin } from '@capacitor/core'
 
 export type DeepSeekMigrationPlugin = {
-  openExportBrowser: () => Promise<void>
+  openExportBrowser: () => Promise<{ filePath?: string; fileName?: string } | void>
   consumePendingExport: () => Promise<{
     hasPending: boolean
     filePath?: string
     fileName?: string
   }>
   clearPendingExport: () => Promise<void>
-  startPlatformAuth: () => Promise<void>
+  startPlatformAuth: () => Promise<{ token?: string; accountLabel?: string | null } | void>
   consumePendingPlatformAuth: () => Promise<{
     hasPending: boolean
     token?: string
@@ -32,3 +32,6 @@ export const DeepSeekMigration = registerPlugin<DeepSeekMigrationPlugin>('DeepSe
 
 export const isNativeAndroid = (): boolean =>
   Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android'
+
+export const isNativeIos = (): boolean =>
+  Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'ios'
