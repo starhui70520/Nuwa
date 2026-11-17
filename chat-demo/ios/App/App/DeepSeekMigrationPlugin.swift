@@ -25,6 +25,8 @@ public class DeepSeekMigrationPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "speakText", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "stopSpeaking", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "saveFileToDocuments", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "icloudStatus", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "icloudBackupNow", returnType: CAPPluginReturnPromise),
     ]
 
     private var pendingAuthCall: CAPPluginCall?
@@ -464,6 +466,46 @@ public class DeepSeekMigrationPlugin: CAPPlugin, CAPBridgedPlugin {
             let picker = UIDocumentPickerViewController(forExporting: [url])
             presenter.present(picker, animated: true) {
                 call.resolve(["presented": true])
+            }
+        }
+    }
+
+    // MARK: iCloud 自动备份（ubiquity container，需开通 Apple Developer 并启用 iCloud Documents entitlement）
+    //
+    // 启用方式（开通开发者账号后）：
+    // 1. 新建 App/App.entitlements，加入 com.apple.developer.ubiquity-container-identifiers
+    //    （值 iCloud.<bundle id>）并在 Signing & Capabilities 打开 iCloud Documents。
+    // 2. 本插件自动生效；未启用时 url(forUbiquityContainerIdentifier:) 返回 nil → ICLOUD_UNAVAILABLE。
+
+    private var icloudContainer: URL? {
+        FileManager.default.url(forUbiquityContainerIdentifier: nil)?.appendingPathComponent("Documents")
+    }
+
+    @objc func icloudStatus(_ call: CAPPluginCall) {
+        DispatchQueue.main.async {
+            call.resolve(["available": self.icloudContainer != nil])
+        }
+    }
+
+    @objc func icloudBackupNow(_ call: CAPPluginCall) {
+        let name = (call.getString("name") ?? "").trimmingCharacters(in: .whitespaces)
+        let base64 = call.getString("data") ?? ""
+        guard !name.isEmpty, let data = Data(base64Encoded: base64) else {
+            call.reject("INVALID_DATA")
+            return
+        }
+        guard let container = self.icloudContainer else {
+            call.reject("ICLOUD_UNAVAILABLE")
+            return
+        }
+        DispatchQueue.global(qos: .utility).async {
+            do {
+                try FileManager.default.createDirectory(at: container, withIntermediateDirectories: true)
+                // 固定文件名：每次自动备份覆盖同一份，云端只保留最新快照
+                try data.write(to: container.appendingPathComponent(name), options: .atomic)
+                call.resolve(["path": name])
+            } catch {
+                call.reject("WRITE_FAILED: \(error.localizedDescription)")
             }
         }
     }

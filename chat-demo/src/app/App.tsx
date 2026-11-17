@@ -4,6 +4,7 @@ import { useTranslate } from '../i18n/index.js'
 import { hasActiveCredential, useSettings } from '../services/settings.js'
 import { useIsMobile, useMobileViewport, usePreventPageScroll } from './viewport.js'
 import { bindMigrationBridge, runZipImport } from '../services/chat/migrationBridge.js'
+import { maybeAutoBackupToIcloud } from '../services/chat/backup.js'
 import {
   bindChatPersistence,
   initChat,
@@ -84,6 +85,7 @@ export const App = () => {
   useEffect(bindMigrationBridge, [])
   useEffect(() => {
     scheduleSilentAppUpdateCheck()
+    void maybeAutoBackupToIcloud()
   }, [])
 
   useEffect(() => {

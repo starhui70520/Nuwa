@@ -30,6 +30,7 @@ type Settings = {
   ttsVoice: TtsVoice
   ttsMuted: boolean
   speechEngine: SpeechEngine
+  icloudAutoBackup: boolean
   thinking: boolean
   search: boolean
   siderCollapsed: boolean
@@ -50,6 +51,7 @@ const KEYS = {
   ttsVoice: 'chat-demo:tts-voice',
   ttsMuted: 'chat-demo:tts-muted',
   speechEngine: 'chat-demo:speech-engine',
+  icloudAutoBackup: 'chat-demo:icloud-auto-backup',
   thinking: 'chat-demo:thinking',
   search: 'chat-demo:search',
   siderCollapsed: 'chat-demo:sider-collapsed',
@@ -151,6 +153,7 @@ export const useSettings = create<Settings>(() => ({
   ttsVoice: initialTtsVoice(),
   ttsMuted: read(KEYS.ttsMuted) !== 'false',
   speechEngine: initialSpeechEngine(),
+  icloudAutoBackup: read(KEYS.icloudAutoBackup) === 'true',
   thinking: read(KEYS.thinking) === 'true',
   search: read(KEYS.search) === 'true',
   siderCollapsed: read(KEYS.siderCollapsed) === 'true',
@@ -189,6 +192,11 @@ export const setTtsVoice = (ttsVoice: TtsVoice) => {
 export const setSpeechEngine = (speechEngine: SpeechEngine) => {
   write(KEYS.speechEngine, speechEngine)
   useSettings.setState({ speechEngine })
+}
+
+export const setIcloudAutoBackup = (icloudAutoBackup: boolean) => {
+  write(KEYS.icloudAutoBackup, String(icloudAutoBackup))
+  useSettings.setState({ icloudAutoBackup })
 }
 
 export const setTtsMuted = (ttsMuted: boolean) => {

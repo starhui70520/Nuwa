@@ -174,6 +174,12 @@ export const en = {
     'Includes all chat history and locally stored images; can be backed up to iCloud Drive or on-device storage.',
   exportAllDownload: 'Download',
   exportAllSaveToIcloud: 'Back up to iCloud',
+  icloudAutoBackup: 'Auto backup to iCloud',
+  icloudAutoBackupDescription:
+    'When enabled, the latest backup snapshot is written to iCloud Drive each time you open the app. Requires an Apple Developer account with iCloud enabled.',
+  icloudBackupOn: 'On',
+  icloudBackupOff: 'Enable',
+  icloudBackupUnavailable: 'iCloud unavailable: requires an Apple Developer account with the iCloud entitlement',
   deleteAllSessions: 'Delete all chats',
   deleteAllSessionsModalTitle: 'Once deleted, all chats will be cleared and cannot be recovered.',
   deleteAllSessionsModalDescription:

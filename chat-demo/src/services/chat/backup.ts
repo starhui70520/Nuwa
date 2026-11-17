@@ -1,4 +1,6 @@
 import { formatDate } from '../../utils/format.js'
+import { DeepSeekMigration, isNativeIos } from '../nativeBridge.js'
+import { useSettings } from '../settings.js'
 import * as db from './db.js'
 import { mergeHistory, replaceHistory, useChatStore } from './store.js'
 import type { Session } from './types.js'
@@ -66,3 +68,44 @@ export const clearHistory = (): Promise<void> =>
   enqueueBackup(async () => {
     await replaceHistory(async () => {})
   })
+
+const ICLOUD_BACKUP_NAME = 'deepseek_data-latest.zip'
+let lastIcloudBackupAt = 0
+
+const blobToBase64 = async (blob: Blob): Promise<string> => {
+  const bytes = new Uint8Array(await blob.arrayBuffer())
+  let binary = ''
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
+  }
+  return btoa(binary)
+}
+
+/**
+ * iCloud 自动备份（iOS）：开启后每次进入应用且距上次超过 1 小时，把最新快照
+ * 覆盖写入 ubiquity container（iCloud Drive Documents 目录，随系统自动同步到云端）。
+ * 未开通 iCloud entitlement 时静默跳过。
+ */
+export const maybeAutoBackupToIcloud = async (): Promise<void> => {
+  if (!isNativeIos() || !useSettings.getState().icloudAutoBackup) {
+    return
+  }
+  const now = Date.now()
+  if (now - lastIcloudBackupAt < 60 * 60 * 1000) {
+    return
+  }
+  try {
+    const { available } = await DeepSeekMigration.icloudStatus()
+    if (!available) {
+      return
+    }
+    lastIcloudBackupAt = now
+    const { blob } = await exportHistory()
+    await DeepSeekMigration.icloudBackupNow({
+      name: ICLOUD_BACKUP_NAME,
+      data: await blobToBase64(blob),
+    })
+  } catch {
+    // 自动备份失败不打扰用户；下次进入应用重试
+  }
+}

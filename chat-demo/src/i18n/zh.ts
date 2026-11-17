@@ -167,6 +167,12 @@ export const zh = {
     '包含所有历史对话及本地图片原件，可备份到 iCloud Drive 或本机。',
   exportAllDownload: '下载',
   exportAllSaveToIcloud: '备份到 iCloud',
+  icloudAutoBackup: '自动备份到 iCloud',
+  icloudAutoBackupDescription:
+    '开启后每次进入应用自动把最新备份快照写入 iCloud Drive，需开通 Apple Developer 并启用 iCloud。',
+  icloudBackupOn: '已开启',
+  icloudBackupOff: '开启',
+  icloudBackupUnavailable: 'iCloud 暂不可用：需要 Apple Developer 账号启用 iCloud 权限后生效',
   deleteAllSessions: '删除所有对话',
   deleteAllSessionsModalTitle: '删除后，所有对话都将被清空且无法找回',
   deleteAllSessionsModalDescription: '本地保存的附件及未发送的草稿也将被删除。',

@@ -17,6 +17,7 @@ import {
   clearHistory,
   exportHistory,
   importHistory,
+  maybeAutoBackupToIcloud,
 } from '../../services/chat/backup.js'
 import { triggerOneClickMigration } from '../../services/chat/migrationBridge.js'
 import { useChatStore } from '../../services/chat/store.js'
@@ -29,6 +30,7 @@ import {
   setApiModel,
   setApiProtocol,
   setAuthMode,
+  setIcloudAutoBackup,
   setLocale,
   setLocation,
   setSpeechEngine,
@@ -306,6 +308,7 @@ const SettingsContent = () => {
                 <OneClickMigrateSetting disabled={historyBusy} />
                 <ImportHistory historyImport={historyImport} disabled={historyBusy} />
                 <ExportHistory disabled={historyBusy} />
+                {isNativeIos() ? <IcloudAutoBackup disabled={historyBusy} /> : null}
               </div>
               <div className={clsx(styles.groupCard, styles.cardGap)}>
                 <SettingCell
@@ -924,6 +927,55 @@ const ExportHistory = ({ disabled }: { disabled: boolean }) => {
         >
           <IconDownloadOutline16 />
           {isNativeIos() ? t('exportAllSaveToIcloud') : t('exportAllDownload')}
+        </Button>
+      }
+    />
+  )
+}
+
+/** iCloud 自动备份开关（iOS）：开启后每次进入应用把最新快照写入 ubiquity container */
+const IcloudAutoBackup = ({ disabled }: { disabled: boolean }) => {
+  const t = useTranslate()
+  const enabled = useSettings((state) => state.icloudAutoBackup)
+  const [available, setAvailable] = useState<boolean | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    void DeepSeekMigration.icloudStatus()
+      .then((res) => setAvailable(res.available))
+      .catch(() => setAvailable(false))
+  }, [])
+
+  const onToggle = async () => {
+    if (!enabled && available === false) {
+      showToast({ key: 'icloudBackupUnavailable' })
+      return
+    }
+    setBusy(true)
+    try {
+      setIcloudAutoBackup(!enabled)
+      if (!enabled) {
+        void maybeAutoBackupToIcloud()
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <SettingCell
+      label={t('icloudAutoBackup')}
+      description={t('icloudAutoBackupDescription')}
+      status={null}
+      action={
+        <Button
+          variant="outlined"
+          size="m"
+          className={styles.cellButton}
+          disabled={disabled || busy}
+          onClick={() => void onToggle()}
+        >
+          {t(enabled ? 'icloudBackupOn' : 'icloudBackupOff')}
         </Button>
       }
     />
