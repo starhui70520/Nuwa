@@ -11,6 +11,8 @@ import { HarmonySpeechRecognition } from '../speech/HarmonySpeechRecognition';
 import { HarmonyTextToSpeech } from '../speech/HarmonyTextToSpeech';
 
 const PLATFORM_ORIGIN = 'https://platform.deepseek.com';
+const HOSTED_PRIVACY_POLICY_URL =
+  'https://agreement-drcn.hispace.dbankcloud.cn/index.html?lang=zh&agreementId=2086009982511225600';
 const CLIENT_VERSION = '0.2.2';
 const APP_WEB_URL = 'resource://rawfile/web/index.html';
 const APP_BRIDGE_PERMISSION =
@@ -309,17 +311,25 @@ struct Index {
   }
 
   private async openPrivacyPolicy(): Promise<void> {
-    const uiContext = this.getUIContext();
+    let policyUrl = HOSTED_PRIVACY_POLICY_URL;
     try {
       const policy = privacyManager.getAppPrivacyMgmtInfo().privacyInfo.find(
         (link) => link.type === privacyManager.AppPrivacyLinkType.PRIVACY_STATEMENT_LINK
       );
-      const policyUrl = url.URL.parseURL(policy?.url ?? '');
-      if (policyUrl.protocol !== 'https:') {
-        throw new Error('Invalid privacy policy URL');
+      if (policy?.url) {
+        const managedUrl = url.URL.parseURL(policy.url);
+        if (managedUrl.protocol === 'https:') {
+          policyUrl = managedUrl.href;
+        }
       }
+    } catch {
+      // Sideloaded builds can lack AppGallery privacy metadata.
+    }
+
+    const uiContext = this.getUIContext();
+    try {
       const context = uiContext.getHostContext() as common.UIAbilityContext;
-      await context.openLink(policyUrl.href, { appLinkingOnly: false });
+      await context.openLink(policyUrl, { appLinkingOnly: false });
     } catch {
       uiContext.getPromptAction().showToast({ message: $r('app.string.privacy_policy_unavailable') });
     }
