@@ -1,7 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { TranslationMessage } from '../../i18n/index.js'
 import { canUseCloudAsr, transcribe } from '../../services/api/speech.js'
-import { DeepSeekMigration, isNativeAndroid, isNativeIos } from '../../services/nativeBridge.js'
+import {
+  createHarmonySpeechId,
+  DeepSeekMigration,
+  getHarmonySpeechBridge,
+  isNativeAndroid,
+  isNativeIos,
+  type HarmonyAsrError,
+  type HarmonyAsrEvent,
+} from '../../services/nativeBridge.js'
 import { MAX_SECONDS, startRecording, type Recording } from '../../services/speech/recorder.js'
 import { getActiveSecret, useSettings } from '../../services/settings.js'
 import { showToast } from '../base/toastState.js'
@@ -13,6 +21,9 @@ export type VoiceInputStatus = 'idle' | 'recording' | 'transcribing'
  * 普通 HTTP 页面上直接禁用入口，避免点击后必然失败。
  */
 const AVAILABLE = typeof window === 'undefined' || window.isSecureContext
+const HARMONY_ASR_EVENT = 'nuwa:harmony-asr'
+// 系统短语音最多录制 60 秒。预留时间接收结束事件，并在事件丢失时收尾。
+const HARMONY_ASR_COMPLETION_TIMEOUT = 65_000
 
 /** 原生壳（Android/iOS）走设备语音识别：speechEngine=native 强制原生；无 API Key 时云端不可用回落原生 */
 const useNativeAsr = (): boolean => {
@@ -48,6 +59,16 @@ const describeRecordingError = (error: unknown): TranslationMessage => {
   return { key: 'voiceInputFailed' }
 }
 
+const describeHarmonyAsrError = (code?: HarmonyAsrError): TranslationMessage => {
+  if (code === 'permission-denied') {
+    return { key: 'voiceInputPermissionDeniedAndroid' }
+  }
+  if (code === 'unavailable') {
+    return { key: 'voiceInputSystemUnavailable' }
+  }
+  return { key: 'voiceInputFailed' }
+}
+
 /**
  * 语音输入（oneshot）：点击开始录音，再次点击结束并转写，结果交给 onText 填入输入框。
  * 转写中再次点击取消。录满 120 秒自动结束。
@@ -57,6 +78,7 @@ export const useVoiceInput = (onText: (text: string) => void) => {
   /** 本次录音已录秒数，只在录音中递增 */
   const [seconds, setSeconds] = useState(0)
   const recordingRef = useRef<Recording | null>(null)
+  const harmonyRecognitionRef = useRef<{ stop: () => void; cancel: () => void } | null>(null)
   const nativeActiveRef = useRef(false)
   const cleanupNativeRef = useRef<(() => void) | null>(null)
   const levelRef = useRef(0)
@@ -67,6 +89,7 @@ export const useVoiceInput = (onText: (text: string) => void) => {
 
   const cancelOperation = useCallback(() => {
     operationRef.current++
+    harmonyRecognitionRef.current?.cancel()
     cleanupNativeRef.current?.()
     cleanupNativeRef.current = null
     levelRef.current = 0
@@ -86,6 +109,10 @@ export const useVoiceInput = (onText: (text: string) => void) => {
   }, [cancelOperation])
 
   const finish = useCallback(async () => {
+    if (harmonyRecognitionRef.current) {
+      harmonyRecognitionRef.current.stop()
+      return
+    }
     if (nativeActiveRef.current) {
       const operation = operationRef.current
       cleanupNativeRef.current?.()
@@ -159,7 +186,8 @@ export const useVoiceInput = (onText: (text: string) => void) => {
   }, [cancel])
 
   const toggle = useCallback(async () => {
-    if (!AVAILABLE) {
+    const harmonyBridge = getHarmonySpeechBridge()
+    if (!harmonyBridge && !AVAILABLE) {
       return
     }
     if (status === 'recording') {
@@ -173,6 +201,93 @@ export const useVoiceInput = (onText: (text: string) => void) => {
     const operation = ++operationRef.current
     setStatus('recording')
     levelRef.current = 0
+
+    if (harmonyBridge) {
+      if (
+        !harmonyBridge.startSpeechRecognition ||
+        !harmonyBridge.stopSpeechRecognition ||
+        !harmonyBridge.cancelSpeechRecognition
+      ) {
+        setStatus('idle')
+        showToast(describeHarmonyAsrError('unavailable'))
+        return
+      }
+
+      const id = createHarmonySpeechId()
+      let started = false
+      let stopping = false
+      let timer: number | undefined
+      const close = () => {
+        window.clearTimeout(timer)
+        window.removeEventListener(HARMONY_ASR_EVENT, onState)
+        harmonyRecognitionRef.current = null
+      }
+      const cancelHarmonyRecognition = () => {
+        close()
+        try {
+          harmonyBridge.cancelSpeechRecognition?.(id)
+        } catch {
+          // 页面关闭后桥接可能已销毁。
+        }
+      }
+      const fail = () => {
+        cancelHarmonyRecognition()
+        setStatus('idle')
+        showToast(describeHarmonyAsrError())
+      }
+      const stop = () => {
+        if (!started) {
+          cancelHarmonyRecognition()
+          setStatus('idle')
+          return
+        }
+        if (stopping) {
+          return
+        }
+        stopping = true
+        setStatus('transcribing')
+        window.clearTimeout(timer)
+        timer = window.setTimeout(fail, 8_000)
+        try {
+          harmonyBridge.stopSpeechRecognition?.(id)
+        } catch {
+          fail()
+        }
+      }
+      const onState = (event: Event) => {
+        const detail = (event as CustomEvent<HarmonyAsrEvent>).detail
+        if (detail?.id !== id || operationRef.current !== operation) {
+          return
+        }
+        if (detail.state === 'started' && !started) {
+          started = true
+          window.clearTimeout(timer)
+          timer = window.setTimeout(stop, HARMONY_ASR_COMPLETION_TIMEOUT)
+        } else if (detail.state === 'done' || detail.state === 'error') {
+          close()
+          setStatus('idle')
+          if (detail.state === 'error') {
+            showToast(describeHarmonyAsrError(detail.code))
+            return
+          }
+          const text = detail.text?.trim()
+          if (text) {
+            onTextRef.current(text)
+          } else {
+            showToast({ key: 'voiceInputEmpty' })
+          }
+        }
+      }
+      harmonyRecognitionRef.current = { stop, cancel: cancelHarmonyRecognition }
+      window.addEventListener(HARMONY_ASR_EVENT, onState)
+      timer = window.setTimeout(fail, HARMONY_ASR_COMPLETION_TIMEOUT)
+      try {
+        harmonyBridge.startSpeechRecognition(id, useSettings.getState().locale)
+      } catch {
+        fail()
+      }
+      return
+    }
 
     if (useNativeAsr()) {
       try {
@@ -283,5 +398,13 @@ export const useVoiceInput = (onText: (text: string) => void) => {
   /** 原生安卓语音识别时的归一化音量信号，供频谱柱渲染 */
   const getLevel = useCallback(() => levelRef.current, [])
 
-  return { status, seconds, getAnalyser, getLevel, toggle, cancel, available: AVAILABLE }
+  return {
+    status,
+    seconds,
+    getAnalyser,
+    getLevel,
+    toggle,
+    cancel,
+    available: AVAILABLE || Boolean(getHarmonySpeechBridge()),
+  }
 }

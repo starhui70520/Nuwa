@@ -1,5 +1,10 @@
 import { showToast } from '../../components/base/toastState.js'
-import { DeepSeekMigration, isNativeAndroid, isNativeIos } from '../nativeBridge.js'
+import {
+  DeepSeekMigration,
+  isNativeAndroid,
+  isNativeIos,
+  type HarmonySpeechBridge,
+} from '../nativeBridge.js'
 import { clearDeepSeekAccountAuth, setDeepSeekAccountAuth, useSettings } from '../settings.js'
 
 const WEB_PKCE_STORAGE_KEY = 'nuwa:dsh-pkce-state'
@@ -7,10 +12,11 @@ const WEB_DEVICE_ID_KEY = 'nuwa:dsh-device-id'
 
 declare global {
   interface Window {
-    __NUWA_HARMONY__?: {
+    __NUWA_HARMONY__?: HarmonySpeechBridge & {
       startPlatformAuth?: () => void
       logoutPlatformAuth?: (token: string) => void
       openExportBrowser?: () => void
+      openPrivacyPolicy?: () => void
     }
   }
 }

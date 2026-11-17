@@ -11,6 +11,14 @@
     {
       "name": "EntryAbility_label",
       "value": "Nuwa"
+    },
+    {
+      "name": "privacy_policy_unavailable",
+      "value": "The privacy policy is unavailable right now. Please try again later."
+    },
+    {
+      "name": "microphone_permission_reason",
+      "value": "Nuwa uses the microphone to turn speech into text when you tap voice input."
     }
   ]
 }

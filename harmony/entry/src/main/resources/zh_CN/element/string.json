@@ -1,0 +1,12 @@
+{
+  "string": [
+    {
+      "name": "privacy_policy_unavailable",
+      "value": "暂时无法打开隐私政策，请稍后再试。"
+    },
+    {
+      "name": "microphone_permission_reason",
+      "value": "点击语音输入后，Nuwa 使用麦克风将您说的话转为文字。"
+    }
+  ]
+}

@@ -1,13 +1,20 @@
+import { common } from '@kit.AbilityKit';
+import { privacyManager } from '@kit.AppGalleryKit';
 import { webview } from '@kit.ArkWeb';
-import { util } from '@kit.ArkTS';
+import { url, util } from '@kit.ArkTS';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { http } from '@kit.NetworkKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { HarmonySpeechRecognition } from '../speech/HarmonySpeechRecognition';
+import { HarmonyTextToSpeech } from '../speech/HarmonyTextToSpeech';
 
 const PLATFORM_ORIGIN = 'https://platform.deepseek.com';
 const CLIENT_VERSION = '0.2.2';
+const APP_WEB_URL = 'resource://rawfile/web/index.html';
+const APP_BRIDGE_PERMISSION =
+  '{"javascriptProxyPermission":{"urlPermissionList":[{"scheme":"resource","host":"rawfile","port":"","path":""}]}}';
 
 interface PlatformIdProfile {
   name?: string;
@@ -38,27 +45,76 @@ interface PlatformEnvelope {
   data?: PlatformData;
 }
 
-class HarmonyBridge {
-  private onStartAuth: () => void;
-  private onLogoutAuth: (token: string) => void;
-  private onOpenExport: () => void;
+interface SpeechEvent {
+  id: string;
+  state: string;
+  text?: string;
+  code?: string;
+}
 
-  constructor(onStartAuth: () => void, onLogoutAuth: (token: string) => void, onOpenExport: () => void) {
-    this.onStartAuth = onStartAuth;
-    this.onLogoutAuth = onLogoutAuth;
-    this.onOpenExport = onOpenExport;
+interface HarmonyBridgeHandlers {
+  onStartAuth: () => void;
+  onLogoutAuth: (token: string) => void;
+  onOpenExport: () => void;
+  onOpenPrivacyPolicy: () => void;
+  getContext: () => common.UIAbilityContext;
+  onSpeechEvent: (name: string, detail: SpeechEvent) => void;
+}
+
+class HarmonyBridge {
+  private readonly handlers: HarmonyBridgeHandlers;
+  private readonly recognizer: HarmonySpeechRecognition;
+  private readonly speaker: HarmonyTextToSpeech;
+
+  constructor(handlers: HarmonyBridgeHandlers) {
+    this.handlers = handlers;
+    this.recognizer = new HarmonySpeechRecognition((id: string, state: string, text?: string, code?: string) => {
+      handlers.onSpeechEvent('nuwa:harmony-asr', { id, state, text, code });
+    });
+    this.speaker = new HarmonyTextToSpeech((id: string, state: string) => {
+      handlers.onSpeechEvent('nuwa:harmony-tts', { id, state });
+    });
   }
 
   startPlatformAuth(): void {
-    this.onStartAuth();
+    this.handlers.onStartAuth();
   }
 
   logoutPlatformAuth(token: string): void {
-    this.onLogoutAuth(token);
+    this.handlers.onLogoutAuth(token);
   }
 
   openExportBrowser(): void {
-    this.onOpenExport();
+    this.handlers.onOpenExport();
+  }
+
+  openPrivacyPolicy(): void {
+    this.handlers.onOpenPrivacyPolicy();
+  }
+
+  startSpeechRecognition(id: string, _locale: string): void {
+    this.recognizer.start(id, this.handlers.getContext());
+  }
+
+  stopSpeechRecognition(id: string): void {
+    this.recognizer.finish(id);
+  }
+
+  cancelSpeechRecognition(id: string): void {
+    this.recognizer.cancel(id);
+  }
+
+  speakText(id: string, text: string, locale: string): void {
+    this.speaker.speak(id, text, locale);
+  }
+
+  stopSpeaking(id: string): void {
+    this.speaker.stop(id);
+  }
+
+  destroySpeech(): void {
+    this.recognizer.cancel();
+    this.speaker.destroy();
   }
 }
 
@@ -214,17 +270,60 @@ struct Index {
     }
   );
 
-  private harmonyBridge: HarmonyBridge = new HarmonyBridge(
-    () => {
+  private harmonyBridge: HarmonyBridge = new HarmonyBridge({
+    onStartAuth: () => {
       void this.startPkceLogin();
     },
-    (token: string) => {
+    onLogoutAuth: (token: string) => {
       void this.logoutPlatformToken(token);
     },
-    () => {
+    onOpenExport: () => {
       this.openMigrationOverlay();
+    },
+    onOpenPrivacyPolicy: () => {
+      void this.openPrivacyPolicy();
+    },
+    getContext: () => this.getUIContext().getHostContext() as common.UIAbilityContext,
+    onSpeechEvent: (name: string, detail: SpeechEvent) => {
+      // A recognition result belongs only to Nuwa's bundled page.
+      try {
+        if (this.controller.getUrl().split(/[?#]/, 1)[0] === APP_WEB_URL) {
+          const event = `new CustomEvent(${JSON.stringify(name)}, { detail: ${JSON.stringify(detail)} })`;
+          const script = `if (location.href.split(/[?#]/, 1)[0] === ${JSON.stringify(APP_WEB_URL)}) ` +
+            `{ window.dispatchEvent(${event}); }`;
+          void this.controller.runJavaScript(script).catch(() => {});
+        }
+      } catch {
+        // The WebView may have been disposed while the service was returning a result.
+      }
     }
-  );
+  });
+
+  aboutToDisappear(): void {
+    this.harmonyBridge.destroySpeech();
+    try {
+      this.controller.deleteJavaScriptRegister('__NUWA_HARMONY__');
+    } catch {
+      // The WebView may already be detached.
+    }
+  }
+
+  private async openPrivacyPolicy(): Promise<void> {
+    const uiContext = this.getUIContext();
+    try {
+      const policy = privacyManager.getAppPrivacyMgmtInfo().privacyInfo.find(
+        (link) => link.type === privacyManager.AppPrivacyLinkType.PRIVACY_STATEMENT_LINK
+      );
+      const policyUrl = url.URL.parseURL(policy?.url ?? '');
+      if (policyUrl.protocol !== 'https:') {
+        throw new Error('Invalid privacy policy URL');
+      }
+      const context = uiContext.getHostContext() as common.UIAbilityContext;
+      await context.openLink(policyUrl.href, { appLinkingOnly: false });
+    } catch {
+      uiContext.getPromptAction().showToast({ message: $r('app.string.privacy_policy_unavailable') });
+    }
+  }
 
   private getDeviceId(): string {
     if (!this.cachedDeviceId) {
@@ -671,7 +770,7 @@ struct Index {
   build() {
     Stack() {
       Web({
-        src: $rawfile('web/index.html'),
+        src: APP_WEB_URL,
         controller: this.controller,
       })
         .width('100%')
@@ -685,8 +784,15 @@ struct Index {
         .javaScriptProxy({
           object: this.harmonyBridge,
           name: '__NUWA_HARMONY__',
-          methodList: ['startPlatformAuth', 'logoutPlatformAuth', 'openExportBrowser'],
+          methodList: [
+            'startPlatformAuth', 'logoutPlatformAuth', 'openExportBrowser', 'openPrivacyPolicy',
+            'startSpeechRecognition', 'stopSpeechRecognition', 'cancelSpeechRecognition', 'speakText', 'stopSpeaking'
+          ],
+          permission: APP_BRIDGE_PERMISSION,
           controller: this.controller,
+        })
+        .onPageBegin(() => {
+          this.harmonyBridge.destroySpeech();
         })
 
       if (this.migrationVisible) {

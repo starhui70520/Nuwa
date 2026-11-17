@@ -1,14 +1,14 @@
 import { Capacitor, registerPlugin } from '@capacitor/core'
 
 export type DeepSeekMigrationPlugin = {
-  openExportBrowser: () => Promise<{ filePath?: string; fileName?: string } | void>
+  openExportBrowser: () => Promise<{ filePath?: string; fileName?: string } | undefined>
   consumePendingExport: () => Promise<{
     hasPending: boolean
     filePath?: string
     fileName?: string
   }>
   clearPendingExport: () => Promise<void>
-  startPlatformAuth: () => Promise<{ token?: string; accountLabel?: string | null } | void>
+  startPlatformAuth: () => Promise<{ token?: string; accountLabel?: string | null } | undefined>
   consumePendingPlatformAuth: () => Promise<{
     hasPending: boolean
     token?: string
@@ -38,3 +38,25 @@ export const isNativeAndroid = (): boolean =>
 
 export const isNativeIos = (): boolean =>
   Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'ios'
+
+export type HarmonySpeechBridge = {
+  startSpeechRecognition?: (id: string, locale: string) => void
+  stopSpeechRecognition?: (id: string) => void
+  cancelSpeechRecognition?: (id: string) => void
+  speakText?: (id: string, text: string, locale: string) => void
+  stopSpeaking?: (id: string) => void
+}
+
+export type HarmonyAsrError = 'permission-denied' | 'unavailable' | 'failed'
+export type HarmonyAsrEvent =
+  | { id: string; state: 'started' }
+  | { id: string; state: 'done'; text?: string }
+  | { id: string; state: 'error'; code?: HarmonyAsrError }
+
+export type HarmonyTtsEvent = { id: string; state: 'playing' | 'done' | 'error' }
+
+export const getHarmonySpeechBridge = (): HarmonySpeechBridge | undefined =>
+  typeof window === 'undefined' ? undefined : window.__NUWA_HARMONY__
+
+let nextHarmonySpeechId = 0
+export const createHarmonySpeechId = (): string => `${Date.now()}-${++nextHarmonySpeechId}`

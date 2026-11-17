@@ -3,7 +3,15 @@ import type { TranslationMessage } from '../../i18n/index.js'
 import { ApiError } from '../api/client.js'
 import { classifyApiError } from '../api/errors.js'
 import { synthesize, TTS_SAMPLE_RATE } from '../api/speech.js'
-import { DeepSeekMigration, isNativeAndroid, isNativeIos } from '../nativeBridge.js'
+import {
+  createHarmonySpeechId,
+  DeepSeekMigration,
+  getHarmonySpeechBridge,
+  isNativeAndroid,
+  isNativeIos,
+  type HarmonySpeechBridge,
+  type HarmonyTtsEvent,
+} from '../nativeBridge.js'
 import { getActiveSecret, isUsingDeepSeekAccount, useSettings } from '../settings.js'
 
 /**
@@ -25,7 +33,9 @@ export const useReadAloud = create<ReadAloudState>(() => ({ messageId: null, sta
 const START_DELAY = 0.1
 
 let current: { controller: AbortController; context: AudioContext } | null = null
-let nativeCurrent: { cleanup: () => void } | null = null
+let nativeCurrent: { cleanup: () => void; stop: () => void } | null = null
+
+const HARMONY_TTS_EVENT = 'nuwa:harmony-tts'
 
 const canUseCloudTts = (): boolean => {
   const state = useSettings.getState()
@@ -69,10 +79,11 @@ const finish = (controller: AbortController) => {
 /** 停止当前朗读（发送、停止生成、切换会话等场景调用） */
 export const stopReadAloud = () => {
   if (nativeCurrent) {
-    nativeCurrent.cleanup()
+    const reading = nativeCurrent
     nativeCurrent = null
+    reading.cleanup()
     useReadAloud.setState({ messageId: null, status: 'idle' })
-    void DeepSeekMigration.stopSpeaking().catch(() => {})
+    reading.stop()
   }
   if (current) {
     const { controller } = current
@@ -111,6 +122,71 @@ export const describeReadAloudError = (error: unknown): TranslationMessage | str
   }
 }
 
+const startHarmonyReadAloud = (
+  bridge: HarmonySpeechBridge,
+  messageId: string,
+  text: string,
+  onError: (error: unknown) => void
+) => {
+  if (!bridge.speakText || !bridge.stopSpeaking) {
+    onError(new Error('TTS_UNAVAILABLE'))
+    return
+  }
+
+  const id = createHarmonySpeechId()
+  let startTimer: number | undefined
+  const cleanup = () => {
+    window.clearTimeout(startTimer)
+    window.removeEventListener(HARMONY_TTS_EVENT, onState)
+  }
+  const finish = () => {
+    if (nativeCurrent?.cleanup !== cleanup) {
+      return false
+    }
+    cleanup()
+    nativeCurrent = null
+    useReadAloud.setState({ messageId: null, status: 'idle' })
+    return true
+  }
+  const stop = () => {
+    try {
+      bridge.stopSpeaking?.(id)
+    } catch {
+      // 页面关闭后桥接可能已销毁。
+    }
+  }
+  const fail = () => {
+    if (finish()) {
+      stop()
+      onError(new Error('TTS_FAILED'))
+    }
+  }
+  const onState = (event: Event) => {
+    const detail = (event as CustomEvent<HarmonyTtsEvent>).detail
+    if (detail?.id !== id || nativeCurrent?.cleanup !== cleanup) {
+      return
+    }
+    if (detail.state === 'playing') {
+      window.clearTimeout(startTimer)
+      useReadAloud.setState({ status: 'playing' })
+    } else if (detail.state === 'done') {
+      finish()
+    } else if (detail.state === 'error') {
+      fail()
+    }
+  }
+
+  window.addEventListener(HARMONY_TTS_EVENT, onState)
+  nativeCurrent = { cleanup, stop }
+  useReadAloud.setState({ messageId, status: 'loading' })
+  startTimer = window.setTimeout(fail, 20_000)
+  try {
+    bridge.speakText(id, text, useSettings.getState().locale)
+  } catch {
+    fail()
+  }
+}
+
 /**
  * 开始朗读一条回复的正文；同一条正在朗读时调用等于停止。
  * 必须在点击事件中同步调用：AudioContext 需要用户手势才能出声。
@@ -126,10 +202,15 @@ export const toggleReadAloud = (
     return
   }
 
-  if (useNativeTts()) {
+  const harmonyBridge = getHarmonySpeechBridge()
+  if (harmonyBridge || useNativeTts()) {
     const cleaned = stripMarkdownForTts(text)
     if (!cleaned) {
       onError(new ApiError('http', 'empty', 400))
+      return
+    }
+    if (harmonyBridge) {
+      startHarmonyReadAloud(harmonyBridge, messageId, cleaned, onError)
       return
     }
     let targetUtteranceId: string | null = null
@@ -165,7 +246,10 @@ export const toggleReadAloud = (
     }
 
     window.addEventListener('dsapp:tts-state', onState)
-    nativeCurrent = { cleanup }
+    nativeCurrent = {
+      cleanup,
+      stop: () => void DeepSeekMigration.stopSpeaking().catch(() => {}),
+    }
     useReadAloud.setState({ messageId, status: 'loading' })
 
     void DeepSeekMigration.speakText({ text: cleaned, locale: useSettings.getState().locale })

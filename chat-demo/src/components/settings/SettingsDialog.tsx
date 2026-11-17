@@ -99,6 +99,7 @@ const SettingsContent = () => {
   const [appVersion, setAppVersion] = useState(getWebAppVersion)
   const checkingUpdate = useAppUpdateStore((state) => state.checking)
   const checkForUpdates = useAppUpdateStore((state) => state.checkForUpdates)
+  const harmonyBridge = typeof window === 'undefined' ? undefined : window.__NUWA_HARMONY__
 
   useEffect(() => {
     void getCurrentAppVersion().then(setAppVersion)
@@ -226,16 +227,30 @@ const SettingsContent = () => {
 
               <div className={styles.groupTitle}>{t('settingsGroupVoice')}</div>
               <div className={styles.groupCard}>
-                <div className={styles.groupRow}>
-                  <span className={styles.rowIcon}>
-                    <IconVolumeOutline18 />
-                  </span>
-                  <span className={styles.rowLabel}>{t('settingsTtsVoice')}</span>
-                  <TtsVoiceInlineSelect />
-                </div>
-                <SpeechEngineRow />
+                {harmonyBridge ? (
+                  <div className={styles.groupRow}>
+                    <span className={styles.rowIcon}>
+                      <IconVolumeOutline18 />
+                    </span>
+                    <span className={styles.rowLabel}>{t('settingsSpeechEngine')}</span>
+                    <span className={styles.rowValue}>{t('settingsSpeechEngineNative')}</span>
+                  </div>
+                ) : (
+                  <>
+                    <div className={styles.groupRow}>
+                      <span className={styles.rowIcon}>
+                        <IconVolumeOutline18 />
+                      </span>
+                      <span className={styles.rowLabel}>{t('settingsTtsVoice')}</span>
+                      <TtsVoiceInlineSelect />
+                    </div>
+                    <SpeechEngineRow />
+                  </>
+                )}
               </div>
-              <div className={styles.groupFooter}>{t('settingsVoiceHint')}</div>
+              <div className={styles.groupFooter}>
+                {t(harmonyBridge ? 'settingsHarmonyVoiceHint' : 'settingsVoiceHint')}
+              </div>
 
               <div className={styles.groupTitle}>{t('settingsGroupAbout')}</div>
               <div className={styles.groupCard}>
@@ -262,6 +277,21 @@ const SettingsContent = () => {
                     <IconChevronRightOutline14 />
                   </span>
                 </button>
+                {harmonyBridge?.openPrivacyPolicy && (
+                  <button
+                    type="button"
+                    className={clsx(styles.groupRow, styles.groupRowButton)}
+                    onClick={() => harmonyBridge.openPrivacyPolicy?.()}
+                  >
+                    <span className={styles.rowIcon}>
+                      <IconDocOutline18 />
+                    </span>
+                    <span className={styles.rowLabel}>{t('settingsPrivacyPolicy')}</span>
+                    <span className={styles.rowChevron}>
+                      <IconChevronRightOutline14 />
+                    </span>
+                  </button>
+                )}
                 <a
                   className={clsx(styles.groupRow, styles.groupRowButton)}
                   href={DOCS_URL}
