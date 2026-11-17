@@ -1,7 +1,7 @@
 {
   "app": {
-    "bundleName": "com.dsapp.chat",
-    "vendor": "nuwa",
+    "bundleName": "com.rankchord.nuwa",
+    "vendor": "rankchord",
     "versionCode": 10001,
     "versionName": "0.1.1",
     "icon": "$media:app_icon",
