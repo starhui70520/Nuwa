@@ -1,279 +1,461 @@
 import { useState } from 'react';
-import {
-  Check,
-  Copy,
-  Download,
-  ExternalLink,
-  HardDrive,
-  QrCode,
-  ShieldCheck,
-  Smartphone,
-  Sparkles,
-  Clock,
-  Cpu,
-  History
-} from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
-import type { IosConfig, Platform, PublicReleasesResponse, ReleaseItem } from '../types';
-import { detectClientOS, formatBytes, formatDate, getPlatformLabel } from '../utils';
+import type { HarmonyConfig, IosConfig, PublicReleasesResponse, ReleaseItem } from '../types';
+import { detectClientOS, formatBytes, formatDate } from '../utils';
 
 interface PublicPortalProps {
   data: PublicReleasesResponse | null;
   loading: boolean;
   error: string | null;
   onRefresh: () => void;
+  onOpenAdmin: () => void;
 }
 
-export function PublicPortal({ data, loading, error, onRefresh }: PublicPortalProps) {
-  const [filter, setFilter] = useState<'all' | Platform>('all');
+interface FeatureRow {
+  eyebrow: string;
+  title: string;
+  description: string;
+  image: string;
+}
+
+const NUWA_FEATURES: FeatureRow[] = [
+  {
+    eyebrow: '01 · 自由选择',
+    title: '你的算力你决定，按需切换模型',
+    description:
+      '支持深度思考、联网搜索与语音输入。无论是日常问答还是复杂写作，都可以按自己的习惯选择服务商与模型。',
+    image: '/nuwa-showcase/01-compute-choice.jpg'
+  },
+  {
+    eyebrow: '02 · 账号授权',
+    title: 'DeepSeek 账号授权即用',
+    description:
+      '直接通过官方账号授权登录，不用再去网页端到处复制配置密钥，打开应用就能开始对话。',
+    image: '/nuwa-showcase/02-deepseek-oauth.jpg'
+  },
+  {
+    eyebrow: '03 · 灵活接入',
+    title: '自建或第三方模型也能接进来',
+    description:
+      '如果你有自己部署的模型或常用的第三方服务，只需填好地址与名称即可接入，所有配置仅保存在你的手机里。',
+    image: '/nuwa-showcase/03-custom-api.jpg'
+  },
+  {
+    eyebrow: '04 · 历史迁移',
+    title: '旧对话一键迁移，不再丢失记忆',
+    description:
+      '支持登录后一键同步官方历史会话，也可以直接导入导出的压缩包，把过去聊过的内容完整带过来。',
+    image: '/nuwa-showcase/04-oneclick-migrate.jpg'
+  },
+  {
+    eyebrow: '05 · 本地备份',
+    title: '会话留在本机，随时打包导出',
+    description:
+      '所有聊天记录与图片都安安静静保存在本地设备中，换手机时一键导出备份，安全又省心。',
+    image: '/nuwa-showcase/05-local-backup.jpg'
+  },
+  {
+    eyebrow: '06 · 额度透明',
+    title: '沿用原账号额度，余额随时可看',
+    description:
+      '直接消耗原账号额度，侧边栏随时查看剩余金额与历史记录检索，用多少一目了然。',
+    image: '/nuwa-showcase/06-balance-monitor.jpg'
+  }
+];
+
+export function PublicPortal({
+  data,
+  loading,
+  error,
+  onRefresh
+}: PublicPortalProps) {
   const [qrRelease, setQrRelease] = useState<ReleaseItem | null>(null);
-  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [lightboxFeature, setLightboxFeature] = useState<FeatureRow | null>(null);
   const detectedOS = detectClientOS();
 
-  const handleCopySha = async (id: string, sha256: string) => {
-    try {
-      await navigator.clipboard.writeText(sha256);
-      setCopiedId(id);
-      setTimeout(() => setCopiedId((prev) => (prev === id ? null : prev)), 2000);
-    } catch {
-      // ignore clipboard errors
-    }
-  };
-
-  const getDownloadHref = (id: string) => `/api/releases/${encodeURIComponent(id)}/download`;
+  const downloadBase = (data?.downloadBaseUrl || '').replace(/\/+$/, '');
+  const getDownloadHref = (id: string) =>
+    `${downloadBase}/api/releases/${encodeURIComponent(id)}/download`;
 
   const getAbsoluteDownloadUrl = (id: string) => {
+    if (downloadBase) return getDownloadHref(id);
     if (typeof window === 'undefined') return getDownloadHref(id);
     return `${window.location.origin}${getDownloadHref(id)}`;
   };
 
-  const releases = data?.releases ?? [];
-  const filteredReleases = filter === 'all' ? releases : releases.filter((r) => r.platform === filter);
+  const androidLatest = data?.latest.android ?? null;
+  const androidReleases = (data?.releases ?? []).filter((r) => r.platform === 'android');
 
   return (
-    <div className="space-y-16">
-      {/* Hero Section */}
-      <section className="relative pt-10 pb-4">
-        <div className="pointer-events-none absolute -top-20 left-1/2 h-72 w-[680px] -translate-x-1/2 rounded-full bg-cyan-500/10 blur-[120px]" />
-
-        <div className="relative max-w-3xl space-y-5">
-          <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.03] px-3.5 py-1 text-xs text-zinc-300">
-            <Sparkles className="h-3.5 w-3.5 text-cyan-400" />
-            <span>RankChord · General Intelligence Systems, Built for Real Work</span>
+    <div>
+      {/* Consumer Hero */}
+      <section className="site-container pt-[64px] pb-[76px] max-[680px]:pt-[42px] max-[680px]:pb-[52px] text-center">
+        <div className="max-w-[780px] mx-auto">
+          <div className="inline-flex items-center justify-center mb-6">
+            <img
+              src="/logo.png"
+              alt="Nuwa"
+              className="w-[84px] h-[84px] max-[680px]:w-[72px] max-[680px]:h-[72px] rounded-[22px] border border-[#e8e8e8] shadow-[0_10px_30px_rgba(24,24,27,0.08)] object-cover"
+            />
           </div>
 
-          <h1 className="text-4xl font-semibold tracking-tight text-white sm:text-5xl">
-            Nuwa 跨端客户端发布中心
+          <h1 className="text-[clamp(48px,5.4vw,68px)] max-[680px]:text-[40px] font-medium tracking-[-2px] max-[680px]:tracking-[-1.4px] leading-[1.05] text-[#18181b]">
+            Nuwa
           </h1>
-          <p className="text-base leading-relaxed text-zinc-400 sm:text-lg">
-            由 <a href="https://rankchord.com/" target="_blank" rel="noreferrer" className="text-zinc-200 underline decoration-white/25 underline-offset-4 hover:text-cyan-300">RankChord（秩弦科技）</a> 构建的多端 AI 对话与历史会话迁移客户端。所有安装包均通过 MinIO 对象存储分发，并提供 SHA-256 完整性校验。
+
+          <p className="mt-[18px] max-w-[560px] mx-auto text-[17px] max-[680px]:text-[15px] leading-[1.7] text-[#5d6168]">
+            你的专属 AI 对话伙伴。自由切换模型、一键迁移旧对话，把所有聊天记录安心留在本机。
           </p>
 
-          <div className="flex flex-wrap items-center gap-3 pt-1 text-xs text-zinc-400">
-            <span className="inline-flex items-center gap-1.5 rounded-md border border-white/10 bg-zinc-900/70 px-2.5 py-1 font-mono">
-              <ShieldCheck className="h-3.5 w-3.5 text-emerald-400" />
-              SHA-256 校验
-            </span>
-            <span className="inline-flex items-center gap-1.5 rounded-md border border-white/10 bg-zinc-900/70 px-2.5 py-1 font-mono">
-              <HardDrive className="h-3.5 w-3.5 text-cyan-400" />
-              存储引擎: {data?.storageDriver === 'minio' ? 'MinIO Object Storage' : 'Local Fallback'}
-            </span>
-            <span className="inline-flex items-center gap-1.5 rounded-md border border-white/10 bg-zinc-900/70 px-2.5 py-1 font-mono">
-              <Cpu className="h-3.5 w-3.5 text-indigo-400" />
-              Bundle: com.rankchord.nuwa
-            </span>
+          <div className="mt-[28px] flex flex-wrap justify-center gap-[10px]">
+            {androidLatest ? (
+              <a
+                href={getDownloadHref(androidLatest.id)}
+                className="rc-pill-dark min-w-[174px]"
+              >
+                <span>下载 Android 版 v{androidLatest.version}</span>
+                <span aria-hidden="true">↓</span>
+              </a>
+            ) : (
+              <a href="#downloads" className="rc-pill-dark min-w-[174px]">
+                <span>立即获取</span>
+                <span aria-hidden="true">↓</span>
+              </a>
+            )}
+
+            <a href="#features" className="rc-pill-outline min-w-[174px]">
+              <span>了解功能</span>
+            </a>
           </div>
         </div>
       </section>
 
       {error && (
-        <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-200 flex items-center justify-between">
-          <span>加载版本信息失败：{error}</span>
-          <button
-            type="button"
-            onClick={onRefresh}
-            className="rounded-lg border border-red-400/30 px-3 py-1 text-xs hover:bg-red-500/20"
-          >
-            重试
-          </button>
+        <div className="site-container pb-8">
+          <div className="border border-[#e8e8e8] rounded-[14px] px-5 py-4 flex items-center justify-between text-[14px] text-[#18181b] bg-[#f6f6f6]">
+            <span>页面信息加载失败：{error}</span>
+            <button type="button" onClick={onRefresh} className="rc-text-link">
+              重新加载
+            </button>
+          </div>
         </div>
       )}
 
       {/* Platform Download Cards */}
-      <section className="grid gap-5 md:grid-cols-3">
-        <PlatformCard
-          title="Android 客户端"
-          subtitle="适用于 Android 8.0 及以上设备 (.apk)"
-          platform="android"
-          recommended={detectedOS === 'android'}
-          release={data?.latest.android ?? null}
-          loading={loading}
-          downloadHref={data?.latest.android ? getDownloadHref(data.latest.android.id) : undefined}
-          onShowQr={(rel) => setQrRelease(rel)}
-        />
-
-        <PlatformCard
-          title="HarmonyOS 鸿蒙版"
-          subtitle="适用于 HarmonyOS / OpenHarmony (.hap / .app)"
-          platform="harmony"
-          recommended={detectedOS === 'harmony'}
-          release={data?.latest.harmony ?? null}
-          loading={loading}
-          downloadHref={data?.latest.harmony ? getDownloadHref(data.latest.harmony.id) : undefined}
-          onShowQr={(rel) => setQrRelease(rel)}
-        />
-
-        <IosCard
-          ios={data?.ios ?? null}
-          recommended={detectedOS === 'ios'}
-          loading={loading}
-        />
-      </section>
-
-      {/* Release History */}
-      <section id="history" className="space-y-5">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-center gap-2.5">
-            <History className="h-5 w-5 text-cyan-400" />
-            <h2 className="text-xl font-semibold text-white">历史版本与更新日志</h2>
+      <section
+        id="downloads"
+        className="border-t border-[#e8e8e8] py-[88px] max-[680px]:py-[64px]"
+      >
+        <div className="site-container">
+          <div className="mb-[44px] max-[680px]:mb-[32px]">
+            <p className="eyebrow">DOWNLOAD</p>
+            <h2 className="mt-[14px] text-[clamp(36px,3.6vw,48px)] font-medium tracking-[-1.2px] leading-[1.08] text-[#18181b]">
+              下载客户端
+            </h2>
           </div>
 
-          <div className="inline-flex rounded-lg border border-white/10 bg-zinc-900/80 p-1 text-xs">
-            {(['all', 'android', 'harmony'] as const).map((tab) => (
-              <button
-                key={tab}
-                type="button"
-                onClick={() => setFilter(tab)}
-                className={`rounded-md px-3 py-1.5 font-medium transition ${
-                  filter === tab
-                    ? 'bg-zinc-800 text-white shadow-sm'
-                    : 'text-zinc-400 hover:text-zinc-200'
-                }`}
-              >
-                {tab === 'all' ? '全部平台' : getPlatformLabel(tab)}
-              </button>
-            ))}
-          </div>
-        </div>
+          <div className="grid grid-cols-1 min-[720px]:grid-cols-2 min-[1080px]:grid-cols-3 gap-[28px]">
+            {/* Android — Official Direct APK */}
+            <article
+              className={`rounded-[18px] border bg-white p-[28px] flex flex-col justify-between ${
+                detectedOS === 'android' ? 'border-[#18181b]' : 'border-[#e8e8e8]'
+              }`}
+            >
+              <div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="rc-tag">官网直装包</span>
+                  {detectedOS === 'android' && <span className="rc-tag-dark">当前设备</span>}
+                </div>
 
-        {loading ? (
-          <div className="rounded-2xl border border-white/10 bg-zinc-900/40 p-10 text-center text-sm text-zinc-500">
-            正在从服务端读取版本列表...
-          </div>
-        ) : filteredReleases.length === 0 ? (
-          <div className="rounded-2xl border border-dashed border-white/10 bg-zinc-900/30 p-10 text-center text-sm text-zinc-400">
-            当前暂无已发布的安装包，请前往右上角「发布管理」上传首个版本。
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {filteredReleases.map((item) => (
-              <div
-                key={item.id}
-                className="group rounded-2xl border border-white/10 bg-[#111114] p-5 transition hover:border-white/20"
-              >
-                <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-                  <div className="space-y-2">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span
-                        className={`rounded-md px-2 py-0.5 text-xs font-medium ${
-                          item.platform === 'android'
-                            ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/25'
-                            : 'bg-cyan-500/15 text-cyan-300 border border-cyan-500/25'
-                        }`}
-                      >
-                        {getPlatformLabel(item.platform)}
-                      </span>
-                      <span className="font-mono text-base font-semibold text-white">
-                        v{item.version}
-                      </span>
-                      <span className="font-mono text-xs text-zinc-500">
-                        build {item.versionCode}
-                      </span>
-                      {item.isLatest && (
-                        <span className="rounded-full bg-cyan-500/20 px-2.5 py-0.5 text-[11px] font-medium text-cyan-300">
-                          Latest
+                <h3 className="mt-5 text-[24px] font-medium text-[#18181b]">Android 版</h3>
+                <p className="mt-2.5 text-[14px] leading-[1.7] text-[#5d6168]">
+                  官方安装包直接下载安装，支持 Android 8.0 及以上手机与平板。
+                </p>
+
+                <div className="mt-6 border-t border-[#e8e8e8] pt-4 space-y-2 text-[13px]">
+                  {loading ? (
+                    <p className="text-[#686d74]">正在获取最新版本…</p>
+                  ) : androidLatest ? (
+                    <>
+                      <div className="flex justify-between">
+                        <span className="text-[#686d74]">最新版本</span>
+                        <span className="text-[#18181b] font-medium">v{androidLatest.version}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-[#686d74]">安装包大小</span>
+                        <span className="text-[#18181b]">{formatBytes(androidLatest.fileSize)}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-[#686d74]">更新时间</span>
+                        <span className="text-[#18181b]">
+                          {formatDate(androidLatest.createdAt).split(' ')[0]}
                         </span>
-                      )}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="flex justify-between">
+                      <span className="text-[#686d74]">当前状态</span>
+                      <span className="text-[#686d74]">即将提供下载</span>
                     </div>
-
-                    <p className="whitespace-pre-line text-sm text-zinc-300">{item.changelog}</p>
-
-                    <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 pt-1 text-xs text-zinc-500 font-mono">
-                      <span>文件: {item.fileName}</span>
-                      <span>大小: {formatBytes(item.fileSize)}</span>
-                      <span>发布于: {formatDate(item.createdAt)}</span>
-                      <span>下载次数: {item.downloads}</span>
-                    </div>
-                  </div>
-
-                  <div className="flex flex-wrap items-center gap-2.5 shrink-0">
-                    <button
-                      type="button"
-                      onClick={() => handleCopySha(item.id, item.sha256)}
-                      title={item.sha256}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-zinc-900 px-3 py-2 font-mono text-xs text-zinc-300 transition hover:border-white/25 hover:text-white"
-                    >
-                      {copiedId === item.id ? (
-                        <>
-                          <Check className="h-3.5 w-3.5 text-emerald-400" />
-                          <span>已复制 SHA-256</span>
-                        </>
-                      ) : (
-                        <>
-                          <Copy className="h-3.5 w-3.5 text-zinc-400" />
-                          <span>SHA256: {item.sha256.slice(0, 10)}...</span>
-                        </>
-                      )}
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setQrRelease(item)}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-zinc-900 px-3 py-2 text-xs text-zinc-300 transition hover:border-white/25 hover:text-white"
-                    >
-                      <QrCode className="h-3.5 w-3.5" />
-                      <span>扫码</span>
-                    </button>
-
-                    <a
-                      href={getDownloadHref(item.id)}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-white px-4 py-2 text-xs font-medium text-zinc-950 transition hover:bg-zinc-200"
-                    >
-                      <Download className="h-3.5 w-3.5" />
-                      <span>下载安装包</span>
-                    </a>
-                  </div>
+                  )}
                 </div>
               </div>
-            ))}
+
+              <div className="mt-7 flex items-center gap-2.5">
+                {androidLatest ? (
+                  <>
+                    <a
+                      href={getDownloadHref(androidLatest.id)}
+                      className="rc-pill-dark flex-1"
+                    >
+                      <span>下载安装包</span>
+                      <span aria-hidden="true">↓</span>
+                    </a>
+                    <button
+                      type="button"
+                      onClick={() => setQrRelease(androidLatest)}
+                      className="rc-pill-soft"
+                    >
+                      扫码
+                    </button>
+                  </>
+                ) : (
+                  <button type="button" disabled className="rc-pill-soft w-full">
+                    暂未发布安装包
+                  </button>
+                )}
+              </div>
+            </article>
+
+            {/* HarmonyOS — Store Redirect */}
+            <StoreCard
+              title="HarmonyOS 鸿蒙版"
+              storeName="华为应用市场"
+              recommended={detectedOS === 'harmony'}
+              loading={loading}
+              isReady={Boolean(
+                data?.harmony && data.harmony.status === 'appgallery' && data.harmony.url
+              )}
+              badge={
+                data?.harmony?.status === 'appgallery' && data?.harmony?.url
+                  ? '华为应用市场'
+                  : '即将上架'
+              }
+              note={
+                data?.harmony?.note || '鸿蒙版正在上架审核中，即将登陆华为应用市场。'
+              }
+              url={data?.harmony?.url || ''}
+              actionText="前往华为应用市场"
+              disabledText="即将上架华为应用市场"
+            />
+
+            {/* iOS — Store Redirect */}
+            <StoreCard
+              title="iOS 版"
+              storeName={
+                data?.ios?.status === 'testflight' ? 'TestFlight' : 'App Store'
+              }
+              recommended={detectedOS === 'ios'}
+              loading={loading}
+              isReady={Boolean(
+                data?.ios && data.ios.status !== 'coming_soon' && data.ios.url
+              )}
+              badge={
+                data?.ios?.status === 'appstore'
+                  ? 'App Store'
+                  : data?.ios?.status === 'testflight'
+                    ? 'TestFlight'
+                    : '即将上架'
+              }
+              note={
+                data?.ios?.note || 'iOS 版正在适配中，即将上架 App Store。'
+              }
+              url={data?.ios?.url || ''}
+              actionText={
+                data?.ios?.status === 'testflight'
+                  ? '前往 TestFlight 获取'
+                  : '前往 App Store 下载'
+              }
+              disabledText="即将上架 App Store"
+            />
           </div>
-        )}
+        </div>
       </section>
+
+      {/* Feature Showcase — Spacious 1 Row = 1 Image + 1 Text Block */}
+      <section
+        id="features"
+        className="border-t border-[#e8e8e8] py-[96px] max-[680px]:py-[68px]"
+      >
+        <div className="site-container">
+          <div className="max-w-[640px] mb-[64px] max-[680px]:mb-[44px]">
+            <p className="eyebrow">FEATURES</p>
+            <h2 className="mt-[14px] text-[clamp(36px,3.6vw,48px)] font-medium tracking-[-1.2px] leading-[1.08] text-[#18181b]">
+              为日常使用而设计
+            </h2>
+          </div>
+
+          <div className="divide-y divide-[#e8e8e8] border-t border-b border-[#e8e8e8]">
+            {NUWA_FEATURES.map((feat, idx) => {
+              const imageRight = idx % 2 === 1;
+              return (
+                <div
+                  key={feat.eyebrow}
+                  className="py-[68px] max-[680px]:py-[48px] grid grid-cols-1 min-[860px]:grid-cols-2 items-center gap-[48px] min-[1080px]:gap-[88px]"
+                >
+                  <div
+                    className={`flex justify-center ${
+                      imageRight ? 'min-[860px]:order-2' : 'min-[860px]:order-1'
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setLightboxFeature(feat)}
+                      className="block w-full max-w-[330px] rounded-[20px] overflow-hidden border border-[#e8e8e8] bg-[#f6f6f6] shadow-[0_12px_36px_rgba(24,24,27,0.06)] cursor-zoom-in group"
+                    >
+                      <img
+                        src={feat.image}
+                        alt={feat.title}
+                        loading="lazy"
+                        className="w-full h-auto block transition-transform duration-300 group-hover:scale-[1.015]"
+                      />
+                    </button>
+                  </div>
+
+                  <div
+                    className={`max-w-[480px] ${
+                      imageRight
+                        ? 'min-[860px]:order-1 min-[860px]:justify-self-end'
+                        : 'min-[860px]:order-2'
+                    }`}
+                  >
+                    <p className="eyebrow">{feat.eyebrow}</p>
+                    <h3 className="mt-4 text-[clamp(26px,2.5vw,34px)] font-medium tracking-[-0.6px] leading-[1.25] text-[#18181b]">
+                      {feat.title}
+                    </h3>
+                    <p className="mt-4 text-[16px] leading-[1.8] text-[#5d6168] m-0">
+                      {feat.description}
+                    </p>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </section>
+
+      {/* Consumer-friendly Changelog (Only shown when Android builds exist) */}
+      {androidReleases.length > 0 && (
+        <section
+          id="releases"
+          className="border-t border-[#e8e8e8] py-[88px] max-[680px]:py-[64px]"
+        >
+          <div className="site-container grid grid-cols-1 min-[1041px]:grid-cols-[minmax(280px,0.72fr)_minmax(0,1.28fr)] items-start gap-[clamp(40px,6vw,96px)]">
+            <div>
+              <p className="eyebrow">UPDATES</p>
+              <h2 className="mt-[14px] text-[clamp(34px,3.4vw,46px)] font-medium tracking-[-1.2px] leading-[1.08] text-[#18181b]">
+                更新日志
+              </h2>
+              <p className="mt-4 text-[14px] leading-[1.7] text-[#686d74]">
+                查看 Android 官方安装包的历史更新内容与下载。
+              </p>
+            </div>
+
+            <div className="w-full border-b border-[#e8e8e8]">
+              {androidReleases.map((item) => (
+                <article
+                  key={item.id}
+                  className="border-t border-[#e8e8e8] py-[28px]"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5">
+                      <h3 className="text-[22px] font-medium text-[#18181b] m-0">
+                        v{item.version}
+                      </h3>
+                      {item.isLatest && <span className="rc-tag-dark">最新版</span>}
+                    </div>
+                    <time className="text-[13px] text-[#686d74]">
+                      {formatDate(item.createdAt).split(' ')[0]}
+                    </time>
+                  </div>
+
+                  <p className="mt-3 whitespace-pre-line text-[15px] leading-[1.8] text-[#4b4f55]">
+                    {item.changelog}
+                  </p>
+
+                  <div className="mt-5 flex items-center justify-between gap-4">
+                    <span className="text-[13px] text-[#686d74]">
+                      安装包大小：{formatBytes(item.fileSize)}
+                    </span>
+
+                    <a href={getDownloadHref(item.id)} className="rc-text-link">
+                      <span>下载此版本</span>
+                      <span aria-hidden="true">↓</span>
+                    </a>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </div>
+        </section>
+      )}
+
+      {/* Lightbox Modal */}
+      {lightboxFeature && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
+          onClick={() => setLightboxFeature(null)}
+        >
+          <div
+            className="relative max-w-[440px] w-full rounded-[20px] border border-[#e8e8e8] bg-white p-4 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <img
+              src={lightboxFeature.image}
+              alt={lightboxFeature.title}
+              className="w-full max-h-[78vh] object-contain rounded-[12px]"
+            />
+            <div className="mt-3 px-1 flex items-center justify-between gap-3">
+              <p className="text-[15px] font-medium text-[#18181b] m-0">
+                {lightboxFeature.title}
+              </p>
+              <button
+                type="button"
+                onClick={() => setLightboxFeature(null)}
+                className="rc-pill-soft !min-h-[34px] !px-4 !text-[12px]"
+              >
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* QR Code Modal */}
       {qrRelease && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4 backdrop-blur-[2px]"
           onClick={() => setQrRelease(null)}
         >
           <div
-            className="w-full max-w-sm rounded-2xl border border-white/15 bg-[#121216] p-6 text-center shadow-2xl"
+            className="w-full max-w-[340px] rounded-[20px] border border-[#e8e8e8] bg-white p-7 text-center shadow-[0_18px_50px_rgba(24,24,27,0.12)]"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 className="text-base font-semibold text-white">
-              扫码下载 {getPlatformLabel(qrRelease.platform)} v{qrRelease.version}
+            <h3 className="text-[20px] font-medium text-[#18181b]">
+              扫码下载 Android 版
             </h3>
-            <p className="mt-1 text-xs text-zinc-400">
-              使用手机相机或浏览器扫描二维码直接获取安装包
+            <p className="mt-1.5 text-[13px] text-[#5d6168]">
+              使用手机相机或浏览器扫码即可下载 v{qrRelease.version}
             </p>
-            <div className="my-5 inline-flex rounded-2xl bg-white p-4">
-              <QRCodeSVG value={getAbsoluteDownloadUrl(qrRelease.id)} size={184} />
+
+            <div className="my-6 inline-flex rounded-[14px] border border-[#e8e8e8] bg-white p-4">
+              <QRCodeSVG value={getAbsoluteDownloadUrl(qrRelease.id)} size={176} />
             </div>
-            <p className="truncate font-mono text-[11px] text-zinc-500">{qrRelease.fileName}</p>
+
             <button
               type="button"
               onClick={() => setQrRelease(null)}
-              className="mt-4 w-full rounded-lg border border-white/10 bg-zinc-900 py-2 text-xs text-zinc-300 hover:bg-zinc-800"
+              className="w-full rc-pill-soft"
             >
               关闭
             </button>
@@ -284,204 +466,77 @@ export function PublicPortal({ data, loading, error, onRefresh }: PublicPortalPr
   );
 }
 
-interface PlatformCardProps {
+interface StoreCardProps {
   title: string;
-  subtitle: string;
-  platform: Platform;
+  storeName: string;
   recommended: boolean;
-  release: ReleaseItem | null;
   loading: boolean;
-  downloadHref?: string;
-  onShowQr: (release: ReleaseItem) => void;
+  isReady: boolean;
+  badge: string;
+  note: string;
+  url: string;
+  actionText: string;
+  disabledText: string;
 }
 
-function PlatformCard({
+function StoreCard({
   title,
-  subtitle,
-  platform,
+  storeName,
   recommended,
-  release,
   loading,
-  downloadHref,
-  onShowQr
-}: PlatformCardProps) {
+  isReady,
+  badge,
+  note,
+  url,
+  actionText,
+  disabledText
+}: StoreCardProps) {
   return (
-    <div
-      className={`relative flex flex-col justify-between rounded-2xl border p-6 transition ${
-        recommended
-          ? 'border-cyan-400/50 bg-gradient-to-b from-cyan-500/10 to-[#111114] shadow-[0_0_40px_-15px_rgba(34,211,238,0.25)]'
-          : 'border-white/10 bg-[#111114] hover:border-white/20'
+    <article
+      className={`rounded-[18px] border bg-white p-[28px] flex flex-col justify-between ${
+        recommended ? 'border-[#18181b]' : 'border-[#e8e8e8]'
       }`}
     >
-      <div className="space-y-4">
-        <div className="flex items-start justify-between gap-2">
-          <div className="flex items-center gap-2.5">
-            <div
-              className={`flex h-10 w-10 items-center justify-center rounded-xl border ${
-                platform === 'android'
-                  ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
-                  : 'border-cyan-500/30 bg-cyan-500/10 text-cyan-300'
-              }`}
-            >
-              <Smartphone className="h-5 w-5" />
-            </div>
-            <div>
-              <h3 className="text-base font-semibold text-white">{title}</h3>
-              <p className="text-xs text-zinc-400">{subtitle}</p>
-            </div>
-          </div>
-
-          {recommended && (
-            <span className="shrink-0 rounded-full bg-cyan-400/20 px-2.5 py-0.5 text-[11px] font-medium text-cyan-300">
-              当前设备推荐
-            </span>
-          )}
+      <div>
+        <div className="flex items-center justify-between gap-2">
+          <span className="rc-tag">{badge}</span>
+          {recommended && <span className="rc-tag-dark">当前设备</span>}
         </div>
 
-        {loading ? (
-          <div className="h-24 animate-pulse rounded-xl bg-white/[0.03]" />
-        ) : release ? (
-          <div className="space-y-2 rounded-xl border border-white/5 bg-black/30 p-3.5 text-xs">
-            <div className="flex items-center justify-between">
-              <span className="text-zinc-400">最新版本</span>
-              <span className="font-mono font-semibold text-white">
-                v{release.version} ({release.versionCode})
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-zinc-400">包体大小</span>
-              <span className="font-mono text-zinc-200">{formatBytes(release.fileSize)}</span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-zinc-400">更新时间</span>
-              <span className="font-mono text-zinc-300">{formatDate(release.createdAt)}</span>
-            </div>
+        <h3 className="mt-5 text-[24px] font-medium text-[#18181b]">{title}</h3>
+        <p className="mt-2.5 text-[14px] leading-[1.7] text-[#5d6168]">
+          {loading ? '正在加载状态…' : note}
+        </p>
+
+        <div className="mt-6 border-t border-[#e8e8e8] pt-4 space-y-2 text-[13px]">
+          <div className="flex justify-between">
+            <span className="text-[#686d74]">获取方式</span>
+            <span className="text-[#18181b]">{storeName}</span>
           </div>
-        ) : (
-          <div className="rounded-xl border border-dashed border-white/10 bg-black/20 p-4 text-xs text-zinc-500">
-            暂未发布该平台安装包，请在管理后台上传。
+          <div className="flex justify-between">
+            <span className="text-[#686d74]">上架状态</span>
+            <span className="text-[#686d74]">{isReady ? '已上架' : '准备中'}</span>
           </div>
-        )}
-      </div>
-
-      <div className="mt-5 flex items-center gap-2">
-        {release && downloadHref ? (
-          <>
-            <a
-              href={downloadHref}
-              className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl bg-white px-4 py-2.5 text-sm font-medium text-zinc-950 transition hover:bg-zinc-200"
-            >
-              <Download className="h-4 w-4" />
-              <span>立即下载</span>
-            </a>
-            <button
-              type="button"
-              onClick={() => onShowQr(release)}
-              title="扫码下载"
-              className="inline-flex items-center justify-center rounded-xl border border-white/10 bg-zinc-900 p-2.5 text-zinc-300 transition hover:border-white/25 hover:text-white"
-            >
-              <QrCode className="h-4 w-4" />
-            </button>
-          </>
-        ) : (
-          <button
-            type="button"
-            disabled
-            className="w-full cursor-not-allowed rounded-xl border border-white/10 bg-zinc-900/60 py-2.5 text-sm text-zinc-500"
-          >
-            暂无可下载版本
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function IosCard({
-  ios,
-  recommended,
-  loading
-}: {
-  ios: IosConfig | null;
-  recommended: boolean;
-  loading: boolean;
-}) {
-  const isReady = Boolean(ios && ios.status !== 'coming_soon' && ios.url);
-  const badgeText =
-    ios?.status === 'appstore'
-      ? 'App Store'
-      : ios?.status === 'testflight'
-        ? 'TestFlight 公测'
-        : '敬请期待';
-
-  return (
-    <div
-      className={`relative flex flex-col justify-between rounded-2xl border p-6 transition ${
-        recommended
-          ? 'border-indigo-400/50 bg-gradient-to-b from-indigo-500/10 to-[#111114]'
-          : 'border-white/10 bg-[#111114] hover:border-white/20'
-      }`}
-    >
-      <div className="space-y-4">
-        <div className="flex items-start justify-between gap-2">
-          <div className="flex items-center gap-2.5">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-indigo-500/30 bg-indigo-500/10 text-indigo-300">
-              <Smartphone className="h-5 w-5" />
-            </div>
-            <div>
-              <h3 className="text-base font-semibold text-white">iOS 客户端</h3>
-              <p className="text-xs text-zinc-400">iPhone / iPad 跳转分发</p>
-            </div>
-          </div>
-
-          <span
-            className={`shrink-0 rounded-full px-2.5 py-0.5 text-[11px] font-medium ${
-              isReady
-                ? 'bg-indigo-400/20 text-indigo-300'
-                : 'bg-zinc-800 text-zinc-400'
-            }`}
-          >
-            {badgeText}
-          </span>
         </div>
-
-        {loading ? (
-          <div className="h-24 animate-pulse rounded-xl bg-white/[0.03]" />
-        ) : (
-          <div className="space-y-2 rounded-xl border border-white/5 bg-black/30 p-3.5 text-xs text-zinc-300 leading-relaxed">
-            <div className="flex items-center gap-1.5 text-zinc-400">
-              <Clock className="h-3.5 w-3.5" />
-              <span>分发状态：{badgeText}</span>
-            </div>
-            <p className="text-zinc-400">
-              {ios?.note || 'iOS 客户端正在适配中，后续将通过 TestFlight / App Store 跳转链接提供安装。'}
-            </p>
-          </div>
-        )}
       </div>
 
-      <div className="mt-5">
-        {isReady && ios ? (
+      <div className="mt-7">
+        {isReady && url ? (
           <a
-            href={ios.url}
+            href={url}
             target="_blank"
             rel="noreferrer"
-            className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-500 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-indigo-400"
+            className="rc-pill-dark w-full"
           >
-            <span>{ios.status === 'testflight' ? '前往 TestFlight 安装' : '前往 App Store 下载'}</span>
-            <ExternalLink className="h-4 w-4" />
+            <span>{actionText}</span>
+            <span aria-hidden="true">↗</span>
           </a>
         ) : (
-          <button
-            type="button"
-            disabled
-            className="inline-flex w-full cursor-not-allowed items-center justify-center gap-2 rounded-xl border border-white/10 bg-zinc-900/60 py-2.5 text-sm text-zinc-500"
-          >
-            <Clock className="h-4 w-4" />
-            <span>iOS 跳转暂未开放</span>
+          <button type="button" disabled className="rc-pill-soft w-full">
+            {disabledText}
           </button>
         )}
       </div>
-    </div>
+    </article>
   );
 }

@@ -1,27 +1,35 @@
-import { useCallback, useEffect, useState } from 'react';
-import { ArrowUpRight, Settings2 } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { AboutPage } from './components/AboutPage';
 import { AdminPanel } from './components/AdminPanel';
+import { HomePage } from './components/HomePage';
 import { PublicPortal } from './components/PublicPortal';
-import type { PublicReleasesResponse } from './types';
-
-type ViewMode = 'public' | 'admin';
+import { ResearchDetailPage, ResearchListPage } from './components/ResearchPage';
+import type { ArticleItem, PublicReleasesResponse } from './types';
 
 export function App() {
-  const [view, setView] = useState<ViewMode>(() =>
-    window.location.pathname.startsWith('/admin') ? 'admin' : 'public'
-  );
-  const [data, setData] = useState<PublicReleasesResponse | null>(null);
+  const [pathname, setPathname] = useState<string>(() => window.location.pathname || '/');
+  const [releasesData, setReleasesData] = useState<PublicReleasesResponse | null>(null);
+  const [articles, setArticles] = useState<ArticleItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const loadPublicReleases = useCallback(async () => {
+  const [openMenu, setOpenMenu] = useState<'models' | 'results' | null>(null);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const navRef = useRef<HTMLDivElement>(null);
+
+  const loadAllPublicData = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/releases');
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = (await res.json()) as PublicReleasesResponse;
-      setData(json);
+      const [relRes, artRes] = await Promise.all([fetch('/api/releases'), fetch('/api/articles')]);
+      if (!relRes.ok) throw new Error(`HTTP ${relRes.status}`);
+      const relJson = (await relRes.json()) as PublicReleasesResponse;
+      setReleasesData(relJson);
+
+      if (artRes.ok) {
+        const artJson = (await artRes.json()) as { articles: ArticleItem[] };
+        setArticles(artJson.articles || []);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -30,98 +38,457 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    void loadPublicReleases();
-  }, [loadPublicReleases]);
+    void loadAllPublicData();
+  }, [loadAllPublicData]);
 
   useEffect(() => {
     const onPopState = () => {
-      setView(window.location.pathname.startsWith('/admin') ? 'admin' : 'public');
+      setPathname(window.location.pathname || '/');
+      setOpenMenu(null);
+      setMobileMenuOpen(false);
     };
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
   }, []);
 
-  const navigate = (next: ViewMode) => {
-    const targetPath = next === 'admin' ? '/admin' : '/';
-    if (window.location.pathname !== targetPath) {
-      window.history.pushState({}, '', targetPath);
+  useEffect(() => {
+    const onClickOutside = (e: MouseEvent) => {
+      if (navRef.current && !navRef.current.contains(e.target as Node)) {
+        setOpenMenu(null);
+      }
+    };
+    document.addEventListener('mousedown', onClickOutside);
+    return () => document.removeEventListener('mousedown', onClickOutside);
+  }, []);
+
+  const navigate = (nextPath: string) => {
+    const [pathOnly, hash] = nextPath.split('#');
+    const cleanPath = pathOnly || '/';
+    if (window.location.pathname !== cleanPath || hash) {
+      window.history.pushState({}, '', nextPath);
     }
-    setView(next);
+    setPathname(cleanPath);
+    setOpenMenu(null);
+    setMobileMenuOpen(false);
+
+    if (hash) {
+      setTimeout(() => {
+        document.getElementById(hash)?.scrollIntoView({ behavior: 'smooth' });
+      }, 60);
+    } else {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
   };
 
+  const isAdmin = pathname.startsWith('/admin');
+  const isNuwa = pathname.startsWith('/nuwa') || pathname.startsWith('/download');
+  const isAbout = pathname.startsWith('/about');
+  const isResearchDetail =
+    pathname.startsWith('/research/') && pathname.length > '/research/'.length;
+  const isResearchList = pathname === '/research';
+  const researchSlug = isResearchDetail
+    ? decodeURIComponent(pathname.slice('/research/'.length))
+    : '';
+
   return (
-    <div className="min-h-screen bg-[#09090b] bg-grid-pattern text-zinc-100 flex flex-col">
-      {/* Header */}
-      <header className="sticky top-0 z-30 border-b border-white/10 bg-[#09090b]/80 backdrop-blur-md">
-        <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4 sm:px-6">
+    <div className="min-h-screen flex flex-col bg-white text-[#18181b]">
+      {/* Header — 1:1 restored from rankchord.com + Nuwa added under 成果 */}
+      <header className="sticky top-0 z-[100] h-[78px] max-[860px]:h-[64px] max-[680px]:h-[56px] bg-white/96 backdrop-blur-sm">
+        <div ref={navRef} className="header-shell h-full flex items-center relative">
           <button
             type="button"
-            onClick={() => navigate('public')}
-            className="flex items-center gap-3 text-left"
+            onClick={() => navigate('/')}
+            aria-label="RankChord 首页"
+            className="mr-[34px] inline-flex items-center cursor-pointer"
           >
-            <img src="/logo.png" alt="Nuwa Logo" className="h-8 w-8 rounded-lg object-cover" />
-            <div className="flex items-baseline gap-2">
-              <span className="text-base font-semibold tracking-tight text-white">Nuwa</span>
-              <span className="hidden text-xs text-zinc-500 sm:inline">by RankChord</span>
-            </div>
+            <span className="inline-flex items-center gap-2 max-[680px]:gap-1.5">
+              <span className="w-[32.26px] h-[32px] max-[680px]:w-[28.23px] max-[680px]:h-[28px] inline-flex items-center justify-center">
+                <img
+                  src="/rankchord-symbol.png"
+                  alt=""
+                  className="w-full h-full object-contain"
+                />
+              </span>
+              <span className="brand-wordmark">RankChord</span>
+            </span>
           </button>
 
-          <nav className="flex items-center gap-2 sm:gap-4 text-xs sm:text-sm">
+          {/* Desktop Nav */}
+          <nav aria-label="主导航" className="hidden min-[861px]:flex items-center gap-1">
+            {/* 模型 Dropdown */}
+            <div className="relative">
+              <button
+                type="button"
+                aria-haspopup="true"
+                aria-expanded={openMenu === 'models'}
+                onClick={() => setOpenMenu((m) => (m === 'models' ? null : 'models'))}
+                className={`h-10 px-[14px] rounded-full inline-flex items-center gap-2 text-[15px] font-medium leading-none transition-colors cursor-pointer ${
+                  openMenu === 'models' ? 'bg-[#f6f6f6]' : 'hover:bg-[#f6f6f6]'
+                }`}
+              >
+                <span>模型</span>
+                <span
+                  aria-hidden="true"
+                  className={`w-[5px] h-[5px] border-b border-r border-current transition-transform ${
+                    openMenu === 'models' ? 'rotate-[225deg] translate-y-[1px]' : 'rotate-45 -translate-y-[1px]'
+                  }`}
+                />
+              </button>
+
+              {openMenu === 'models' && (
+                <div className="absolute left-0 top-[52px] w-[420px] rounded-[20px] border border-[#e8e8e8] bg-white p-[22px] shadow-[0_18px_50px_rgba(24,24,27,0.09)] z-50">
+                  <p className="text-[12px] font-medium text-[#686d74] mb-3">语言模型</p>
+                  <button
+                    type="button"
+                    onClick={() => navigate('/about#chord-a1')}
+                    className="w-full flex items-center justify-between rounded-[14px] p-3 text-left hover:bg-[#f6f6f6] transition-colors cursor-pointer"
+                  >
+                    <span>
+                      <strong className="block text-[15px] font-medium text-[#18181b]">
+                        Chord A1
+                      </strong>
+                      <small className="block text-[13px] text-[#686d74] mt-0.5">
+                        面向对话与智能体任务
+                      </small>
+                    </span>
+                    <em className="not-italic text-[12px] text-[#686d74] rounded-full bg-[#f6f6f6] px-2.5 py-1">
+                      即将推出
+                    </em>
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* 成果 Dropdown (Sakalio Labs, Pivot, Nuwa) */}
+            <div className="relative">
+              <button
+                type="button"
+                aria-haspopup="true"
+                aria-expanded={openMenu === 'results'}
+                onClick={() => setOpenMenu((m) => (m === 'results' ? null : 'results'))}
+                className={`h-10 px-[14px] rounded-full inline-flex items-center gap-2 text-[15px] font-medium leading-none transition-colors cursor-pointer ${
+                  openMenu === 'results' ? 'bg-[#f6f6f6]' : 'hover:bg-[#f6f6f6]'
+                }`}
+              >
+                <span>成果</span>
+                <span
+                  aria-hidden="true"
+                  className={`w-[5px] h-[5px] border-b border-r border-current transition-transform ${
+                    openMenu === 'results' ? 'rotate-[225deg] translate-y-[1px]' : 'rotate-45 -translate-y-[1px]'
+                  }`}
+                />
+              </button>
+
+              {openMenu === 'results' && (
+                <div className="absolute left-0 top-[52px] w-[460px] rounded-[20px] border border-[#e8e8e8] bg-white p-[22px] shadow-[0_18px_50px_rgba(24,24,27,0.09)] z-50">
+                  <p className="text-[12px] font-medium text-[#686d74] mb-3">成果</p>
+                  <div className="space-y-1">
+                    <button
+                      type="button"
+                      onClick={() => navigate('/#sakaliolabs')}
+                      className="w-full block rounded-[14px] p-3 text-left hover:bg-[#f6f6f6] transition-colors cursor-pointer"
+                    >
+                      <strong className="block text-[15px] font-medium text-[#18181b]">
+                        <span className="text-[#159455]">Sakalio</span> Labs
+                      </strong>
+                      <small className="block text-[13px] text-[#686d74] mt-0.5">
+                        智能体研究与真实项目实践
+                      </small>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => navigate('/about#openpivot')}
+                      className="w-full block rounded-[14px] p-3 text-left hover:bg-[#f6f6f6] transition-colors cursor-pointer"
+                    >
+                      <strong className="block text-[15px] font-medium text-[#18181b]">
+                        Pivot
+                      </strong>
+                      <small className="block text-[13px] text-[#686d74] mt-0.5">
+                        面向人机协作的智能体系统
+                      </small>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => navigate('/nuwa')}
+                      className="w-full flex items-center justify-between rounded-[14px] p-3 text-left hover:bg-[#f6f6f6] transition-colors cursor-pointer"
+                    >
+                      <span className="flex items-center gap-3">
+                        <img
+                          src="/logo.png"
+                          alt=""
+                          className="w-8 h-8 rounded-[8px] border border-[#e8e8e8] object-cover shrink-0"
+                        />
+                        <span>
+                          <strong className="block text-[15px] font-medium text-[#18181b]">
+                            Nuwa
+                          </strong>
+                          <small className="block text-[13px] text-[#686d74] mt-0.5">
+                            跨端 AI 客户端与版本分发中心
+                          </small>
+                        </span>
+                      </span>
+                      <span className="text-[12px] text-[#686d74]">下载 →</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
             <a
-              href="https://rankchord.com/"
+              href="https://chordai.rankchord.com/status"
               target="_blank"
               rel="noreferrer"
-              className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-zinc-300 transition hover:bg-white/5 hover:text-white"
+              className="h-10 px-[14px] rounded-full inline-flex items-center text-[15px] font-medium leading-none text-[#18181b] hover:bg-[#f6f6f6] transition-colors"
             >
-              <span>RankChord 官网</span>
-              <ArrowUpRight className="h-3.5 w-3.5 text-zinc-400" />
+              API
             </a>
 
-            {view === 'admin' ? (
-              <button
-                type="button"
-                onClick={() => navigate('public')}
-                className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-medium text-white hover:bg-white/10"
-              >
-                返回下载页
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={() => navigate('admin')}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 transition hover:border-white/25 hover:text-white"
-              >
-                <Settings2 className="h-3.5 w-3.5" />
-                <span>发布管理</span>
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={() => navigate('/research')}
+              className="h-10 px-[14px] rounded-full inline-flex items-center text-[15px] font-medium leading-none text-[#18181b] hover:bg-[#f6f6f6] transition-colors cursor-pointer"
+            >
+              研究
+            </button>
+
+            <button
+              type="button"
+              onClick={() => navigate('/about')}
+              className="h-10 px-[14px] rounded-full inline-flex items-center text-[15px] font-medium leading-none text-[#18181b] hover:bg-[#f6f6f6] transition-colors cursor-pointer"
+            >
+              关于
+            </button>
           </nav>
+
+          {/* Desktop Right Actions */}
+          <div className="hidden min-[861px]:flex ml-auto items-center gap-[10px]">
+            <a
+              href="https://chordai.rankchord.com/login"
+              target="_blank"
+              rel="noreferrer"
+              className="min-w-[74px] min-h-[44px] px-[20px] py-[10px] rounded-full bg-[#f6f6f6] hover:bg-[#e8e8e8] inline-flex items-center justify-center text-[14px] font-medium leading-none text-[#18181b] transition-colors"
+            >
+              登录
+            </a>
+            <a
+              href="https://pivot.rankchord.com/login"
+              target="_blank"
+              rel="noreferrer"
+              className="min-h-[44px] px-[21px] py-[10px] rounded-full bg-[#18181b] hover:bg-[#313131] inline-flex items-center justify-center gap-2 text-[14px] font-medium leading-none text-white transition-colors"
+            >
+              <span>试用 Pivot</span>
+              <span aria-hidden="true">↗</span>
+            </a>
+          </div>
+
+          {/* Mobile Menu Toggle */}
+          <button
+            type="button"
+            aria-label="打开导航菜单"
+            onClick={() => setMobileMenuOpen((v) => !v)}
+            className="min-[861px]:hidden ml-auto w-[44px] h-[44px] rounded-full bg-[#f6f6f6] inline-flex flex-col items-center justify-center gap-[5px] cursor-pointer"
+          >
+            <span className="w-[18px] h-[1px] bg-[#18181b] block" />
+            <span className="w-[18px] h-[1px] bg-[#18181b] block" />
+          </button>
         </div>
       </header>
 
-      {/* Main */}
-      <main className="mx-auto w-full max-w-6xl flex-1 px-4 pb-20 sm:px-6">
-        {view === 'admin' ? (
-          <AdminPanel onDataChanged={loadPublicReleases} />
-        ) : (
+      {/* Mobile Drawer (outside <header> so fixed positioning uses viewport, not backdrop-blur containing block) */}
+      {mobileMenuOpen && (
+        <div className="min-[861px]:hidden fixed inset-x-0 top-[64px] max-[680px]:top-[56px] bottom-0 bg-white border-t border-[#e8e8e8] p-6 space-y-5 overflow-y-auto z-[99]">
+          <div className="space-y-1">
+            <p className="eyebrow px-2">模型</p>
+            <button
+              type="button"
+              onClick={() => navigate('/about#chord-a1')}
+              className="w-full flex items-center justify-between px-2 py-2.5 text-[16px] font-medium text-[#18181b] cursor-pointer"
+            >
+              <span>Chord A1</span>
+              <span className="text-[12px] text-[#686d74]">即将推出</span>
+            </button>
+          </div>
+
+          <div className="border-t border-[#e8e8e8] pt-4 space-y-1">
+            <p className="eyebrow px-2">成果</p>
+            <button
+              type="button"
+              onClick={() => navigate('/#sakaliolabs')}
+              className="w-full text-left px-2 py-2.5 text-[16px] font-medium text-[#18181b] cursor-pointer"
+            >
+              <span className="text-[#159455]">Sakalio</span> Labs
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate('/about#openpivot')}
+              className="w-full text-left px-2 py-2.5 text-[16px] font-medium text-[#18181b] cursor-pointer"
+            >
+              Pivot
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate('/nuwa')}
+              className="w-full flex items-center justify-between px-2 py-2.5 text-[16px] font-medium text-[#18181b] cursor-pointer"
+            >
+              <span>Nuwa 客户端</span>
+              <span className="text-[12px] text-[#686d74]">下载 →</span>
+            </button>
+          </div>
+
+          <div className="border-t border-[#e8e8e8] pt-4 space-y-1">
+            <a
+              href="https://chordai.rankchord.com/status"
+              target="_blank"
+              rel="noreferrer"
+              className="block px-2 py-2.5 text-[16px] font-medium text-[#18181b]"
+            >
+              API
+            </a>
+            <button
+              type="button"
+              onClick={() => navigate('/research')}
+              className="w-full text-left px-2 py-2.5 text-[16px] font-medium text-[#18181b] cursor-pointer"
+            >
+              研究
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate('/about')}
+              className="w-full text-left px-2 py-2.5 text-[16px] font-medium text-[#18181b] cursor-pointer"
+            >
+              关于
+            </button>
+          </div>
+
+          <div className="pt-2 pb-8 flex gap-3">
+            <a
+              href="https://chordai.rankchord.com/login"
+              target="_blank"
+              rel="noreferrer"
+              className="rc-pill-soft flex-1"
+            >
+              登录
+            </a>
+            <a
+              href="https://pivot.rankchord.com/login"
+              target="_blank"
+              rel="noreferrer"
+              className="rc-pill-dark flex-1"
+            >
+              试用 Pivot ↗
+            </a>
+          </div>
+        </div>
+      )}
+
+      {/* Main Content */}
+      <main id="main-content" className="flex-1">
+        {isAdmin ? (
+          <AdminPanel onDataChanged={loadAllPublicData} />
+        ) : isNuwa ? (
           <PublicPortal
-            data={data}
+            data={releasesData}
             loading={loading}
             error={error}
-            onRefresh={loadPublicReleases}
+            onRefresh={loadAllPublicData}
+            onOpenAdmin={() => navigate('/admin')}
           />
+        ) : isAbout ? (
+          <AboutPage onNavigate={navigate} />
+        ) : isResearchList ? (
+          <ResearchListPage articles={articles} loading={loading} onNavigate={navigate} />
+        ) : isResearchDetail ? (
+          <ResearchDetailPage slug={researchSlug} articles={articles} onNavigate={navigate} />
+        ) : (
+          <HomePage articles={articles} onNavigate={navigate} />
         )}
       </main>
 
-      {/* Footer */}
-      <footer className="border-t border-white/10 bg-[#09090b]/90 py-6">
-        <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-3 px-4 text-xs text-zinc-500 sm:flex-row sm:px-6">
-          <span>© {new Date().getFullYear()} RankChord（广州秩弦科技有限公司）· Nuwa App Distribution</span>
-          <div className="flex items-center gap-4">
-            <a href="https://rankchord.com/" target="_blank" rel="noreferrer" className="hover:text-zinc-300">
-              rankchord.com
-            </a>
-            <span>MinIO Object Storage Powered</span>
+      {/* Footer — 1:1 restored from rankchord.com */}
+      <footer className="border-t border-[#e8e8e8] bg-white">
+        <div className="site-container">
+          <div className="flex flex-col min-[681px]:flex-row justify-between items-start gap-12 min-h-[172px] pt-[40px] pb-[38px]">
+            <div>
+              <button
+                type="button"
+                onClick={() => navigate('/')}
+                className="inline-flex items-center gap-2 cursor-pointer"
+              >
+                <span className="w-[32.26px] h-[32px] inline-flex items-center justify-center">
+                  <img
+                    src="/rankchord-symbol.png"
+                    alt=""
+                    className="w-full h-full object-contain"
+                  />
+                </span>
+                <span className="brand-wordmark">RankChord</span>
+              </button>
+              <p className="mt-[18px] text-[12px] text-[#686d74]">
+                General intelligence systems, built for real work.
+              </p>
+            </div>
+
+            <nav
+              aria-label="页脚导航"
+              className="flex flex-wrap gap-x-[28px] gap-y-3 text-[13px] text-[#18181b]"
+            >
+              <button
+                type="button"
+                onClick={() => navigate('/research')}
+                className="hover:opacity-55 transition-opacity cursor-pointer"
+              >
+                研究
+              </button>
+              <button
+                type="button"
+                onClick={() => navigate('/about')}
+                className="hover:opacity-55 transition-opacity cursor-pointer"
+              >
+                关于
+              </button>
+              <button
+                type="button"
+                onClick={() => navigate('/nuwa')}
+                className="hover:opacity-55 transition-opacity cursor-pointer"
+              >
+                Nuwa
+              </button>
+              <a
+                href="https://github.com/RankChord"
+                target="_blank"
+                rel="noreferrer"
+                className="hover:opacity-55 transition-opacity"
+              >
+                GitHub ↗
+              </a>
+              <a
+                href="https://chordai.rankchord.com"
+                target="_blank"
+                rel="noreferrer"
+                className="hover:opacity-55 transition-opacity"
+              >
+                ChordAI ↗
+              </a>
+              <button
+                type="button"
+                onClick={() => navigate('/admin')}
+                className="text-[#686d74] hover:opacity-55 transition-opacity cursor-pointer"
+              >
+                管理
+              </button>
+            </nav>
+          </div>
+
+          <div className="border-t border-[#e8e8e8] pt-[20px] pb-[38px] flex flex-col min-[681px]:flex-row justify-between gap-2 min-[681px]:gap-8 text-[12px] text-[#686d74]">
+            <p className="m-0">
+              © 2026 广州秩弦科技有限公司（Canton RankChord）. All Rights Reserved.
+            </p>
+            <div className="flex flex-wrap gap-[22px]">
+              <span>HarmonyOS Sans</span>
+              <span>粤ICP备2026010599号</span>
+            </div>
           </div>
         </div>
       </footer>

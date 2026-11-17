@@ -108,3 +108,20 @@ jobs:
         with:
           generate_release_notes: true
           files: Nuwa-*.apk
+
+      - name: Push APK to Nuwa Portal (MinIO)
+        if: ${{ secrets.NUWA_PORTAL_TOKEN != '' }}
+        env:
+          NUWA_PORTAL_TOKEN: ${{ secrets.NUWA_PORTAL_TOKEN }}
+          NUWA_PORTAL_URL: ${{ vars.NUWA_PORTAL_URL || 'https://dl.rankchord.com' }}
+        run: |
+          APK_FILE=$(ls Nuwa-*.apk | head -n 1)
+          curl -fsSL -X POST "${NUWA_PORTAL_URL}/api/admin/releases" \
+            -H "Authorization: Bearer ${NUWA_PORTAL_TOKEN}" \
+            -F "platform=android" \
+            -F "version=${{ steps.version.outputs.name }}" \
+            -F "versionCode=${{ github.run_number }}" \
+            -F "isLatest=true" \
+            -F "published=true" \
+            -F "changelog=Nuwa v${{ steps.version.outputs.name }} 自动构建发布" \
+            -F "file=@${APK_FILE}"

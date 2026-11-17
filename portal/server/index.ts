@@ -9,13 +9,15 @@ import dotenv from 'dotenv';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import multer from 'multer';
 import { StorageService } from './storage.js';
-import type { IosStatus, Platform, ReleaseItem } from './types.js';
+import type { ArticleItem, HarmonyStatus, IosStatus, Platform, ReleaseItem } from './types.js';
 
 dotenv.config();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 3100);
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'rankchord-admin';
+const CI_DEPLOY_TOKEN = (process.env.CI_DEPLOY_TOKEN || '').trim();
+const DOWNLOAD_BASE_URL = (process.env.DOWNLOAD_BASE_URL || '').replace(/\/+$/, '');
 const TOKEN_SECRET = crypto.createHash('sha256').update(`nuwa-portal:${ADMIN_PASSWORD}`).digest('hex');
 
 const storage = new StorageService();
@@ -50,7 +52,8 @@ function verifyAdminToken(token: string): boolean {
 function requireAdmin(req: Request, res: Response, next: NextFunction): void {
   const authHeader = req.headers.authorization || '';
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
-  if (!token || !verifyAdminToken(token)) {
+  const isCiToken = Boolean(CI_DEPLOY_TOKEN && token && token === CI_DEPLOY_TOKEN);
+  if (!token || (!isCiToken && !verifyAdminToken(token))) {
     res.status(401).json({ error: '未授权或登录已过期，请重新登录管理后台。' });
     return;
   }
@@ -69,6 +72,15 @@ async function computeSha256(filePath: string): Promise<string> {
 
 function sanitizeFileName(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, '_');
+}
+
+function sanitizeSlug(input: string): string {
+  const cleaned = input
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9\u4e00-\u9fa5-_]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return cleaned || `post-${Date.now()}`;
 }
 
 function getLatestByPlatform(releases: ReleaseItem[]): Record<Platform, ReleaseItem | null> {
@@ -91,7 +103,7 @@ async function main() {
 
   const app = express();
   app.use(cors());
-  app.use(express.json());
+  app.use(express.json({ limit: '4mb' }));
 
   app.get('/api/health', (_req, res) => {
     res.json({
@@ -101,6 +113,7 @@ async function main() {
     });
   });
 
+  // --- Public Releases API ---
   app.get('/api/releases', async (_req, res) => {
     const manifest = await storage.readManifest();
     const published = manifest.releases
@@ -111,6 +124,8 @@ async function main() {
       latest: getLatestByPlatform(published),
       releases: published,
       ios: manifest.ios,
+      harmony: manifest.harmony,
+      downloadBaseUrl: DOWNLOAD_BASE_URL,
       storageDriver: storage.getInfo().driver
     });
   });
@@ -126,12 +141,68 @@ async function main() {
     item.downloads += 1;
     await storage.writeManifest(manifest);
 
+    if (storage.shouldProxyDownload() && req.query.mode !== 'json') {
+      const stream = await storage.getPackageStream(item.objectKey);
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Length', String(item.fileSize));
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename*=UTF-8''${encodeURIComponent(item.fileName)}`
+      );
+      stream.pipe(res);
+      return;
+    }
+
     const url = await storage.getDownloadUrl(item.objectKey, item.fileName);
     if (req.query.mode === 'json') {
       res.json({ url, fileName: item.fileName });
       return;
     }
     res.redirect(302, url);
+  });
+
+  // --- Public Articles API ---
+  app.get('/api/articles', async (_req, res) => {
+    const manifest = await storage.readManifest();
+    const published = manifest.articles
+      .filter((a) => a.published)
+      .sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime());
+    res.json({ articles: published });
+  });
+
+  app.get('/api/articles/:slug', async (req, res) => {
+    const manifest = await storage.readManifest();
+    const article = manifest.articles.find(
+      (a) => a.published && (a.slug === req.params.slug || a.id === req.params.slug)
+    );
+    if (!article) {
+      res.status(404).json({ error: '文章不存在或未发布' });
+      return;
+    }
+    res.json({ article });
+  });
+
+  // --- Media Proxy (MinIO or Local) ---
+  app.get('/api/media/:objectKey', async (req, res) => {
+    try {
+      const objectKey = decodeURIComponent(String(req.params.objectKey));
+      if (!objectKey.startsWith('media/')) {
+        res.status(403).end();
+        return;
+      }
+      const media = await storage.getMediaStream(objectKey);
+      if (!media) {
+        res.status(404).end();
+        return;
+      }
+      if (media.contentType) {
+        res.setHeader('Content-Type', media.contentType);
+      }
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      media.stream.pipe(res);
+    } catch {
+      res.status(400).end();
+    }
   });
 
   app.get('/api/local-files/:objectKey', (req, res) => {
@@ -153,6 +224,7 @@ async function main() {
     }
   });
 
+  // --- Admin Auth ---
   app.post('/api/admin/login', (req, res) => {
     const password = typeof req.body?.password === 'string' ? req.body.password : '';
     if (password !== ADMIN_PASSWORD) {
@@ -162,6 +234,7 @@ async function main() {
     res.json({ token: createAdminToken() });
   });
 
+  // --- Admin Releases ---
   app.get('/api/admin/releases', requireAdmin, async (_req, res) => {
     const manifest = await storage.readManifest();
     const sorted = [...manifest.releases].sort(
@@ -170,6 +243,7 @@ async function main() {
     res.json({
       releases: sorted,
       ios: manifest.ios,
+      harmony: manifest.harmony,
       storage: storage.getInfo()
     });
   });
@@ -310,6 +384,158 @@ async function main() {
     };
     await storage.writeManifest(manifest);
     res.json({ ios: manifest.ios });
+  });
+
+  app.put('/api/admin/harmony', requireAdmin, async (req, res) => {
+    const status = req.body?.status as HarmonyStatus;
+    const url = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
+    const note = typeof req.body?.note === 'string' ? req.body.note.trim() : '';
+
+    if (status !== 'coming_soon' && status !== 'appgallery') {
+      res.status(400).json({ error: '无效的 HarmonyOS 状态' });
+      return;
+    }
+
+    const manifest = await storage.readManifest();
+    manifest.harmony = {
+      status,
+      url,
+      note: note || manifest.harmony.note,
+      updatedAt: new Date().toISOString()
+    };
+    await storage.writeManifest(manifest);
+    res.json({ harmony: manifest.harmony });
+  });
+
+  // --- Admin Articles & Media ---
+  app.get('/api/admin/articles', requireAdmin, async (_req, res) => {
+    const manifest = await storage.readManifest();
+    const sorted = [...manifest.articles].sort(
+      (a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime()
+    );
+    res.json({ articles: sorted });
+  });
+
+  app.post('/api/admin/articles', requireAdmin, async (req, res) => {
+    const title = String(req.body?.title || '').trim();
+    if (!title) {
+      res.status(400).json({ error: '请填写文章标题' });
+      return;
+    }
+
+    const manifest = await storage.readManifest();
+    const now = new Date().toISOString();
+    let slug = sanitizeSlug(String(req.body?.slug || title));
+    if (manifest.articles.some((a) => a.slug === slug)) {
+      slug = `${slug}-${Date.now().toString(36)}`;
+    }
+
+    const tagsRaw = Array.isArray(req.body?.tags)
+      ? req.body.tags
+      : String(req.body?.tags || '')
+          .split(/[,，]/)
+          .map((t) => t.trim())
+          .filter(Boolean);
+
+    const article: ArticleItem = {
+      id: crypto.randomUUID(),
+      slug,
+      title,
+      summary: String(req.body?.summary || '').trim(),
+      content: String(req.body?.content || '').trim(),
+      tags: tagsRaw,
+      coverUrl: String(req.body?.coverUrl || '').trim(),
+      author: String(req.body?.author || 'RankChord Team').trim(),
+      published: req.body?.published !== false,
+      featured: Boolean(req.body?.featured),
+      publishedAt: String(req.body?.publishedAt || now),
+      updatedAt: now
+    };
+
+    manifest.articles.unshift(article);
+    await storage.writeManifest(manifest);
+    res.status(201).json({ article });
+  });
+
+  app.put('/api/admin/articles/:id', requireAdmin, async (req, res) => {
+    const manifest = await storage.readManifest();
+    const target = manifest.articles.find((a) => a.id === req.params.id);
+    if (!target) {
+      res.status(404).json({ error: '文章不存在' });
+      return;
+    }
+
+    if (typeof req.body?.title === 'string' && req.body.title.trim()) {
+      target.title = req.body.title.trim();
+    }
+    if (typeof req.body?.slug === 'string' && req.body.slug.trim()) {
+      target.slug = sanitizeSlug(req.body.slug);
+    }
+    if (typeof req.body?.summary === 'string') {
+      target.summary = req.body.summary.trim();
+    }
+    if (typeof req.body?.content === 'string') {
+      target.content = req.body.content;
+    }
+    if (req.body?.tags !== undefined) {
+      target.tags = Array.isArray(req.body.tags)
+        ? req.body.tags
+        : String(req.body.tags)
+            .split(/[,，]/)
+            .map((t: string) => t.trim())
+            .filter(Boolean);
+    }
+    if (typeof req.body?.coverUrl === 'string') {
+      target.coverUrl = req.body.coverUrl.trim();
+    }
+    if (typeof req.body?.author === 'string' && req.body.author.trim()) {
+      target.author = req.body.author.trim();
+    }
+    if (typeof req.body?.published === 'boolean') {
+      target.published = req.body.published;
+    }
+    if (typeof req.body?.featured === 'boolean') {
+      target.featured = req.body.featured;
+    }
+    target.updatedAt = new Date().toISOString();
+
+    await storage.writeManifest(manifest);
+    res.json({ article: target });
+  });
+
+  app.delete('/api/admin/articles/:id', requireAdmin, async (req, res) => {
+    const manifest = await storage.readManifest();
+    const idx = manifest.articles.findIndex((a) => a.id === req.params.id);
+    if (idx === -1) {
+      res.status(404).json({ error: '文章不存在' });
+      return;
+    }
+    manifest.articles.splice(idx, 1);
+    await storage.writeManifest(manifest);
+    res.json({ ok: true });
+  });
+
+  app.post('/api/admin/media', requireAdmin, upload.single('file'), async (req, res) => {
+    const tempFile = req.file;
+    if (!tempFile) {
+      res.status(400).json({ error: '请选择图片文件' });
+      return;
+    }
+    try {
+      const originalName = Buffer.from(tempFile.originalname, 'latin1').toString('utf8');
+      const safeName = sanitizeFileName(originalName || 'image.png');
+      const objectKey = `media/${Date.now()}-${safeName}`;
+      await storage.uploadPackage(objectKey, tempFile.path, tempFile.mimetype || 'image/png');
+      res.status(201).json({
+        objectKey,
+        url: `/api/media/${encodeURIComponent(objectKey)}`
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ error: `图片上传失败: ${message}` });
+    } finally {
+      await fsp.unlink(tempFile.path).catch(() => {});
+    }
   });
 
   if (process.env.NODE_ENV === 'production') {

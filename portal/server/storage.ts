@@ -3,7 +3,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as Minio from 'minio';
-import type { PortalManifest, StorageInfo } from './types.js';
+import type { ArticleItem, PortalManifest, StorageInfo } from './types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.resolve(__dirname, '../data');
@@ -11,14 +11,34 @@ const LOCAL_FILES_DIR = path.join(DATA_DIR, 'files');
 const LOCAL_MANIFEST_PATH = path.join(DATA_DIR, 'releases.json');
 const MINIO_MANIFEST_KEY = 'metadata/releases.json';
 
+function loadSeedArticles(): ArticleItem[] {
+  try {
+    const seedPath = path.join(__dirname, 'seedArticles.json');
+    const raw = fs.readFileSync(seedPath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as ArticleItem[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+const DEFAULT_ARTICLES: ArticleItem[] = loadSeedArticles();
+
 const DEFAULT_MANIFEST: PortalManifest = {
   releases: [],
   ios: {
     status: 'coming_soon',
     url: '',
-    note: 'iOS 客户端正在适配中，即将登陆 TestFlight 与 App Store。',
+    note: 'iOS 版正在适配中，即将上架 App Store。',
     updatedAt: new Date().toISOString()
-  }
+  },
+  harmony: {
+    status: 'coming_soon',
+    url: '',
+    note: '鸿蒙版正在上架审核中，即将登陆华为应用市场。',
+    updatedAt: new Date().toISOString()
+  },
+  articles: DEFAULT_ARTICLES
 };
 
 export class StorageService {
@@ -99,10 +119,11 @@ export class StorageService {
         const parsed = JSON.parse(Buffer.concat(chunks).toString('utf-8')) as Partial<PortalManifest>;
         return {
           releases: Array.isArray(parsed.releases) ? parsed.releases : [],
-          ios: parsed.ios ?? DEFAULT_MANIFEST.ios
+          ios: parsed.ios ?? DEFAULT_MANIFEST.ios,
+          harmony: parsed.harmony ?? DEFAULT_MANIFEST.harmony,
+          articles: Array.isArray(parsed.articles) ? parsed.articles : structuredClone(DEFAULT_ARTICLES)
         };
       } catch {
-        // Manifest does not exist yet in MinIO
         return structuredClone(DEFAULT_MANIFEST);
       }
     }
@@ -112,7 +133,9 @@ export class StorageService {
       const parsed = JSON.parse(raw) as Partial<PortalManifest>;
       return {
         releases: Array.isArray(parsed.releases) ? parsed.releases : [],
-        ios: parsed.ios ?? DEFAULT_MANIFEST.ios
+        ios: parsed.ios ?? DEFAULT_MANIFEST.ios,
+        harmony: parsed.harmony ?? DEFAULT_MANIFEST.harmony,
+        articles: Array.isArray(parsed.articles) ? parsed.articles : structuredClone(DEFAULT_ARTICLES)
       };
     } catch {
       return structuredClone(DEFAULT_MANIFEST);
@@ -158,6 +181,20 @@ export class StorageService {
     }
   }
 
+  shouldProxyDownload(): boolean {
+    if (this.driver !== 'minio' || !this.client) return false;
+    if (this.publicUrl) return false;
+    if (process.env.MINIO_PROXY_DOWNLOAD === 'true') return true;
+    return this.endpoint === '127.0.0.1' || this.endpoint === 'localhost' || this.endpoint === 'minio';
+  }
+
+  async getPackageStream(objectKey: string): Promise<NodeJS.ReadableStream> {
+    if (!this.client) {
+      throw new Error('MinIO client not initialized');
+    }
+    return await this.client.getObject(this.bucket, objectKey);
+  }
+
   async getDownloadUrl(objectKey: string, fileName: string): Promise<string> {
     if (this.driver === 'minio' && this.client) {
       if (this.publicUrl) {
@@ -169,6 +206,25 @@ export class StorageService {
     }
 
     return `/api/local-files/${encodeURIComponent(objectKey)}?filename=${encodeURIComponent(fileName)}`;
+  }
+
+  async getMediaStream(objectKey: string): Promise<{ stream: NodeJS.ReadableStream; contentType?: string } | null> {
+    if (this.driver === 'minio' && this.client) {
+      try {
+        const stat = await this.client.statObject(this.bucket, objectKey);
+        const stream = await this.client.getObject(this.bucket, objectKey);
+        return {
+          stream,
+          contentType: stat.metaData?.['content-type'] || 'application/octet-stream'
+        };
+      } catch {
+        return null;
+      }
+    }
+
+    const destPath = this.resolveLocalFilePath(objectKey);
+    if (!fs.existsSync(destPath)) return null;
+    return { stream: fs.createReadStream(destPath) };
   }
 
   resolveLocalFilePath(objectKey: string): string {
