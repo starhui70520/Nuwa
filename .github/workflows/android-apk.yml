@@ -110,11 +110,14 @@ jobs:
           files: Nuwa-*.apk
 
       - name: Push APK to Nuwa Portal (MinIO)
-        if: ${{ secrets.NUWA_PORTAL_TOKEN != '' }}
         env:
           NUWA_PORTAL_TOKEN: ${{ secrets.NUWA_PORTAL_TOKEN }}
           NUWA_PORTAL_URL: ${{ vars.NUWA_PORTAL_URL || 'https://dl.rankchord.com' }}
         run: |
+          if [ -z "${NUWA_PORTAL_TOKEN}" ]; then
+            echo "NUWA_PORTAL_TOKEN not set, skipping upload."
+            exit 0
+          fi
           APK_FILE=$(ls Nuwa-*.apk | head -n 1)
           curl -fsSL -X POST "${NUWA_PORTAL_URL}/api/admin/releases" \
             -H "Authorization: Bearer ${NUWA_PORTAL_TOKEN}" \
