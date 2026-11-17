@@ -3,6 +3,7 @@ import { util } from '@kit.ArkTS';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { http } from '@kit.NetworkKit';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 
 const PLATFORM_ORIGIN = 'https://platform.deepseek.com';
 const CLIENT_VERSION = '0.2.2';
@@ -67,8 +68,10 @@ function randomBase64Url(byteCount: number): string {
 }
 
 async function sha256Base64Url(input: string): Promise<string> {
-  const encoder = new util.TextEncoder();
-  const encoded = encoder.encodeInto(input);
+  const encoded = new Uint8Array(input.length);
+  for (let i = 0; i < input.length; i++) {
+    encoded[i] = input.charCodeAt(i) & 0xff;
+  }
   const md = cryptoFramework.createMd('SHA256');
   await md.update({ data: encoded });
   const digest = await md.digest();
@@ -239,10 +242,15 @@ struct Index {
 
       this.authStatusText = '请登录并授权 Nuwa 使用你的 DeepSeek API 账号';
       this.authUrl = targetUrl;
-    } catch {
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : JSON.stringify(err);
+      hilog.error(0x0000, 'NuwaAuth', 'startPkceLogin failed: %{public}s', errMsg);
       this.authVisible = false;
       this.authUrl = '';
-      this.controller.runJavaScript("window.dispatchEvent(new CustomEvent('nuwa:harmony-auth-error'));");
+      const payload = JSON.stringify({ message: errMsg });
+      this.controller.runJavaScript(
+        `window.dispatchEvent(new CustomEvent('nuwa:harmony-auth-error',{detail:${payload}}));`
+      );
     }
   }
 

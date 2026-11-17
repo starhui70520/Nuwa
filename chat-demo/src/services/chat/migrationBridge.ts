@@ -96,7 +96,16 @@ export const bindMigrationBridge = (): (() => void) => {
     }
   }
 
-  const handleHarmonyAuthError = () => {
+  const handleHarmonyAuthError = (event: Event) => {
+    const detail = (event as CustomEvent<{ message?: string }>).detail
+    if (detail?.message) {
+      showToast({
+        key: 'apiKeyVerificationFailed',
+        params: { message: detail.message },
+        type: 'error',
+      })
+      return
+    }
     showToast({ key: 'dshLoginFailed', type: 'error' })
   }
 
