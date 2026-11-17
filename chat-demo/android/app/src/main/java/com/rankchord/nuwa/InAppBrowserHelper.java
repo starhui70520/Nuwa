@@ -37,6 +37,8 @@ import java.util.Set;
  */
 final class InAppBrowserHelper {
     private static final InAppBrowserHelper INSTANCE = new InAppBrowserHelper();
+    private static final String ACTION_CUSTOM_TABS_SERVICE =
+        "android.support.customtabs.action.CustomTabsService";
 
     private final Set<String> prewarmedUrls = Collections.synchronizedSet(
         Collections.newSetFromMap(new LinkedHashMap<String, Boolean>(64, 0.75f, true) {
@@ -330,7 +332,7 @@ final class InAppBrowserHelper {
                 continue;
             }
             String pkg = info.activityInfo.packageName;
-            Intent serviceIntent = new Intent(CustomTabsService.ACTION_CUSTOM_TABS_SERVICE);
+            Intent serviceIntent = new Intent(ACTION_CUSTOM_TABS_SERVICE);
             serviceIntent.setPackage(pkg);
             if (pm.resolveService(serviceIntent, 0) != null) {
                 supporting.add(pkg);
@@ -338,7 +340,7 @@ final class InAppBrowserHelper {
         }
 
         if (supporting.isEmpty()) {
-            Intent serviceQuery = new Intent(CustomTabsService.ACTION_CUSTOM_TABS_SERVICE);
+            Intent serviceQuery = new Intent(ACTION_CUSTOM_TABS_SERVICE);
             List<ResolveInfo> services = pm.queryIntentServices(serviceQuery, 0);
             for (ResolveInfo ri : services) {
                 if (ri != null && ri.serviceInfo != null && ri.serviceInfo.packageName != null) {
