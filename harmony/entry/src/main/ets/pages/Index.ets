@@ -62,6 +62,33 @@ class HarmonyBridge {
   }
 }
 
+class MigrationExportBridge {
+  private onLoginDetected: () => void;
+  private onWaitingExportCb: () => void;
+  private onTimeoutCb: () => void;
+
+  constructor(onLoginDetected: () => void, onWaitingExportCb: () => void, onTimeoutCb: () => void) {
+    this.onLoginDetected = onLoginDetected;
+    this.onWaitingExportCb = onWaitingExportCb;
+    this.onTimeoutCb = onTimeoutCb;
+  }
+
+  onLoggedIn(): void {
+    this.onLoginDetected();
+  }
+
+  onStep(_msg: string): void {
+  }
+
+  onWaitingExport(): void {
+    this.onWaitingExportCb();
+  }
+
+  onAutoExportTimeout(): void {
+    this.onTimeoutCb();
+  }
+}
+
 function toBase64Url(bytes: Uint8Array): string {
   const helper = new util.Base64Helper();
   const b64 = helper.encodeToStringSync(bytes);
@@ -164,6 +191,28 @@ struct Index {
   private cachedDeviceId: string = '';
   private migrationSavePath: string = '';
   private migrationFileName: string = 'deepseek_data.zip';
+  private migrationAutoExportTriggered: boolean = false;
+  private migrationPollTimer: number = -1;
+
+  private migrationExportBridge: MigrationExportBridge = new MigrationExportBridge(
+    () => {
+      if (this.migrationAutoExportTriggered || !this.migrationVisible) {
+        return;
+      }
+      this.migrationAutoExportTriggered = true;
+      this.migrationStatusText = '已检测到登录，正在自动打开设置并导出...';
+      this.runMigrationAutoExportScript(false);
+    },
+    () => {
+      this.migrationStatusText = '已触发官方导出，正在等待生成导出包（约需 1-3 分钟，生成后将自动下载）...';
+    },
+    () => {
+      if (!this.migrationVisible) {
+        return;
+      }
+      this.migrationStatusText = '未定位到按钮，请手动点「设置 → 数据管理 → 导出/下载」';
+    }
+  );
 
   private harmonyBridge: HarmonyBridge = new HarmonyBridge(
     () => {
@@ -345,8 +394,204 @@ struct Index {
   }
 
   private openMigrationOverlay(): void {
-    this.migrationStatusText = '请登录 DeepSeek 账号并在「设置 → 数据管理」点击导出';
+    this.migrationAutoExportTriggered = false;
+    this.migrationStatusText = '请登录 DeepSeek 账号，登录成功后将自动辅助导出';
     this.migrationVisible = true;
+    this.startMigrationLoginPoll();
+  }
+
+  private closeMigrationOverlay(): void {
+    this.stopMigrationLoginPoll();
+    this.migrationAutoExportTriggered = false;
+    this.migrationVisible = false;
+  }
+
+  private startMigrationLoginPoll(): void {
+    this.stopMigrationLoginPoll();
+    this.migrationPollTimer = setInterval(() => {
+      if (!this.migrationVisible || this.migrationAutoExportTriggered) {
+        this.stopMigrationLoginPoll();
+        return;
+      }
+      this.checkMigrationLoginState();
+    }, 1500);
+  }
+
+  private stopMigrationLoginPoll(): void {
+    if (this.migrationPollTimer >= 0) {
+      clearInterval(this.migrationPollTimer);
+      this.migrationPollTimer = -1;
+    }
+  }
+
+  private checkMigrationLoginState(): void {
+    if (!this.migrationVisible || this.migrationAutoExportTriggered) {
+      return;
+    }
+    const js = "(function(){"
+      + "if (location.hostname !== 'chat.deepseek.com') return;"
+      + "var p = location.pathname || '';"
+      + "if (p.indexOf('sign_in') >= 0 || p.indexOf('login') >= 0) return;"
+      + "var hasInput = !!document.querySelector('textarea');"
+      + "var hasPassInput = !!document.querySelector('input[type=\"password\"]');"
+      + "if (hasInput && !hasPassInput && window.HarmonyMigrationBridge) {"
+      + "  window.HarmonyMigrationBridge.onLoggedIn();"
+      + "}"
+      + "})();";
+    try {
+      this.migrationController.runJavaScript(js);
+    } catch {
+      // 忽略页面未就绪时的调用异常
+    }
+  }
+
+  private runMigrationAutoExportScript(manualTrigger: boolean): void {
+    if (!this.migrationVisible) {
+      return;
+    }
+    if (manualTrigger) {
+      this.migrationStatusText = '正在尝试自动点击导出，请稍候...';
+    }
+    const resetJs = manualTrigger
+      ? "if (window.__dsappAutoExportTimer) { clearInterval(window.__dsappAutoExportTimer); window.__dsappAutoExportTimer = null; } window.__dsappAutoExportRunning = false;"
+      : "";
+    const js = "(function(){"
+      + resetJs
+      + "if (window.__dsappAutoExportRunning) return;"
+      + "window.__dsappAutoExportRunning = true;"
+      + "var triggerClick = function(el) {"
+      + "  if (!el) return false;"
+      + "  var target = (el.closest && el.closest('button, [role=\"button\"], [role=\"menuitem\"], [role=\"tab\"], [tabindex=\"0\"], a')) || el;"
+      + "  if (!target || typeof target.click !== 'function') return false;"
+      + "  try { target.scrollIntoView({ block: 'nearest', inline: 'center' }); } catch (e) {}"
+      + "  target.click();"
+      + "  return true;"
+      + "};"
+      + "var findVisibleByText = function(patterns, excludeDanger) {"
+      + "  var nodes = Array.from(document.querySelectorAll('button, [role=\"button\"], [role=\"menuitem\"], [role=\"tab\"], [tabindex=\"0\"], a, li, div, span'));"
+      + "  var best = null;"
+      + "  var bestLen = 999;"
+      + "  var bestArea = 999999999;"
+      + "  for (var i = 0; i < nodes.length; i++) {"
+      + "    var el = nodes[i];"
+      + "    var rect = el.getBoundingClientRect();"
+      + "    if (rect.width <= 0 || rect.height <= 0) continue;"
+      + "    var text = (el.innerText || '').trim();"
+      + "    if (!text || text.length > 32) continue;"
+      + "    if (excludeDanger && /^(删除|Delete)$/i.test(text)) continue;"
+      + "    for (var j = 0; j < patterns.length; j++) {"
+      + "      if (patterns[j].test(text)) {"
+      + "        var area = rect.width * rect.height;"
+      + "        if (text.length < bestLen || (text.length === bestLen && area < bestArea)) {"
+      + "          best = el;"
+      + "          bestLen = text.length;"
+      + "          bestArea = area;"
+      + "        }"
+      + "        break;"
+      + "      }"
+      + "    }"
+      + "  }"
+      + "  return best;"
+      + "};"
+      + "var clickHamburger = function() {"
+      + "  var els = Array.from(document.querySelectorAll('[tabindex=\"0\"], button, [role=\"button\"], div'));"
+      + "  var best = null;"
+      + "  var bestArea = 999999;"
+      + "  for (var i = 0; i < els.length; i++) {"
+      + "    var el = els[i];"
+      + "    var r = el.getBoundingClientRect();"
+      + "    if (r.width >= 20 && r.width <= 72 && r.height >= 20 && r.height <= 72 && r.left >= 0 && r.left < 80 && r.top >= 0 && r.top < 110 && el.querySelector('svg')) {"
+      + "      var area = r.width * r.height;"
+      + "      if (area < bestArea) { best = el; bestArea = area; }"
+      + "    }"
+      + "  }"
+      + "  return triggerClick(best);"
+      + "};"
+      + "var clickProfileBar = function() {"
+      + "  var els = Array.from(document.querySelectorAll('[tabindex=\"0\"], button, [role=\"button\"]'));"
+      + "  for (var i = 0; i < els.length; i++) {"
+      + "    var el = els[i];"
+      + "    if (el.tagName === 'A') continue;"
+      + "    var r = el.getBoundingClientRect();"
+      + "    if (r.width >= 120 && r.width <= 340 && r.height >= 32 && r.height <= 80 && r.left >= 0 && r.left < 80 && r.bottom > window.innerHeight - 90) {"
+      + "      return triggerClick(el);"
+      + "    }"
+      + "  }"
+      + "  return false;"
+      + "};"
+      + "var ticks = 0;"
+      + "var exportClicked = false;"
+      + "var lastSection = '';"
+      + "var lastAction = '';"
+      + "var lastActionTick = -10;"
+      + "var timer = setInterval(function() {"
+      + "  try {"
+      + "    ticks++;"
+      + "    var maxTicks = exportClicked ? 260 : 30;"
+      + "    if (ticks > maxTicks) {"
+      + "      clearInterval(timer);"
+      + "      window.__dsappAutoExportTimer = null;"
+      + "      window.__dsappAutoExportRunning = false;"
+      + "      window.HarmonyMigrationBridge && window.HarmonyMigrationBridge.onAutoExportTimeout();"
+      + "      return;"
+      + "    }"
+      + "    var confirmBtn = findVisibleByText([/^(确认导出|确认|确定|Confirm)$/i], true);"
+      + "    if (confirmBtn && triggerClick(confirmBtn)) {"
+      + "      return;"
+      + "    }"
+      + "    if (lastSection === 'data' || findVisibleByText([/导出所有历史对话|Export all/i], true)) {"
+      + "      var dlBtn = findVisibleByText([/^(下载|Download)$/i], true);"
+      + "      if (dlBtn && triggerClick(dlBtn)) {"
+      + "        clearInterval(timer);"
+      + "        window.__dsappAutoExportTimer = null;"
+      + "        window.__dsappAutoExportRunning = false;"
+      + "        return;"
+      + "      }"
+      + "      if (!exportClicked) {"
+      + "        var expBtn = findVisibleByText([/^(导出数据|导出|Export Data|Export)$/i], true);"
+      + "        if (expBtn && triggerClick(expBtn)) {"
+      + "          exportClicked = true;"
+      + "          window.HarmonyMigrationBridge && window.HarmonyMigrationBridge.onWaitingExport();"
+      + "          return;"
+      + "        }"
+      + "      }"
+      + "      return;"
+      + "    }"
+      + "    if (findVisibleByText([/^(通用设置|账号管理|General|Account)$/i], true) || findVisibleByText([/^(数据管理|Data Controls|Data management|Data)$/i], true)) {"
+      + "      var dataTab = findVisibleByText([/^(数据管理|Data Controls|Data management|Data)$/i], true);"
+      + "      if (dataTab && triggerClick(dataTab)) {"
+      + "        lastSection = 'data';"
+      + "        return;"
+      + "      }"
+      + "    }"
+      + "    var settingsItem = findVisibleByText([/^(系统设置|Settings)$/i], true);"
+      + "    if (settingsItem && triggerClick(settingsItem)) {"
+      + "      return;"
+      + "    }"
+      + "    if (findVisibleByText([/^(开启新对话|New chat)$/i], true)) {"
+      + "      if (lastAction !== 'profile' || ticks - lastActionTick >= 3) {"
+      + "        if (clickProfileBar()) {"
+      + "          lastAction = 'profile';"
+      + "          lastActionTick = ticks;"
+      + "        }"
+      + "      }"
+      + "      return;"
+      + "    }"
+      + "    if (lastAction !== 'hamburger' || ticks - lastActionTick >= 3) {"
+      + "      if (clickHamburger()) {"
+      + "        lastAction = 'hamburger';"
+      + "        lastActionTick = ticks;"
+      + "      }"
+      + "    }"
+      + "  } catch (err) {}"
+      + "}, 700);"
+      + "window.__dsappAutoExportTimer = timer;"
+      + "})();";
+    try {
+      this.migrationController.runJavaScript(js);
+    } catch {
+      // 忽略执行异常
+    }
   }
 
   private setupMigrationDownloadDelegate(): void {
@@ -385,7 +630,7 @@ struct Index {
           // 忽略清理失败
         }
         const b64 = new util.Base64Helper().encodeToStringSync(new Uint8Array(buf));
-        this.migrationVisible = false;
+        this.closeMigrationOverlay();
         this.controller.runJavaScript(
           `window.__NUWA_IMPORT_BASE64__ && window.__NUWA_IMPORT_BASE64__(${JSON.stringify(b64)}, ${JSON.stringify(this.migrationFileName)});`
         );
@@ -404,7 +649,7 @@ struct Index {
       if (this.migrationController.accessBackward()) {
         this.migrationController.backward();
       } else {
-        this.migrationVisible = false;
+        this.closeMigrationOverlay();
       }
       return true;
     }
@@ -453,12 +698,19 @@ struct Index {
               .layoutWeight(1)
               .maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
-            Button('关闭')
-              .fontSize(13)
+            Button('自动导出')
+              .fontSize(12.5)
               .fontColor('#FFFFFF')
               .backgroundColor(Color.Transparent)
               .onClick(() => {
-                this.migrationVisible = false;
+                this.runMigrationAutoExportScript(true);
+              })
+            Button('关闭')
+              .fontSize(12.5)
+              .fontColor('#FFFFFF')
+              .backgroundColor(Color.Transparent)
+              .onClick(() => {
+                this.closeMigrationOverlay();
               })
           }
           .width('100%')
@@ -475,8 +727,19 @@ struct Index {
             .domStorageAccess(true)
             .databaseAccess(true)
             .mixedMode(MixedMode.Compatible)
+            .javaScriptProxy({
+              object: this.migrationExportBridge,
+              name: 'HarmonyMigrationBridge',
+              methodList: ['onLoggedIn', 'onStep', 'onWaitingExport', 'onAutoExportTimeout'],
+              controller: this.migrationController,
+            })
             .onControllerAttached(() => {
               this.setupMigrationDownloadDelegate();
+            })
+            .onPageEnd(() => {
+              if (!this.migrationAutoExportTriggered) {
+                this.checkMigrationLoginState();
+              }
             })
         }
         .width('100%')
