@@ -118,19 +118,19 @@ function extractUserLabel(user?: PlatformUser): string {
 
 function buildClientHeaders(): Record<string, string> {
   const offsetSeconds = -new Date().getTimezoneOffset() * 60;
-  return {
-    'User-Agent':
-      'Mozilla/5.0 (Phone; OpenHarmony 5.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
-    Accept: 'application/json, text/plain, */*',
-    Origin: PLATFORM_ORIGIN,
-    Referer: `${PLATFORM_ORIGIN}/`,
-    'x-client-bundle-id': '',
-    'x-client-platform': 'web',
-    'x-client-version': CLIENT_VERSION,
-    'x-client-locale': 'zh_CN',
-    'x-client-timezone-offset': String(offsetSeconds),
-    'Content-Type': 'application/json',
-  };
+  const headers: Record<string, string> = {};
+  headers['User-Agent'] =
+    'Mozilla/5.0 (Phone; OpenHarmony 5.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36';
+  headers['Accept'] = 'application/json, text/plain, */*';
+  headers['Origin'] = PLATFORM_ORIGIN;
+  headers['Referer'] = `${PLATFORM_ORIGIN}/`;
+  headers['x-client-bundle-id'] = '';
+  headers['x-client-platform'] = 'web';
+  headers['x-client-version'] = CLIENT_VERSION;
+  headers['x-client-locale'] = 'zh_CN';
+  headers['x-client-timezone-offset'] = String(offsetSeconds);
+  headers['Content-Type'] = 'application/json';
+  return headers;
 }
 
 @Entry
