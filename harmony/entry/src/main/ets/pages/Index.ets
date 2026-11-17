@@ -119,6 +119,11 @@ function extractUserLabel(user?: PlatformUser): string {
 function buildClientHeaders(): Record<string, string> {
   const offsetSeconds = -new Date().getTimezoneOffset() * 60;
   return {
+    'User-Agent':
+      'Mozilla/5.0 (Phone; OpenHarmony 5.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+    Accept: 'application/json, text/plain, */*',
+    Origin: PLATFORM_ORIGIN,
+    Referer: `${PLATFORM_ORIGIN}/`,
     'x-client-bundle-id': '',
     'x-client-platform': 'web',
     'x-client-version': CLIENT_VERSION,
@@ -173,6 +178,9 @@ struct Index {
         readTimeout: 15000,
         expectDataType: http.HttpDataType.STRING,
       });
+      if (res.responseCode === 429) {
+        throw new Error('操作过于频繁，请稍后再试 (HTTP 429)');
+      }
       if (res.responseCode < 200 || res.responseCode >= 300) {
         throw new Error(`HTTP ${res.responseCode}`);
       }
