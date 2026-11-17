@@ -80,21 +80,55 @@ jobs:
           ohpm install --all
           hvigorw assembleHap --mode module -p product=default -p buildMode=debug --no-daemon
 
-      - name: Collect HAP artifact
+      - name: Collect and sign HAP artifact
         shell: bash
+        env:
+          P12_B64: ${{ secrets.HARMONY_P12_BASE64 }}
+          CER_B64: ${{ secrets.HARMONY_CER_BASE64 }}
+          P7B_B64: ${{ secrets.HARMONY_P7B_BASE64 }}
+          HARMONY_KEYSTORE_PASSWORD: ${{ secrets.HARMONY_KEYSTORE_PASSWORD }}
+          HARMONY_KEY_ALIAS: ${{ secrets.HARMONY_KEY_ALIAS }}
+          HARMONY_KEY_PASSWORD: ${{ secrets.HARMONY_KEY_PASSWORD }}
         run: |
           HAP_PATH=$(find harmony/entry/build -name "*.hap" | head -n 1)
           if [ -z "${HAP_PATH}" ]; then
             echo "No .hap file generated"
             exit 1
           fi
-          cp "${HAP_PATH}" "Nuwa-v${{ steps.version.outputs.name }}-harmony-unsigned.hap"
+
+          if [ -n "${P12_B64}" ] && [ -n "${CER_B64}" ] && [ -n "${P7B_B64}" ]; then
+            mkdir -p /tmp/harmony-signing
+            echo "${P12_B64}" | base64 -d > /tmp/harmony-signing/nuwa.p12
+            echo "${CER_B64}" | base64 -d > /tmp/harmony-signing/nuwa.cer
+            echo "${P7B_B64}" | base64 -d > /tmp/harmony-signing/nuwa.p7b
+
+            SIGN_TOOL=$(find "${HOS_SDK_HOME:-/}" /opt /home/runner -name "hap-sign-tool.jar" 2>/dev/null | head -n 1)
+            if [ -z "${SIGN_TOOL}" ]; then
+              echo "hap-sign-tool.jar not found"
+              exit 1
+            fi
+
+            java -jar "${SIGN_TOOL}" sign-app \
+              -mode localSign \
+              -signAlg SHA256withECDSA \
+              -keyAlias "${HARMONY_KEY_ALIAS}" \
+              -inFile "${HAP_PATH}" \
+              -outFile "Nuwa-v${{ steps.version.outputs.name }}-harmony-signed.hap" \
+              -keystoreFile /tmp/harmony-signing/nuwa.p12 \
+              -keystorePwd "${HARMONY_KEYSTORE_PASSWORD}" \
+              -keyPwd "${HARMONY_KEY_PASSWORD}" \
+              -appCertFile /tmp/harmony-signing/nuwa.cer \
+              -profileFile /tmp/harmony-signing/nuwa.p7b \
+              -signCode 1
+          else
+            cp "${HAP_PATH}" "Nuwa-v${{ steps.version.outputs.name }}-harmony-unsigned.hap"
+          fi
 
       - name: Upload HAP Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Nuwa-HarmonyOS-v${{ steps.version.outputs.name }}
-          path: Nuwa-*-harmony-unsigned.hap
+          path: Nuwa-*-harmony-*.hap
           if-no-files-found: error
 
       - name: Attach HAP to GitHub Release
@@ -102,4 +136,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: Nuwa-*-harmony-unsigned.hap
+          files: Nuwa-*-harmony-*.hap
