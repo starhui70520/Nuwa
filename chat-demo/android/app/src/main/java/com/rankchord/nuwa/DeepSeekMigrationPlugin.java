@@ -38,9 +38,11 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -72,9 +74,15 @@ public class DeepSeekMigrationPlugin extends Plugin {
     private String activeUtteranceId;
     private final List<Runnable> pendingTtsActions = new ArrayList<>();
     private final List<Runnable> pendingTtsErrors = new ArrayList<>();
+    private final Map<String, String> utteranceChunkTexts = new HashMap<>();
+    private FlymeLyricsMediaHelper lyricsMediaHelper;
     private AudioManager audioManager;
     private AudioFocusRequest audioFocusRequest;
-    private final AudioManager.OnAudioFocusChangeListener audioFocusListener = focusChange -> {};
+    private final AudioManager.OnAudioFocusChangeListener audioFocusListener = focusChange -> {
+        if (focusChange == AudioManager.AUDIOFOCUS_LOSS) {
+            mainHandler.post(this::handleMediaStopControl);
+        }
+    };
     private volatile boolean updateDownloading = false;
     @PluginMethod
     public void openExportBrowser(PluginCall call) {
@@ -523,9 +531,14 @@ public class DeepSeekMigrationPlugin extends Plugin {
             pendingStopCall = null;
             destroySpeechRecognizerInternal();
             activeUtteranceId = null;
+            utteranceChunkTexts.clear();
             pendingTtsActions.clear();
             pendingTtsErrors.clear();
             abandonTtsAudioFocus();
+            if (lyricsMediaHelper != null) {
+                lyricsMediaHelper.destroy();
+                lyricsMediaHelper = null;
+            }
             if (textToSpeech != null) {
                 try {
                     textToSpeech.stop();
@@ -785,6 +798,7 @@ public class DeepSeekMigrationPlugin extends Plugin {
         ret.put("brand", brand.name().toLowerCase(Locale.ROOT));
         ret.put("osLabel", osLabel);
         ret.put("isHyperOs", hyperOs);
+        ret.put("isFlyme", OemSpeechHelper.isFlyme());
         ret.put("asrEngine", resolvedAsrPkg);
         ret.put("asrLabel", OemSpeechHelper.describeEnginePackage(getContext(), resolvedAsrPkg));
         ret.put("ttsEngine", resolvedTtsPkg);
@@ -874,19 +888,30 @@ public class DeepSeekMigrationPlugin extends Plugin {
 
                 final String utteranceId = UUID.randomUUID().toString();
                 activeUtteranceId = utteranceId;
+                utteranceChunkTexts.clear();
                 int maxLen = Math.max(500, Math.min(3800, TextToSpeech.getMaxSpeechInputLength() - 200));
-                List<String> chunks = splitTtsChunks(text, maxLen);
+                List<String> chunks = splitIntoLyricSentences(text, maxLen);
+                if (chunks.isEmpty()) {
+                    chunks.add(text);
+                }
                 for (int i = 0; i < chunks.size(); i++) {
                     int queueMode = (i == 0) ? TextToSpeech.QUEUE_FLUSH : TextToSpeech.QUEUE_ADD;
                     String chunkId = (i == chunks.size() - 1) ? utteranceId : (utteranceId + ":" + i);
-                    int status = textToSpeech.speak(chunks.get(i), queueMode, null, chunkId);
+                    String chunkText = chunks.get(i);
+                    utteranceChunkTexts.put(chunkId, chunkText);
+                    int status = textToSpeech.speak(chunkText, queueMode, null, chunkId);
                     if (status != TextToSpeech.SUCCESS) {
                         activeUtteranceId = null;
+                        utteranceChunkTexts.clear();
                         abandonTtsAudioFocus();
+                        if (lyricsMediaHelper != null) {
+                            lyricsMediaHelper.stop();
+                        }
                         call.reject("TTS_SPEAK_FAILED");
                         return;
                     }
                 }
+                getLyricsMediaHelper().startOrUpdate(getActivity(), chunks.get(0));
                 JSObject ret = new JSObject();
                 ret.put("utteranceId", utteranceId);
                 call.resolve(ret);
@@ -899,14 +924,39 @@ public class DeepSeekMigrationPlugin extends Plugin {
     public void stopSpeaking(PluginCall call) {
         mainHandler.post(() -> {
             activeUtteranceId = null;
+            utteranceChunkTexts.clear();
             pendingTtsActions.clear();
             pendingTtsErrors.clear();
             abandonTtsAudioFocus();
+            if (lyricsMediaHelper != null) {
+                lyricsMediaHelper.stop();
+            }
             if (textToSpeech != null) {
                 try {
                     textToSpeech.stop();
                 } catch (Exception ignored) {
                 }
+            }
+            call.resolve();
+        });
+    }
+
+    @PluginMethod
+    public void updateReadAloudNotification(PluginCall call) {
+        final String line = call.getString("line", "");
+        mainHandler.post(() -> {
+            if (line != null && !line.trim().isEmpty()) {
+                getLyricsMediaHelper().startOrUpdate(getActivity(), line);
+            }
+            call.resolve();
+        });
+    }
+
+    @PluginMethod
+    public void clearReadAloudNotification(PluginCall call) {
+        mainHandler.post(() -> {
+            if (lyricsMediaHelper != null) {
+                lyricsMediaHelper.stop();
             }
             call.resolve();
         });
@@ -1088,6 +1138,35 @@ public class DeepSeekMigrationPlugin extends Plugin {
         }
     }
 
+    private FlymeLyricsMediaHelper getLyricsMediaHelper() {
+        if (lyricsMediaHelper == null) {
+            lyricsMediaHelper = new FlymeLyricsMediaHelper(
+                getContext(),
+                mainHandler,
+                this::handleMediaStopControl
+            );
+        }
+        return lyricsMediaHelper;
+    }
+
+    private void handleMediaStopControl() {
+        activeUtteranceId = null;
+        utteranceChunkTexts.clear();
+        pendingTtsActions.clear();
+        pendingTtsErrors.clear();
+        abandonTtsAudioFocus();
+        if (lyricsMediaHelper != null) {
+            lyricsMediaHelper.stop();
+        }
+        if (textToSpeech != null) {
+            try {
+                textToSpeech.stop();
+            } catch (Exception ignored) {
+            }
+        }
+        emitWebEvent("window.dispatchEvent(new CustomEvent('dsapp:media-stop'));");
+    }
+
     private void emitTtsState(final String id, final String state, final boolean requireExactId) {
         mainHandler.post(() -> {
             if (activeUtteranceId == null || id == null) {
@@ -1099,9 +1178,18 @@ public class DeepSeekMigrationPlugin extends Plugin {
                 return;
             }
             final String rootId = activeUtteranceId;
-            if (!"playing".equals(state)) {
+            if ("playing".equals(state)) {
+                String lyricLine = utteranceChunkTexts.get(id);
+                if (lyricLine != null && !lyricLine.isEmpty()) {
+                    getLyricsMediaHelper().startOrUpdate(null, lyricLine);
+                }
+            } else {
                 activeUtteranceId = null;
+                utteranceChunkTexts.clear();
                 abandonTtsAudioFocus();
+                if (lyricsMediaHelper != null) {
+                    lyricsMediaHelper.stop();
+                }
             }
             emitWebEvent(
                 "window.dispatchEvent(new CustomEvent('dsapp:tts-state',{detail:{id:'"
@@ -1113,8 +1201,76 @@ public class DeepSeekMigrationPlugin extends Plugin {
         });
     }
 
-    private List<String> splitTtsChunks(String text, int maxLen) {
-        List<String> chunks = new ArrayList<>();
+    private List<String> splitIntoLyricSentences(String text, int hardMaxLen) {
+        List<String> rawSentences = new ArrayList<>();
+        int start = 0;
+        int len = text.length();
+        for (int i = 0; i < len; i++) {
+            char c = text.charAt(i);
+            boolean strongBreak = c == '。' || c == '！' || c == '？' || c == '；' || c == '\n';
+            boolean asciiBreak = (c == '.' || c == '!' || c == '?' || c == ';')
+                && (i + 1 >= len || Character.isWhitespace(text.charAt(i + 1)));
+            if (strongBreak || asciiBreak) {
+                appendClausePieces(rawSentences, text.substring(start, i + 1).trim(), hardMaxLen);
+                start = i + 1;
+            }
+        }
+        if (start < len) {
+            appendClausePieces(rawSentences, text.substring(start).trim(), hardMaxLen);
+        }
+
+        List<String> merged = new ArrayList<>();
+        for (String piece : rawSentences) {
+            if (piece.isEmpty()) {
+                continue;
+            }
+            if (!merged.isEmpty()) {
+                int lastIdx = merged.size() - 1;
+                String prev = merged.get(lastIdx);
+                if ((prev.length() < 8 || piece.length() < 8) && prev.length() + piece.length() + 1 <= 56) {
+                    merged.set(lastIdx, joinFragment(prev, piece));
+                    continue;
+                }
+            }
+            merged.add(piece);
+        }
+        return merged;
+    }
+
+    private void appendClausePieces(List<String> out, String sentence, int hardMaxLen) {
+        if (sentence.isEmpty()) {
+            return;
+        }
+        int clauseLimit = Math.min(52, hardMaxLen);
+        if (sentence.length() <= clauseLimit) {
+            out.add(sentence);
+            return;
+        }
+        int start = 0;
+        int len = sentence.length();
+        for (int i = 0; i < len; i++) {
+            char c = sentence.charAt(i);
+            boolean clauseBreak = c == '，' || c == '、' || c == '：'
+                || ((c == ',' || c == ':') && (i + 1 >= len || Character.isWhitespace(sentence.charAt(i + 1))));
+            if (clauseBreak && (i + 1 - start) >= 16) {
+                addBoundedChunks(out, sentence.substring(start, i + 1).trim(), hardMaxLen);
+                start = i + 1;
+            }
+        }
+        if (start < len) {
+            addBoundedChunks(out, sentence.substring(start).trim(), hardMaxLen);
+        }
+    }
+
+    private void addBoundedChunks(List<String> out, String text, int hardMaxLen) {
+        if (text.isEmpty()) {
+            return;
+        }
+        int maxLen = Math.min(52, hardMaxLen);
+        if (text.length() <= maxLen) {
+            out.add(text);
+            return;
+        }
         int start = 0;
         int total = text.length();
         while (start < total) {
@@ -1123,8 +1279,7 @@ public class DeepSeekMigrationPlugin extends Plugin {
                 int minBreak = start + maxLen / 2;
                 int breakAt = -1;
                 for (int i = end - 1; i >= minBreak; i--) {
-                    char c = text.charAt(i);
-                    if (c == '。' || c == '！' || c == '？' || c == '.' || c == '!' || c == '?' || c == '\n' || c == ' ') {
+                    if (Character.isWhitespace(text.charAt(i))) {
                         breakAt = i + 1;
                         break;
                     }
@@ -1135,11 +1290,17 @@ public class DeepSeekMigrationPlugin extends Plugin {
             }
             String part = text.substring(start, end).trim();
             if (!part.isEmpty()) {
-                chunks.add(part);
+                out.add(part);
             }
             start = end;
         }
-        return chunks;
+    }
+
+    private static String joinFragment(String prev, String next) {
+        char last = prev.charAt(prev.length() - 1);
+        char first = next.charAt(0);
+        boolean cjkOrPunct = last > 127 || first > 127;
+        return cjkOrPunct ? (prev + next) : (prev + " " + next);
     }
 
     private void emitWebEvent(final String script) {

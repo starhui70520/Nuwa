@@ -61,6 +61,7 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <queries>
@@ -91,6 +92,11 @@
         <package android:name="com.huawei.hiai" />
         <package android:name="com.hihonor.vassistant" />
         <package android:name="com.huawei.vassistant" />
+        <!-- Meizu / Xingji Meizu Flyme -->
+        <package android:name="com.meizu.voiceassistant" />
+        <package android:name="com.meizu.flyme.input" />
+        <package android:name="com.meizu.ai" />
+        <package android:name="com.meizu.media.reader" />
         <!-- Samsung & Universal Chinese / Google Speech Engines -->
         <package android:name="com.samsung.SMT" />
         <package android:name="com.iflytek.speechcloud" />

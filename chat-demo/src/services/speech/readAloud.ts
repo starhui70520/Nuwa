@@ -32,7 +32,12 @@ export const useReadAloud = create<ReadAloudState>(() => ({ messageId: null, sta
 /** 首帧前多缓冲一点，减少网络抖动造成的断续 */
 const START_DELAY = 0.1
 
-let current: { controller: AbortController; context: AudioContext } | null = null
+let current: {
+  controller: AbortController
+  context: AudioContext
+  lyricTimer?: number
+  lyricStarted?: boolean
+} | null = null
 let nativeCurrent: { cleanup: () => void; stop: () => void } | null = null
 
 const HARMONY_TTS_EVENT = 'nuwa:harmony-tts'
@@ -67,13 +72,136 @@ const stripMarkdownForTts = (raw: string): string =>
     .replace(/\s+/g, ' ')
     .trim()
 
+const appendClausePieces = (out: string[], sentence: string) => {
+  if (!sentence) {
+    return
+  }
+  const clauseLimit = 52
+  if (sentence.length <= clauseLimit) {
+    out.push(sentence)
+    return
+  }
+  let start = 0
+  for (let i = 0; i < sentence.length; i++) {
+    const ch = sentence[i]
+    const next = i + 1 < sentence.length ? sentence[i + 1] : ''
+    const clauseBreak =
+      ch === '，' ||
+      ch === '、' ||
+      ch === '：' ||
+      ((ch === ',' || ch === ':') && (!next || /\s/.test(next)))
+    if (clauseBreak && i + 1 - start >= 16) {
+      addBoundedSentenceChunks(out, sentence.slice(start, i + 1).trim(), clauseLimit)
+      start = i + 1
+    }
+  }
+  if (start < sentence.length) {
+    addBoundedSentenceChunks(out, sentence.slice(start).trim(), clauseLimit)
+  }
+}
+
+const addBoundedSentenceChunks = (out: string[], text: string, maxLen: number) => {
+  if (!text) {
+    return
+  }
+  if (text.length <= maxLen) {
+    out.push(text)
+    return
+  }
+  let start = 0
+  while (start < text.length) {
+    let end = Math.min(text.length, start + maxLen)
+    if (end < text.length) {
+      const minBreak = start + Math.floor(maxLen / 2)
+      let breakAt = -1
+      for (let i = end - 1; i >= minBreak; i--) {
+        if (/\s/.test(text[i])) {
+          breakAt = i + 1
+          break
+        }
+      }
+      if (breakAt > start) {
+        end = breakAt
+      }
+    }
+    const part = text.slice(start, end).trim()
+    if (part) {
+      out.push(part)
+    }
+    start = end
+  }
+}
+
+const joinSentenceFragment = (prev: string, next: string): string => {
+  const cjkOrPunct = prev.charCodeAt(prev.length - 1) > 127 || next.charCodeAt(0) > 127
+  return cjkOrPunct ? `${prev}${next}` : `${prev} ${next}`
+}
+
+const splitLyricSentences = (cleaned: string): string[] => {
+  if (!cleaned) {
+    return []
+  }
+  const raw: string[] = []
+  let start = 0
+  for (let i = 0; i < cleaned.length; i++) {
+    const ch = cleaned[i]
+    const next = i + 1 < cleaned.length ? cleaned[i + 1] : ''
+    const strongBreak = ch === '。' || ch === '！' || ch === '？' || ch === '；' || ch === '\n'
+    const asciiBreak =
+      (ch === '.' || ch === '!' || ch === '?' || ch === ';') && (!next || /\s/.test(next))
+    if (strongBreak || asciiBreak) {
+      appendClausePieces(raw, cleaned.slice(start, i + 1).trim())
+      start = i + 1
+    }
+  }
+  if (start < cleaned.length) {
+    appendClausePieces(raw, cleaned.slice(start).trim())
+  }
+
+  const merged: string[] = []
+  for (const piece of raw) {
+    if (!piece) {
+      continue
+    }
+    if (merged.length > 0) {
+      const prev = merged[merged.length - 1]
+      if ((prev.length < 8 || piece.length < 8) && prev.length + piece.length + 1 <= 56) {
+        merged[merged.length - 1] = joinSentenceFragment(prev, piece)
+        continue
+      }
+    }
+    merged.push(piece)
+  }
+  return merged.length > 0 ? merged : [cleaned]
+}
+
+const estimateSpeechUnits = (sentence: string): number => {
+  let units = 0
+  for (let i = 0; i < sentence.length; i++) {
+    const ch = sentence[i]
+    if (sentence.charCodeAt(i) > 127) {
+      units += /[\u3000-\u303f\uff00-\uffef]/.test(ch) ? 0.4 : 1
+    } else if (!/\s/.test(ch)) {
+      units += /[.,!?;:]/.test(ch) ? 0.35 : 0.45
+    }
+  }
+  return Math.max(1, units)
+}
+
 const finish = (controller: AbortController) => {
   if (current?.controller !== controller) {
     return
   }
+  if (current.lyricTimer !== undefined) {
+    window.clearInterval(current.lyricTimer)
+  }
+  const hadLyrics = Boolean(current.lyricStarted)
   void current.context.close()
   current = null
   useReadAloud.setState({ messageId: null, status: 'idle' })
+  if (hadLyrics && isNativeAndroid()) {
+    void DeepSeekMigration.clearReadAloudNotification().catch(() => {})
+  }
 }
 
 /** 停止当前朗读（发送、停止生成、切换会话等场景调用） */
@@ -90,6 +218,12 @@ export const stopReadAloud = () => {
     controller.abort()
     finish(controller)
   }
+}
+
+if (typeof window !== 'undefined' && isNativeAndroid()) {
+  window.addEventListener('dsapp:media-stop', () => {
+    stopReadAloud()
+  })
 }
 
 /** 16-bit 小端 PCM 转成 Float32；奇数字节留到下一段 */
@@ -277,9 +411,25 @@ export const toggleReadAloud = (
   // 音色在开始朗读时读取，设置中切换后下一次朗读生效
   const { ttsVoice } = useSettings.getState()
   const secret = getActiveSecret()
+  const useAndroidLyrics = isNativeAndroid()
+  const lyricSentences = useAndroidLyrics ? splitLyricSentences(stripMarkdownForTts(text)) : []
+  const sentenceThresholds: number[] = []
+  let totalSpeechUnits = 0
+  if (lyricSentences.length > 0) {
+    const unitCounts = lyricSentences.map(estimateSpeechUnits)
+    totalSpeechUnits = unitCounts.reduce((acc, u) => acc + u, 0)
+    let acc = 0
+    for (const u of unitCounts) {
+      sentenceThresholds.push(totalSpeechUnits > 0 ? acc / totalSpeechUnits : 0)
+      acc += u
+    }
+  }
 
   void (async () => {
     let nextTime = 0
+    let firstStartTime = 0
+    let streamEnded = false
+    let lastSentLyricIdx = -1
     let lastSource: AudioBufferSourceNode | null = null
     let rest = new Uint8Array(0)
     try {
@@ -306,13 +456,52 @@ export const toggleReadAloud = (
         source.connect(context.destination)
         // 网络慢于播放时从当前时间续上，不补播过去的时间
         nextTime = Math.max(nextTime, context.currentTime + (lastSource ? 0 : START_DELAY))
+        if (!lastSource) {
+          firstStartTime = nextTime
+        }
         source.start(nextTime)
         nextTime += buffer.duration
         lastSource = source
         if (useReadAloud.getState().status === 'loading') {
           useReadAloud.setState({ status: 'playing' })
+          if (useAndroidLyrics && lyricSentences.length > 0 && current?.controller === controller) {
+            lastSentLyricIdx = 0
+            current.lyricStarted = true
+            void DeepSeekMigration.updateReadAloudNotification({ line: lyricSentences[0] }).catch(
+              () => {}
+            )
+            if (lyricSentences.length > 1) {
+              const estFromText = Math.max(1.2, totalSpeechUnits * 0.24)
+              current.lyricTimer = window.setInterval(() => {
+                if (current?.controller !== controller) {
+                  return
+                }
+                const elapsed = Math.max(0, context.currentTime - firstStartTime)
+                const bufferedDuration = Math.max(0, nextTime - firstStartTime)
+                const estTotal = streamEnded
+                  ? Math.max(0.5, bufferedDuration)
+                  : Math.max(estFromText, bufferedDuration + 0.8)
+                const ratio = Math.min(0.999, Math.max(0, elapsed / estTotal))
+                let nextIdx = lastSentLyricIdx
+                for (let i = Math.max(0, lastSentLyricIdx + 1); i < sentenceThresholds.length; i++) {
+                  if (sentenceThresholds[i] <= ratio) {
+                    nextIdx = i
+                  } else {
+                    break
+                  }
+                }
+                if (nextIdx > lastSentLyricIdx) {
+                  lastSentLyricIdx = nextIdx
+                  void DeepSeekMigration.updateReadAloudNotification({
+                    line: lyricSentences[nextIdx],
+                  }).catch(() => {})
+                }
+              }, 450)
+            }
+          }
         }
       }
+      streamEnded = true
       if (lastSource) {
         lastSource.onended = () => finish(controller)
       } else {

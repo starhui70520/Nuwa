@@ -25,7 +25,7 @@ import java.util.Set;
 
 /**
  * OEM device detection and speech engine ranking for Xiaomi HyperOS/MIUI,
- * OPPO/OnePlus/Realme ColorOS, vivo/iQOO OriginOS, Honor/Huawei, and Google.
+ * OPPO/OnePlus/Realme ColorOS, vivo/iQOO OriginOS, Honor/Huawei, Meizu Flyme, and Google.
  */
 final class OemSpeechHelper {
     enum Brand {
@@ -33,6 +33,7 @@ final class OemSpeechHelper {
         OPPO,
         VIVO,
         HONOR_HUAWEI,
+        MEIZU,
         SAMSUNG,
         OTHER,
     }
@@ -65,6 +66,9 @@ final class OemSpeechHelper {
         if (id.contains("honor") || id.contains("huawei")) {
             return Brand.HONOR_HUAWEI;
         }
+        if (id.contains("meizu") || id.contains("xingji") || isFlyme()) {
+            return Brand.MEIZU;
+        }
         if (id.contains("samsung")) {
             return Brand.SAMSUNG;
         }
@@ -77,9 +81,25 @@ final class OemSpeechHelper {
         return !name.isEmpty() || !code.isEmpty();
     }
 
+    static boolean isFlyme() {
+        String display = Build.DISPLAY != null ? Build.DISPLAY.toLowerCase(Locale.ROOT) : "";
+        if (display.contains("flyme")) {
+            return true;
+        }
+        String propDisplay = getSystemProperty("ro.build.display.id").toLowerCase(Locale.ROOT);
+        if (propDisplay.contains("flyme")) {
+            return true;
+        }
+        return !getSystemProperty("ro.flyme.published").isEmpty()
+            || !getSystemProperty("ro.meizu.product.model").isEmpty();
+    }
+
     static String getOsLabel() {
         if (isHyperOs()) {
             return "HyperOS";
+        }
+        if (isFlyme()) {
+            return "Flyme";
         }
         switch (detectBrand()) {
             case XIAOMI:
@@ -90,6 +110,8 @@ final class OemSpeechHelper {
                 return "OriginOS";
             case HONOR_HUAWEI:
                 return "MagicOS";
+            case MEIZU:
+                return "Flyme";
             case SAMSUNG:
                 return "OneUI";
             default:
@@ -113,6 +135,12 @@ final class OemSpeechHelper {
         }
         if (lower.startsWith("com.hihonor.") || lower.startsWith("com.huawei.")) {
             return "智慧语音引擎";
+        }
+        if (lower.startsWith("com.meizu.voiceassistant") || lower.startsWith("com.meizu.ai")) {
+            return "Aicy 语音引擎";
+        }
+        if (lower.startsWith("com.meizu.")) {
+            return "Flyme 语音服务";
         }
         if (lower.startsWith("com.iflytek.")) {
             return "科大讯飞语音引擎";
@@ -153,6 +181,9 @@ final class OemSpeechHelper {
             return 1000;
         }
         if (brand == Brand.HONOR_HUAWEI && (lower.startsWith("com.hihonor.") || lower.startsWith("com.huawei."))) {
+            return 1000;
+        }
+        if (brand == Brand.MEIZU && lower.startsWith("com.meizu.")) {
             return 1000;
         }
         if (brand == Brand.SAMSUNG && lower.startsWith("com.samsung.")) {
@@ -267,8 +298,10 @@ final class OemSpeechHelper {
         intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, resolved);
         intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, resolved);
 
-        // Relax silence timeouts so HyperOS/ColorOS/OriginOS ASR engines don't cut off mid-sentence.
-        long completeSilence = (brand == Brand.XIAOMI || brand == Brand.OPPO || brand == Brand.VIVO) ? 2400L : 2200L;
+        // Relax silence timeouts so HyperOS/ColorOS/OriginOS/Flyme ASR engines don't cut off mid-sentence.
+        long completeSilence = (brand == Brand.XIAOMI || brand == Brand.OPPO || brand == Brand.VIVO || brand == Brand.MEIZU)
+            ? 2400L
+            : 2200L;
         intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, completeSilence);
         intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1800L);
         intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 1500L);

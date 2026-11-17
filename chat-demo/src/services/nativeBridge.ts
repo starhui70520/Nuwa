@@ -28,11 +28,14 @@ export type DeepSeekMigrationPlugin = {
     utteranceId: string
   }>
   stopSpeaking: () => Promise<void>
+  updateReadAloudNotification: (options: { line: string }) => Promise<void>
+  clearReadAloudNotification: () => Promise<void>
   setSystemBarsStyle: (options: { dark: boolean }) => Promise<void>
   getSpeechEngineInfo: () => Promise<{
     brand: string
     osLabel: string
     isHyperOs: boolean
+    isFlyme?: boolean
     asrEngine: string
     asrLabel: string
     ttsEngine: string

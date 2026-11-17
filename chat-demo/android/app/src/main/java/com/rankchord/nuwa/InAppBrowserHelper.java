@@ -380,6 +380,8 @@ final class InAppBrowserHelper {
                 return Arrays.asList("com.vivo.browser", "com.android.chrome");
             case HONOR_HUAWEI:
                 return Arrays.asList("com.hihonor.baidu.browser", "com.huawei.browser", "com.android.chrome");
+            case MEIZU:
+                return Arrays.asList("com.android.browser", "com.android.chrome");
             case SAMSUNG:
                 return Arrays.asList("com.sec.android.app.sbrowser", "com.android.chrome");
             default:
