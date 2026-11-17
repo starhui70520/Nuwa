@@ -1,6 +1,7 @@
 import { webview } from '@kit.ArkWeb';
 import { util } from '@kit.ArkTS';
 import { deviceInfo } from '@kit.BasicServicesKit';
+import { fileIo as fs } from '@kit.CoreFileKit';
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { http } from '@kit.NetworkKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
@@ -40,10 +41,12 @@ interface PlatformEnvelope {
 class HarmonyBridge {
   private onStartAuth: () => void;
   private onLogoutAuth: (token: string) => void;
+  private onOpenExport: () => void;
 
-  constructor(onStartAuth: () => void, onLogoutAuth: (token: string) => void) {
+  constructor(onStartAuth: () => void, onLogoutAuth: (token: string) => void, onOpenExport: () => void) {
     this.onStartAuth = onStartAuth;
     this.onLogoutAuth = onLogoutAuth;
+    this.onOpenExport = onOpenExport;
   }
 
   startPlatformAuth(): void {
@@ -52,6 +55,10 @@ class HarmonyBridge {
 
   logoutPlatformAuth(token: string): void {
     this.onLogoutAuth(token);
+  }
+
+  openExportBrowser(): void {
+    this.onOpenExport();
   }
 }
 
@@ -138,10 +145,15 @@ function buildClientHeaders(): Record<string, string> {
 struct Index {
   private controller: webview.WebviewController = new webview.WebviewController();
   private authController: webview.WebviewController = new webview.WebviewController();
+  private migrationController: webview.WebviewController = new webview.WebviewController();
+  private downloadDelegate: webview.WebDownloadDelegate = new webview.WebDownloadDelegate();
 
   @State private authVisible: boolean = false;
   @State private authUrl: string = '';
   @State private authStatusText: string = '正在连接 DeepSeek 开放平台...';
+
+  @State private migrationVisible: boolean = false;
+  @State private migrationStatusText: string = '请登录 DeepSeek 账号并在「设置 → 数据管理」点击导出';
 
   private pkceVerifier: string = '';
   private pkceState: string = '';
@@ -150,6 +162,8 @@ struct Index {
   private authExchanging: boolean = false;
   private authCompleted: boolean = false;
   private cachedDeviceId: string = '';
+  private migrationSavePath: string = '';
+  private migrationFileName: string = 'deepseek_data.zip';
 
   private harmonyBridge: HarmonyBridge = new HarmonyBridge(
     () => {
@@ -157,6 +171,9 @@ struct Index {
     },
     (token: string) => {
       void this.logoutPlatformToken(token);
+    },
+    () => {
+      this.openMigrationOverlay();
     }
   );
 
@@ -327,7 +344,70 @@ struct Index {
     }
   }
 
+  private openMigrationOverlay(): void {
+    this.migrationStatusText = '请登录 DeepSeek 账号并在「设置 → 数据管理」点击导出';
+    this.migrationVisible = true;
+  }
+
+  private setupMigrationDownloadDelegate(): void {
+    this.downloadDelegate.onBeforeDownload((item: webview.WebDownloadItem) => {
+      const suggested = item.getSuggestedFileName();
+      this.migrationFileName = suggested && suggested.trim().length > 0 ? suggested.trim() : 'deepseek_data.zip';
+      this.migrationSavePath = `${getContext(this).cacheDir}/pending_migration.zip`;
+      try {
+        if (fs.accessSync(this.migrationSavePath)) {
+          fs.unlinkSync(this.migrationSavePath);
+        }
+      } catch {
+        // 忽略不存在
+      }
+      this.migrationStatusText = '正在下载历史记录导出包...';
+      item.start(this.migrationSavePath);
+    });
+
+    this.downloadDelegate.onDownloadFailed((_item: webview.WebDownloadItem) => {
+      this.migrationStatusText = '下载导出包失败，请重新点击下载';
+    });
+
+    this.downloadDelegate.onDownloadFinish((_item: webview.WebDownloadItem) => {
+      try {
+        const stat = fs.statSync(this.migrationSavePath);
+        const buf = new ArrayBuffer(stat.size);
+        const file = fs.openSync(this.migrationSavePath, fs.OpenMode.READ_ONLY);
+        try {
+          fs.readSync(file.fd, buf);
+        } finally {
+          fs.closeSync(file);
+        }
+        try {
+          fs.unlinkSync(this.migrationSavePath);
+        } catch {
+          // 忽略清理失败
+        }
+        const b64 = new util.Base64Helper().encodeToStringSync(new Uint8Array(buf));
+        this.migrationVisible = false;
+        this.controller.runJavaScript(
+          `window.__NUWA_IMPORT_BASE64__ && window.__NUWA_IMPORT_BASE64__(${JSON.stringify(b64)}, ${JSON.stringify(this.migrationFileName)});`
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        hilog.error(0x0000, 'NuwaMigration', 'Import failed: %{public}s', msg);
+        this.migrationStatusText = '读取导出包失败，请重试';
+      }
+    });
+
+    this.migrationController.setDownloadDelegate(this.downloadDelegate);
+  }
+
   onBackPress(): boolean {
+    if (this.migrationVisible) {
+      if (this.migrationController.accessBackward()) {
+        this.migrationController.backward();
+      } else {
+        this.migrationVisible = false;
+      }
+      return true;
+    }
     if (this.authVisible) {
       if (this.authUrl && this.authController.accessBackward()) {
         this.authController.backward();
@@ -360,9 +440,49 @@ struct Index {
         .javaScriptProxy({
           object: this.harmonyBridge,
           name: '__NUWA_HARMONY__',
-          methodList: ['startPlatformAuth', 'logoutPlatformAuth'],
+          methodList: ['startPlatformAuth', 'logoutPlatformAuth', 'openExportBrowser'],
           controller: this.controller,
         })
+
+      if (this.migrationVisible) {
+        Column() {
+          Row() {
+            Text(this.migrationStatusText)
+              .fontSize(12.5)
+              .fontColor('#FFFFFF')
+              .layoutWeight(1)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+            Button('关闭')
+              .fontSize(13)
+              .fontColor('#FFFFFF')
+              .backgroundColor(Color.Transparent)
+              .onClick(() => {
+                this.migrationVisible = false;
+              })
+          }
+          .width('100%')
+          .padding({ left: 14, right: 8, top: 10, bottom: 10 })
+          .backgroundColor('#1D4ED8')
+
+          Web({
+            src: 'https://chat.deepseek.com/',
+            controller: this.migrationController,
+          })
+            .width('100%')
+            .layoutWeight(1)
+            .javaScriptAccess(true)
+            .domStorageAccess(true)
+            .databaseAccess(true)
+            .mixedMode(MixedMode.Compatible)
+            .onControllerAttached(() => {
+              this.setupMigrationDownloadDelegate();
+            })
+        }
+        .width('100%')
+        .height('100%')
+        .backgroundColor('#FFFFFF')
+      }
 
       if (this.authVisible) {
         Column() {

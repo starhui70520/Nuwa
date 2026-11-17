@@ -10,6 +10,7 @@ declare global {
     __NUWA_HARMONY__?: {
       startPlatformAuth?: () => void
       logoutPlatformAuth?: (token: string) => void
+      openExportBrowser?: () => void
     }
   }
 }

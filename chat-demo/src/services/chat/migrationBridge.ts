@@ -10,6 +10,7 @@ export { isNativeAndroid }
 declare global {
   interface Window {
     __DSAPP_IMPORT_ZIP__?: (data: File | Uint8Array | ArrayBuffer, name?: string) => Promise<number>
+    __NUWA_IMPORT_BASE64__?: (base64Data: string, name?: string) => Promise<number>
   }
 }
 
@@ -61,6 +62,14 @@ export const checkPendingAndroidMigration = async (): Promise<void> => {
 /** 绑定跨端导入与登录桥接（桌面端 Tauri / 移动端 Capacitor / 浏览器插件统一入口） */
 export const bindMigrationBridge = (): (() => void) => {
   window.__DSAPP_IMPORT_ZIP__ = (data, name) => runZipImport(data, name)
+  window.__NUWA_IMPORT_BASE64__ = (base64Data, name) => {
+    const binary = atob(base64Data)
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i)
+    }
+    return runZipImport(bytes, name)
+  }
 
   const handleMessage = (event: MessageEvent) => {
     if (event.source !== window && event.origin !== window.location.origin) {
@@ -121,6 +130,7 @@ export const bindMigrationBridge = (): (() => void) => {
 
   return () => {
     delete window.__DSAPP_IMPORT_ZIP__
+    delete window.__NUWA_IMPORT_BASE64__
     window.removeEventListener('message', handleMessage)
     document.removeEventListener('visibilitychange', handleVisibility)
     window.removeEventListener('focus', handleVisibility)
@@ -139,6 +149,10 @@ export const launchAndroidMigrationBrowser = async (): Promise<void> => {
 export const triggerOneClickMigration = async (): Promise<void> => {
   if (isNativeAndroid()) {
     await launchAndroidMigrationBrowser()
+    return
+  }
+  if (window.__NUWA_HARMONY__?.openExportBrowser) {
+    window.__NUWA_HARMONY__.openExportBrowser()
     return
   }
   window.open('https://chat.deepseek.com/', '_blank', 'noopener,noreferrer')

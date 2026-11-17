@@ -2,8 +2,8 @@
   "app": {
     "bundleName": "com.rankchord.nuwa",
     "vendor": "rankchord",
-    "versionCode": 10008,
-    "versionName": "0.1.8",
+    "versionCode": 10009,
+    "versionName": "0.1.9",
     "icon": "$media:app_icon",
     "label": "$string:app_name"
   }
