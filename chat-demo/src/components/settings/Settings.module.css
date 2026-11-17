@@ -441,3 +441,14 @@
     max-width: 100%;
   }
 }
+
+.dialog {
+  animation: settingsEnter 0.24s var(--ds-ease-in-out);
+}
+
+@keyframes settingsEnter {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+}

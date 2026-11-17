@@ -15,10 +15,27 @@
     0 4px 20px rgba(0, 0, 0, 0.05),
     0 1px 3px rgba(0, 0, 0, 0.03);
   overflow: hidden;
+  transition:
+    border-color 0.25s var(--ds-ease-in-out),
+    box-shadow 0.25s var(--ds-ease-in-out);
+
+  &:focus-within {
+    border-color: rgba(0, 0, 0, 0.14);
+    box-shadow:
+      0 6px 24px rgba(0, 0, 0, 0.08),
+      0 1px 3px rgba(0, 0, 0, 0.04);
+  }
 
   [data-ds-dark-theme] & {
     border-color: rgba(255, 255, 255, 0.09);
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.28);
+  }
+
+  &:focus-within {
+    [data-ds-dark-theme] & {
+      border-color: rgba(255, 255, 255, 0.2);
+      box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
+    }
   }
 }
 

@@ -117,3 +117,15 @@
     background: var(--dsw-alias-interactive-bg-hover);
   }
 }
+
+.menu {
+  transform-origin: top center;
+  animation: menuEnter 0.18s var(--ds-ease-in-out);
+}
+
+@keyframes menuEnter {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.98);
+  }
+}

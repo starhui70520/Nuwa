@@ -58,3 +58,14 @@
     margin: auto 0;
   }
 }
+
+.welcome {
+  animation: welcomeEnter 0.4s var(--ds-ease-in-out);
+}
+
+@keyframes welcomeEnter {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+}

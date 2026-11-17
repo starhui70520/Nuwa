@@ -1,5 +1,6 @@
 .message {
   position: relative;
+  animation: msgEnter 0.3s var(--ds-ease-in-out);
 
   &:hover .actions,
   &:focus-within .actions {
@@ -135,5 +136,12 @@
   &.summaryActive {
     background-color: var(--dsw-alias-interactive-bg-hover);
     --search-row-site-logo-color: var(--dsw-alias-interactive-bg-hover);
+  }
+}
+
+@keyframes msgEnter {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
   }
 }

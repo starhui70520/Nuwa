@@ -191,3 +191,13 @@
   color: var(--dsw-alias-label-tertiary);
   text-align: center;
 }
+
+.screen {
+  animation: screenEnter 0.3s var(--ds-ease-in-out);
+}
+
+@keyframes screenEnter {
+  from {
+    opacity: 0;
+  }
+}
