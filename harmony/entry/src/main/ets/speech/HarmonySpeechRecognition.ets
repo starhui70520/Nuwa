@@ -126,11 +126,12 @@ export class HarmonySpeechRecognition {
         }
       }
     };
+    // Mode 0 lets the system service record from the mic without passing audio to the WebView.
+    const extraParams: Record<string, Object> = { 'recognitionMode': 0, 'vadEnd': 2000, 'maxAudioDuration': 60000 };
     const startParams: speechRecognizer.StartParams = {
       sessionId: session.id,
       audioInfo: { audioType: 'pcm', sampleRate: 16000, soundChannel: 1, sampleBit: 16 },
-      // Mode 0 lets the system service record from the mic without passing any audio to the WebView.
-      extraParams: { recognitionMode: 0, vadEnd: 2000, maxAudioDuration: 60000 }
+      extraParams
     };
     try {
       engine.setListener(listener);

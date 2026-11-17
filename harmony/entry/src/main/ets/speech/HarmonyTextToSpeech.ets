@@ -143,7 +143,7 @@ export class HarmonyTextToSpeech {
     playback.requestId = `${this.requestPrefix}${++this.requestSequence}`;
     const chunk = playback.chunks[playback.nextChunk++];
     try {
-      const extraParams: Record<string, Object> = { playType: 1 };
+      const extraParams: Record<string, Object> = { 'playType': 1 };
       const params: textToSpeech.SpeakParams = { requestId: playback.requestId, extraParams };
       this.engine.speak(chunk, params);
     } catch {
