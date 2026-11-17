@@ -1,5 +1,6 @@
 import type { Image, Link as LinkNode } from 'mdast'
 import { memo, type ReactNode } from 'react'
+import { handleExternalAnchorClick } from '../../services/externalLink.js'
 
 const sanitizeUrl = (url: string) => {
   // 如果URL没有协议，添加默认的https协议
@@ -39,7 +40,13 @@ export const Link = memo(function Link({
   const href = sanitizeUrl(node.url)
 
   return (
-    <a href={href} title={node.title || undefined} target="_blank" rel="noreferrer">
+    <a
+      href={href}
+      title={node.title || undefined}
+      target="_blank"
+      rel="noreferrer"
+      onClick={(event) => handleExternalAnchorClick(event, href)}
+    >
       {children}
     </a>
   )
@@ -49,7 +56,13 @@ export const Link = memo(function Link({
 export function ImageAsLink({ node }: { node: Image }) {
   const url = sanitizeUrl(node.url)
   return (
-    <a href={url} title={node.title ?? ''} target="_blank" rel="noreferrer">
+    <a
+      href={url}
+      title={node.title ?? ''}
+      target="_blank"
+      rel="noreferrer"
+      onClick={(event) => handleExternalAnchorClick(event, url)}
+    >
       {url}
     </a>
   )

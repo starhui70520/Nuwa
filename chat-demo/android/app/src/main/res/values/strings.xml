@@ -2,6 +2,6 @@
 <resources>
     <string name="app_name">Nuwa</string>
     <string name="title_activity_main">Nuwa</string>
-    <string name="package_name">com.dsapp.chat</string>
-    <string name="custom_url_scheme">com.dsapp.chat</string>
+    <string name="package_name">com.rankchord.nuwa</string>
+    <string name="custom_url_scheme">com.rankchord.nuwa</string>
 </resources>

@@ -1,7 +1,7 @@
 import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
-  appId: 'com.dsapp.chat',
+  appId: 'com.rankchord.nuwa',
   appName: 'Nuwa',
   webDir: 'dist'
 };

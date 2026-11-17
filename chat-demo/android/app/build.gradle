@@ -26,16 +26,18 @@ def computeVersionCode(String ver) {
 }
 
 def keystoreFileEnv = System.getenv("NUWA_KEYSTORE_FILE")
+def xiaomiMictAppId = (System.getenv("XIAOMI_MICT_APP_ID") ?: (project.findProperty("XIAOMI_MICT_APP_ID") ?: "")).toString().trim()
 
 android {
-    namespace = "com.dsapp.chat"
+    namespace = "com.rankchord.nuwa"
     compileSdk = rootProject.ext.compileSdkVersion
     defaultConfig {
-        applicationId "com.dsapp.chat"
+        applicationId "com.rankchord.nuwa"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode computeVersionCode(resolvedVersionName)
         versionName resolvedVersionName
+        resValue "string", "xiaomi_mict_app_id", "\"${xiaomiMictAppId.replace('"', '')}\""
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -54,7 +56,11 @@ android {
         }
     }
     buildTypes {
+        debug {
+            manifestPlaceholders = [xiaomiMictDebug: "true"]
+        }
         release {
+            manifestPlaceholders = [xiaomiMictDebug: "false"]
             if (keystoreFileEnv) {
                 signingConfig signingConfigs.release
             }
@@ -71,8 +77,9 @@ repositories {
 }
 
 dependencies {
-    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation fileTree(include: ['*.jar', '*.aar'], dir: 'libs')
     implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "androidx.browser:browser:1.8.0"
     implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
     implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
     implementation project(':capacitor-android')

@@ -1,4 +1,4 @@
-package com.dsapp.chat;
+package com.rankchord.nuwa;
 
 import android.Manifest;
 import android.annotation.SuppressLint;
@@ -45,6 +45,7 @@ public class MainActivity extends BridgeActivity {
         enableHighRefreshRate();
         setupEdgeToEdgeAndInsets();
         configureWebView();
+        InAppBrowserHelper.getInstance().init(getApplicationContext());
     }
 
     @Override

@@ -1,4 +1,4 @@
-package com.dsapp.chat;
+package com.rankchord.nuwa;
 
 import android.Manifest;
 import android.content.ComponentName;
@@ -23,6 +23,7 @@ import android.speech.tts.UtteranceProgressListener;
 import androidx.core.content.ContextCompat;
 import androidx.core.content.FileProvider;
 
+import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
@@ -788,7 +789,43 @@ public class DeepSeekMigrationPlugin extends Plugin {
         ret.put("asrLabel", OemSpeechHelper.describeEnginePackage(getContext(), resolvedAsrPkg));
         ret.put("ttsEngine", resolvedTtsPkg);
         ret.put("ttsLabel", OemSpeechHelper.describeEnginePackage(getContext(), resolvedTtsPkg));
+        ret.put("browserMode", InAppBrowserHelper.getInstance().getMode());
+        ret.put("browserPkg", InAppBrowserHelper.getInstance().getProviderPackage());
         call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void prepareExternalUrls(PluginCall call) {
+        JSArray arr = call.getArray("urls");
+        final List<String> urls = new ArrayList<>();
+        if (arr != null) {
+            int limit = Math.min(arr.length(), 5);
+            for (int i = 0; i < limit; i++) {
+                try {
+                    String item = arr.getString(i);
+                    if (item != null && !item.trim().isEmpty()) {
+                        urls.add(item.trim());
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+        }
+        if (!urls.isEmpty()) {
+            mainHandler.post(() -> InAppBrowserHelper.getInstance().prepareUrls(getContext(), urls));
+        }
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void openExternalUrl(PluginCall call) {
+        final String url = call.getString("url", "");
+        final boolean dark = Boolean.TRUE.equals(call.getBoolean("dark", false));
+        mainHandler.post(() -> {
+            if (getActivity() != null && url != null && !url.isEmpty()) {
+                InAppBrowserHelper.getInstance().openUrl(getActivity(), url, dark);
+            }
+            call.resolve();
+        });
     }
 
     @PluginMethod

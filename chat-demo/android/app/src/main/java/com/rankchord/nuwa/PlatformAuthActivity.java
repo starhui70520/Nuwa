@@ -1,4 +1,4 @@
-package com.dsapp.chat;
+package com.rankchord.nuwa;
 
 import android.annotation.SuppressLint;
 import android.app.Activity;

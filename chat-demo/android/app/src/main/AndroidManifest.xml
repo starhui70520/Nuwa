@@ -47,6 +47,13 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths"></meta-data>
         </provider>
+
+        <meta-data
+            android:name="com.xiaomi.xms.APP_ID"
+            android:value="@string/xiaomi_mict_app_id" />
+        <meta-data
+            android:name="com.xiaomi.xms.BUILD_TYPE_DEBUG"
+            android:value="${xiaomiMictDebug}" />
     </application>
 
     <!-- Permissions -->
@@ -92,5 +99,14 @@
         <package android:name="com.baidu.duersdk.opensdk" />
         <package android:name="com.google.android.tts" />
         <package android:name="com.google.android.googlequicksearchbox" />
+        <!-- Xiaomi MiCT & Android Custom Tabs -->
+        <intent>
+            <action android:name="com.android.browser.customtabs.action.CustomTabsService" />
+        </intent>
+        <intent>
+            <action android:name="android.support.customtabs.action.CustomTabsService" />
+        </intent>
+        <package android:name="com.android.browser" />
+        <package android:name="com.mi.globalbrowser" />
     </queries>
 </manifest>

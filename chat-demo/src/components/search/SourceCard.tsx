@@ -1,5 +1,6 @@
 import clsx from 'clsx'
 import type { Source } from '../../services/chat/view.js'
+import { handleExternalAnchorClick } from '../../services/externalLink.js'
 import { formatDate } from '../../utils/format.js'
 import { SiteLogo } from './SiteLogo.js'
 import styles from './SourceCard.module.css'
@@ -14,7 +15,13 @@ const formatPublishedAt = (value: string | null) => (value ? (formatDate(value, 
 export const SourceCard = ({ source, className }: { source: Source; className?: string }) => {
   const date = formatPublishedAt(source.publishedAt)
   return (
-    <a className={styles.anchor} href={source.url} target="_blank" rel="noreferrer">
+    <a
+      className={styles.anchor}
+      href={source.url}
+      target="_blank"
+      rel="noreferrer"
+      onClick={(event) => handleExternalAnchorClick(event, source.url)}
+    >
       <div className={clsx(styles.card, className)}>
         <div className={styles.meta}>
           <SiteLogo url={source.siteIcon} className={styles.siteIcon} />

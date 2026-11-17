@@ -19,3 +19,7 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# Xiaomi MiCT (Custom Tabs) rules
+-keep class com.android.browser.customtabs.** implements java.io.Serializable { *; }
+-keep class com.android.browser.customtabs.** { *; }

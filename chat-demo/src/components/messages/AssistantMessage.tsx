@@ -1,10 +1,11 @@
 import { useTranslate } from '../../i18n/index.js'
 import clsx from 'clsx'
-import { memo } from 'react'
+import { memo, useEffect } from 'react'
 import { IconRefreshOutline16, IconWarningOutline16 } from '../base/icons.js'
 import { describeReply } from '../../services/chat/describe.js'
 import { canContinueReply } from '../../services/chat/reply.js'
 import { continueReply, regenerateReply } from '../../services/chat/store.js'
+import { prewarmExternalUrls } from '../../services/externalLink.js'
 import { stopReadAloud } from '../../services/speech/readAloud.js'
 import type { AssistantMessage as AssistantMessageType } from '../../services/chat/types.js'
 import { openSettings } from '../settings/settingsDialogState.js'
@@ -56,6 +57,15 @@ export const AssistantMessage = memo(function AssistantMessage({
   const copyText = responseText || notice?.text
   const waiting = streaming && view.steps.length === 0 && !view.answer && !message.thinking
   const summaryEntry = `${message.id}-summary`
+
+  useEffect(() => {
+    const items = view.sources.length > 0 ? view.sources : view.searchResults
+    if (items.length === 0) {
+      return
+    }
+    prewarmExternalUrls(items.slice(0, 4).map((item) => item.url))
+  }, [view.sources, view.searchResults])
+
   return (
     <div className={styles.message}>
       {refused ? null : (

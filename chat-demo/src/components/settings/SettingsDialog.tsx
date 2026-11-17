@@ -42,6 +42,7 @@ import {
   type ThemePreference,
 } from '../../services/settings.js'
 import { DeepSeekMigration, isNativeAndroid, isNativeIos } from '../../services/nativeBridge.js'
+import { handleExternalAnchorClick } from '../../services/externalLink.js'
 import { Button } from '../base/Button.js'
 import {
   IconChevronLeftOutline18,
@@ -298,6 +299,7 @@ const SettingsContent = () => {
                   href={DOCS_URL}
                   target="_blank"
                   rel="noopener noreferrer"
+                  onClick={(event) => handleExternalAnchorClick(event, DOCS_URL)}
                 >
                   <span className={styles.rowIcon}>
                     <IconDocOutline18 />
