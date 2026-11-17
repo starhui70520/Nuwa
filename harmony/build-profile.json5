@@ -6,15 +6,15 @@
         "name": "default",
         "signingConfig": "default",
         "compatibleSdkVersion": "5.0.0(12)",
-        "runtimeOS": "HarmonyOS"
+        "runtimeOS": "HarmonyOS",
+        "buildOption": {
+          "strictMode": {
+            "caseSensitiveCheck": true,
+            "useNormalizedOHMUrl": true
+          }
+        }
       }
-    ],
-    "buildOption": {
-      "strictMode": {
-        "caseSensitiveCheck": true,
-        "useNormalizedOHMUrl": true
-      }
-    }
+    ]
   },
   "modules": [
     {
