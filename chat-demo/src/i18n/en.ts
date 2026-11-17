@@ -131,6 +131,7 @@ export const en = {
   migrationGuideDropHint: 'Tip: Drag & drop deepseek_data-*.zip anywhere in the window to import',
   migrationDropOverlay: 'Drop to merge DeepSeek chat history',
   dshLoginSuccess: 'Signed in to DeepSeek API account',
+  dshLoginFailed: 'Failed to sign in to DeepSeek API account',
   dshHelp: 'Help',
   dshBack: 'Back',
   onboardingLoginDeepSeekAccount: 'Sign in with DeepSeek API',

@@ -124,6 +124,7 @@ export const zh = {
   migrationGuideDropHint: '支持将 deepseek_data-*.zip 直接拖入窗口任意位置导入',
   migrationDropOverlay: '松开鼠标即可增量导入 DeepSeek 历史对话',
   dshLoginSuccess: '已登录 DeepSeek API 账号',
+  dshLoginFailed: 'DeepSeek API 账号登录失败，请稍后重试',
   dshHelp: '帮助',
   dshBack: '返回',
   onboardingLoginDeepSeekAccount: 'DeepSeek API 账号登录',

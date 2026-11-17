@@ -5,6 +5,18 @@ import { clearDeepSeekAccountAuth, setDeepSeekAccountAuth, useSettings } from '.
 const WEB_PKCE_STORAGE_KEY = 'nuwa:dsh-pkce-state'
 const WEB_DEVICE_ID_KEY = 'nuwa:dsh-device-id'
 
+declare global {
+  interface Window {
+    __NUWA_HARMONY__?: {
+      startPlatformAuth?: () => void
+      logoutPlatformAuth?: (token: string) => void
+    }
+  }
+}
+
+export const hasHarmonyBridge = (): boolean =>
+  typeof window !== 'undefined' && Boolean(window.__NUWA_HARMONY__?.startPlatformAuth)
+
 const getOrCreateWebDeviceId = (): string => {
   try {
     const existing = localStorage.getItem(WEB_DEVICE_ID_KEY)
@@ -159,6 +171,10 @@ export const startDeepSeekAccountLogin = async (): Promise<void> => {
     await DeepSeekMigration.startPlatformAuth()
     return
   }
+  if (window.__NUWA_HARMONY__?.startPlatformAuth) {
+    window.__NUWA_HARMONY__.startPlatformAuth()
+    return
+  }
 
   if (!window.crypto?.subtle) {
     throw new PlatformAuthUnavailableError()
@@ -212,6 +228,10 @@ export const logoutDeepSeekAccount = async (): Promise<void> => {
   }
   if (isNativeAndroid()) {
     await DeepSeekMigration.logoutPlatformAuth({ token }).catch(() => {})
+    return
+  }
+  if (window.__NUWA_HARMONY__?.logoutPlatformAuth) {
+    window.__NUWA_HARMONY__.logoutPlatformAuth(token)
     return
   }
   await fetch('/auth-api/v0/users/logout', {

@@ -5,7 +5,9 @@
 ## 目录结构
 
 - [`chat-demo/`](./chat-demo)：Nuwa 核心客户端（React + Rspack + Capacitor Android），支持多服务商 API、引导配置、语音输入与朗读、原生端登录与历史会话导入导出。
+- [`harmony/`](./harmony)：Nuwa HarmonyOS 鸿蒙原生客户端。
 - [`extension/`](./extension)：**Nuwa 历史记录迁移助手**（Chrome / Edge Manifest V3 扩展），自动监听导出的 `deepseek_data-*.zip` 并一键导入本地 Nuwa 客户端。
+- [`portal/`](./portal)：**Nuwa 应用分发中心**（React + Vite + Express + MinIO），用于发布 Android / HarmonyOS 安装包与配置 iOS 跳转。
 
 ## 快速开始
 

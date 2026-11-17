@@ -1,0 +1,37 @@
+services:
+  minio:
+    image: minio/minio:latest
+    container_name: nuwa-minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    volumes:
+      - minio_data:/data
+    restart: unless-stopped
+
+  portal:
+    build: .
+    container_name: nuwa-release-portal
+    depends_on:
+      - minio
+    ports:
+      - "3100:3100"
+    environment:
+      PORT: 3100
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-rankchord-admin}
+      STORAGE_DRIVER: minio
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: 9000
+      MINIO_USE_SSL: "false"
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-nuwa-releases}
+      MINIO_PUBLIC_URL: ${MINIO_PUBLIC_URL:-}
+    restart: unless-stopped
+
+volumes:
+  minio_data:

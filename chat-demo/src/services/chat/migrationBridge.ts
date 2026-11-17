@@ -2,6 +2,7 @@ import { Capacitor } from '@capacitor/core'
 import { showToast } from '../../components/base/toastState.js'
 import { checkPendingAndroidPlatformAuth, handleWebOAuthCallback } from '../api/dshAuth.js'
 import { DeepSeekMigration, isNativeAndroid } from '../nativeBridge.js'
+import { setDeepSeekAccountAuth } from '../settings.js'
 import { BackupError, importHistory, importHistoryFromBytes } from './backup.js'
 
 export { isNativeAndroid }
@@ -87,10 +88,24 @@ export const bindMigrationBridge = (): (() => void) => {
     void checkPendingAndroidMigration().catch(() => {})
   }
 
+  const handleHarmonyAuth = (event: Event) => {
+    const detail = (event as CustomEvent<{ token?: string; accountLabel?: string | null }>).detail
+    if (detail?.token) {
+      setDeepSeekAccountAuth(detail.token, detail.accountLabel ?? null)
+      showToast({ key: 'dshLoginSuccess' })
+    }
+  }
+
+  const handleHarmonyAuthError = () => {
+    showToast({ key: 'dshLoginFailed', type: 'error' })
+  }
+
   window.addEventListener('message', handleMessage)
   document.addEventListener('visibilitychange', handleVisibility)
   window.addEventListener('focus', handleVisibility)
   window.addEventListener('dsapp:native-resume', handleNativeResume)
+  window.addEventListener('nuwa:harmony-auth', handleHarmonyAuth)
+  window.addEventListener('nuwa:harmony-auth-error', handleHarmonyAuthError)
   void handleWebOAuthCallback().catch(() => {})
   void checkPendingAndroidPlatformAuth().catch(() => {})
   void checkPendingAndroidMigration().catch(() => {})
@@ -101,6 +116,8 @@ export const bindMigrationBridge = (): (() => void) => {
     document.removeEventListener('visibilitychange', handleVisibility)
     window.removeEventListener('focus', handleVisibility)
     window.removeEventListener('dsapp:native-resume', handleNativeResume)
+    window.removeEventListener('nuwa:harmony-auth', handleHarmonyAuth)
+    window.removeEventListener('nuwa:harmony-auth-error', handleHarmonyAuthError)
   }
 }
 
