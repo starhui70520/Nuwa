@@ -170,7 +170,10 @@ export const en = {
   exportAllLabel: 'Export all chats',
   historyExportDescription:
     'Includes all chat history and locally stored images. Other attachments retain file details only. Your API Key is not included.',
+  historyExportDescriptionIos:
+    'Includes all chat history and locally stored images; can be backed up to iCloud Drive or on-device storage.',
   exportAllDownload: 'Download',
+  exportAllSaveToIcloud: 'Back up to iCloud',
   deleteAllSessions: 'Delete all chats',
   deleteAllSessionsModalTitle: 'Once deleted, all chats will be cleared and cannot be recovered.',
   deleteAllSessionsModalDescription:

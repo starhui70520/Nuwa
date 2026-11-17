@@ -26,6 +26,7 @@ export type DeepSeekMigrationPlugin = {
   }>
   speakText: (options: { text: string; locale: string }) => Promise<{ utteranceId: string }>
   stopSpeaking: () => Promise<void>
+  saveFileToDocuments: (options: { name: string; data: string }) => Promise<{ presented: boolean }>
 }
 
 export const DeepSeekMigration = registerPlugin<DeepSeekMigrationPlugin>('DeepSeekMigration')

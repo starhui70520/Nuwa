@@ -39,7 +39,7 @@ import {
   type SpeechEngine,
   type ThemePreference,
 } from '../../services/settings.js'
-import { isNativeAndroid, isNativeIos } from '../../services/nativeBridge.js'
+import { DeepSeekMigration, isNativeAndroid, isNativeIos } from '../../services/nativeBridge.js'
 import { Button } from '../base/Button.js'
 import {
   IconChevronLeftOutline18,
@@ -865,6 +865,17 @@ const ImportHistory = ({
   )
 }
 
+const blobToBase64 = async (blob: Blob): Promise<string> => {
+  const buffer = await blob.arrayBuffer()
+  const bytes = new Uint8Array(buffer)
+  let binary = ''
+  const chunk = 0x8000
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk))
+  }
+  return btoa(binary)
+}
+
 /** 将全部会话及图片导出为 ZIP 文件并下载 */
 const ExportHistory = ({ disabled }: { disabled: boolean }) => {
   const t = useTranslate()
@@ -877,12 +888,20 @@ const ExportHistory = ({ disabled }: { disabled: boolean }) => {
     setStatus(null)
     try {
       const { name, blob } = await exportHistory()
-      const url = URL.createObjectURL(blob)
-      const link = document.createElement('a')
-      link.href = url
-      link.download = name
-      link.click()
-      setTimeout(() => URL.revokeObjectURL(url), 10_000)
+      if (isNativeIos()) {
+        // iOS：走原生文件面板，可保存到 iCloud Drive / 本地
+        await DeepSeekMigration.saveFileToDocuments({
+          name,
+          data: await blobToBase64(blob),
+        })
+      } else {
+        const url = URL.createObjectURL(blob)
+        const link = document.createElement('a')
+        link.href = url
+        link.download = name
+        link.click()
+        setTimeout(() => URL.revokeObjectURL(url), 10_000)
+      }
     } catch (error) {
       setStatus(errorStatus('historyExportFailed', error))
     } finally {
@@ -893,7 +912,7 @@ const ExportHistory = ({ disabled }: { disabled: boolean }) => {
   return (
     <SettingCell
       label={t('exportAllLabel')}
-      description={t('historyExportDescription')}
+      description={isNativeIos() ? t('historyExportDescriptionIos') : t('historyExportDescription')}
       status={status}
       action={
         <Button
@@ -904,7 +923,7 @@ const ExportHistory = ({ disabled }: { disabled: boolean }) => {
           onClick={() => void onExport()}
         >
           <IconDownloadOutline16 />
-          {t('exportAllDownload')}
+          {isNativeIos() ? t('exportAllSaveToIcloud') : t('exportAllDownload')}
         </Button>
       }
     />

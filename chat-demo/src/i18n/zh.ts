@@ -163,7 +163,10 @@ export const zh = {
   exportAllLabel: '导出所有历史对话',
   historyExportDescription:
     '包含所有历史对话及本地图片原件；其他附件仅保留文件信息，不包含 API Key。',
+  historyExportDescriptionIos:
+    '包含所有历史对话及本地图片原件，可备份到 iCloud Drive 或本机。',
   exportAllDownload: '下载',
+  exportAllSaveToIcloud: '备份到 iCloud',
   deleteAllSessions: '删除所有对话',
   deleteAllSessionsModalTitle: '删除后，所有对话都将被清空且无法找回',
   deleteAllSessionsModalDescription: '本地保存的附件及未发送的草稿也将被删除。',

@@ -24,6 +24,7 @@ public class DeepSeekMigrationPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "cancelSpeechRecognition", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "speakText", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "stopSpeaking", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "saveFileToDocuments", returnType: CAPPluginReturnPromise),
     ]
 
     private var pendingAuthCall: CAPPluginCall?
@@ -432,6 +433,38 @@ public class DeepSeekMigrationPlugin: CAPPlugin, CAPBridgedPlugin {
             self.pendingChunkCount = 0
             self.speechSynthesizer?.stopSpeaking(at: .immediate)
             call.resolve()
+        }
+    }
+
+    // MARK: 导出文件（iCloud Drive / 本地存储，系统文件面板，无需开发者账号）
+
+    @objc func saveFileToDocuments(_ call: CAPPluginCall) {
+        DispatchQueue.main.async {
+            let name = (call.getString("name") ?? "").trimmingCharacters(in: .whitespaces)
+            let base64 = call.getString("data") ?? ""
+            guard !name.isEmpty, let data = Data(base64Encoded: base64) else {
+                call.reject("INVALID_DATA")
+                return
+            }
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+            do {
+                try data.write(to: url, options: .atomic)
+            } catch {
+                call.reject("WRITE_FAILED: \(error.localizedDescription)")
+                return
+            }
+            guard let root = self.bridge?.viewController else {
+                call.reject("NO_VIEW")
+                return
+            }
+            var presenter = root
+            while let presented = presenter.presentedViewController {
+                presenter = presented
+            }
+            let picker = UIDocumentPickerViewController(forExporting: [url])
+            presenter.present(picker, animated: true) {
+                call.resolve(["presented": true])
+            }
         }
     }
 }
