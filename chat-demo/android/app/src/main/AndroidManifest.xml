@@ -3,6 +3,7 @@
 
     <application
         android:allowBackup="true"
+        android:hardwareAccelerated="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -15,6 +16,7 @@
             android:label="@string/title_activity_main"
             android:theme="@style/AppTheme.NoActionBarLaunch"
             android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize"
             android:exported="true">
 
             <intent-filter>
@@ -64,5 +66,31 @@
         <intent>
             <action android:name="android.intent.action.TTS_SERVICE" />
         </intent>
+        <!-- Xiaomi HyperOS / MIUI -->
+        <package android:name="com.xiaomi.mibrain.speech" />
+        <package android:name="com.miui.voiceassist" />
+        <package android:name="com.xiaomi.aicr" />
+        <!-- OPPO / OnePlus / Realme ColorOS -->
+        <package android:name="com.heytap.speechassist" />
+        <package android:name="com.coloros.speechassist" />
+        <package android:name="com.oplus.aiunit" />
+        <!-- vivo / iQOO OriginOS -->
+        <package android:name="com.vivo.aiengine" />
+        <package android:name="com.vivo.agent" />
+        <package android:name="com.vivo.voicewakeup" />
+        <package android:name="com.bbk.VoiceAssistant" />
+        <!-- Honor / Huawei -->
+        <package android:name="com.hihonor.hiai" />
+        <package android:name="com.huawei.hiai" />
+        <package android:name="com.hihonor.vassistant" />
+        <package android:name="com.huawei.vassistant" />
+        <!-- Samsung & Universal Chinese / Google Speech Engines -->
+        <package android:name="com.samsung.SMT" />
+        <package android:name="com.iflytek.speechcloud" />
+        <package android:name="com.iflytek.speechsuite" />
+        <package android:name="com.iflytek.tts" />
+        <package android:name="com.baidu.duersdk.opensdk" />
+        <package android:name="com.google.android.tts" />
+        <package android:name="com.google.android.googlequicksearchbox" />
     </queries>
 </manifest>

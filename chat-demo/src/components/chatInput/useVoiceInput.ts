@@ -56,6 +56,9 @@ const describeRecordingError = (error: unknown): TranslationMessage => {
           : 'voiceInputPermissionDenied',
     }
   }
+  if (error instanceof Error && error.message.includes('UNAVAILABLE')) {
+    return { key: 'voiceInputSystemUnavailable' }
+  }
   return { key: 'voiceInputFailed' }
 }
 
@@ -319,7 +322,9 @@ export const useVoiceInput = (onText: (text: string) => void) => {
             key:
               detail === 'PERMISSION_DENIED'
                 ? 'voiceInputPermissionDeniedAndroid'
-                : 'voiceInputFailed',
+                : detail === 'UNAVAILABLE'
+                  ? 'voiceInputSystemUnavailable'
+                  : 'voiceInputFailed',
           })
         }
         const limitTimer = window.setTimeout(() => {

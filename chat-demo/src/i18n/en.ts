@@ -273,4 +273,6 @@ export const en = {
     'Please allow installing unknown apps in system settings, then tap Update again.',
   updateDownloadFailed: 'Failed to download update package',
   updateLater: 'Later',
+  settingsAndroidSpeechService: 'System speech service',
+  settingsAndroidSpeechUnavailable: 'Unavailable (tap to configure)',
 } satisfies Record<keyof typeof zh, string>

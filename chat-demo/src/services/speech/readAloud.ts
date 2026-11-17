@@ -252,7 +252,8 @@ export const toggleReadAloud = (
     }
     useReadAloud.setState({ messageId, status: 'loading' })
 
-    void DeepSeekMigration.speakText({ text: cleaned, locale: useSettings.getState().locale })
+    const { locale, ttsVoice } = useSettings.getState()
+    void DeepSeekMigration.speakText({ text: cleaned, locale, voice: ttsVoice })
       .then(({ utteranceId }) => {
         if (!cancelled) {
           targetUtteranceId = utteranceId

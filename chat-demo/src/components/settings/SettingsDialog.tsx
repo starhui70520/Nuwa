@@ -245,6 +245,7 @@ const SettingsContent = () => {
                       <TtsVoiceInlineSelect />
                     </div>
                     <SpeechEngineRow />
+                    <AndroidSpeechServiceRow />
                   </>
                 )}
               </div>
@@ -711,6 +712,61 @@ const SpeechEngineRow = () => {
       <span className={styles.rowLabel}>{t('settingsSpeechEngine')}</span>
       <SpeechEngineInlineSelect />
     </div>
+  )
+}
+
+/** 安卓系统语音服务探测与快捷设置跳转（HyperOS / ColorOS / OriginOS 等） */
+const AndroidSpeechServiceRow = () => {
+  const t = useTranslate()
+  const [info, setInfo] = useState<{
+    osLabel: string
+    asrLabel: string
+    ttsLabel: string
+  } | null>(null)
+
+  useEffect(() => {
+    if (!isNativeAndroid()) {
+      return
+    }
+    let cancelled = false
+    void DeepSeekMigration.getSpeechEngineInfo()
+      .then((res) => {
+        if (!cancelled) {
+          setInfo(res)
+        }
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  if (!isNativeAndroid()) {
+    return null
+  }
+
+  const engineLabel = info ? info.asrLabel || info.ttsLabel : ''
+  const valueText = info
+    ? engineLabel
+      ? `${engineLabel} · ${info.osLabel}`
+      : t('settingsAndroidSpeechUnavailable')
+    : ''
+
+  return (
+    <button
+      type="button"
+      className={clsx(styles.groupRow, styles.groupRowButton)}
+      onClick={() => void DeepSeekMigration.openSystemTtsSettings().catch(() => {})}
+    >
+      <span className={styles.rowIcon}>
+        <IconVolumeOutline18 />
+      </span>
+      <span className={styles.rowLabel}>{t('settingsAndroidSpeechService')}</span>
+      {valueText ? <span className={styles.rowValue}>{valueText}</span> : null}
+      <span className={styles.rowChevron}>
+        <IconChevronRightOutline14 />
+      </span>
+    </button>
   )
 }
 

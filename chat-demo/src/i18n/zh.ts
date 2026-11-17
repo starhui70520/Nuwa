@@ -262,4 +262,6 @@ export const zh = {
   updatePermissionRequired: '请在系统设置中允许安装未知来源应用，授权后再次点击更新',
   updateDownloadFailed: '下载安装包失败，请稍后重试',
   updateLater: '暂不更新',
+  settingsAndroidSpeechService: '系统语音引擎',
+  settingsAndroidSpeechUnavailable: '未检测到可用引擎（点击前往设置）',
 } as const

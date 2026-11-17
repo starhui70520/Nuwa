@@ -24,8 +24,21 @@ export type DeepSeekMigrationPlugin = {
     started: boolean
     needsInstallPermission?: boolean
   }>
-  speakText: (options: { text: string; locale: string }) => Promise<{ utteranceId: string }>
+  speakText: (options: { text: string; locale: string; voice?: string }) => Promise<{
+    utteranceId: string
+  }>
   stopSpeaking: () => Promise<void>
+  setSystemBarsStyle: (options: { dark: boolean }) => Promise<void>
+  getSpeechEngineInfo: () => Promise<{
+    brand: string
+    osLabel: string
+    isHyperOs: boolean
+    asrEngine: string
+    asrLabel: string
+    ttsEngine: string
+    ttsLabel: string
+  }>
+  openSystemTtsSettings: () => Promise<void>
   saveFileToDocuments: (options: { name: string; data: string }) => Promise<{ presented: boolean }>
   icloudStatus: () => Promise<{ available: boolean }>
   icloudBackupNow: (options: { name: string; data: string }) => Promise<{ path: string }>
