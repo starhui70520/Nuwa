@@ -62,6 +62,7 @@ final class MigrationWebViewController: UIViewController, WKNavigationDelegate, 
         config.userContentController.addUserScript(clickHook)
 
         let wv = WKWebView(frame: .zero, configuration: config)
+        if #available(iOS 16.4, *) { wv.isInspectable = true }
         if let base = wv.value(forKey: "userAgent") as? String ?? wv.customUserAgent {
             wv.customUserAgent = base.replacingOccurrences(of: "; wv)", with: ")")
                 .replacingOccurrences(of: "; wv", with: "")
@@ -158,6 +159,8 @@ final class MigrationWebViewController: UIViewController, WKNavigationDelegate, 
                 var rect = el.getBoundingClientRect();
                 if (rect.width <= 0 || rect.height <= 0) continue;
                 var text = (el.innerText || '').trim();
+                var label = (el.getAttribute && (el.getAttribute('aria-label') || el.getAttribute('title') || '') || '').trim();
+                if (label && (!text || text.length > 32 || !patterns.some(function(p){ return p.test(text); }))) { text = label; }
                 if (!text || text.length > 32) continue;
                 if (excludeDanger && /^(删除|Delete)$/i.test(text)) continue;
                 for (var j = 0; j < patterns.length; j++) {
