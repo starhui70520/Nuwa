@@ -18,7 +18,9 @@ import { closeSearchPanel } from '../components/search/searchPanelState.js'
 import { SessionView } from '../components/session/SessionView.js'
 import { MobileHeader } from '../components/session/MobileHeader.js'
 import { Welcome } from '../components/session/Welcome.js'
+import { AppUpdateModal } from '../components/settings/AppUpdateModal.js'
 import { SettingsDialog } from '../components/settings/SettingsDialog.js'
+import { scheduleSilentAppUpdateCheck } from '../services/appUpdate.js'
 import { Toast } from '../components/base/Toast.js'
 import { showToast } from '../components/base/toastState.js'
 import { onUploadNotice } from '../services/attachments.js'
@@ -80,6 +82,9 @@ export const App = () => {
   }, [])
 
   useEffect(bindMigrationBridge, [])
+  useEffect(() => {
+    scheduleSilentAppUpdateCheck()
+  }, [])
 
   useEffect(() => {
     const isFileDrag = (event: DragEvent) =>
@@ -214,6 +219,7 @@ export const App = () => {
       </div>
       {showMigrationPrompt ? <MigrationPromptModal /> : null}
       <SettingsDialog />
+      <AppUpdateModal />
       <Toast />
       {zipDragging ? (
         <div className={styles.dropOverlay}>

@@ -1,7 +1,12 @@
 import clsx from 'clsx'
-import { useRef, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useIsMobile } from '../../app/viewport.js'
 import { useTranslate, type TranslationKey, type TranslationMessage } from '../../i18n/index.js'
+import {
+  getCurrentAppVersion,
+  getWebAppVersion,
+  useAppUpdateStore,
+} from '../../services/appUpdate.js'
 import {
   logoutDeepSeekAccount,
   PlatformAuthUnavailableError,
@@ -60,15 +65,6 @@ type SettingsPage = 'root' | 'account' | 'data'
 
 const DOCS_URL = 'https://api-docs.deepseek.com/zh-cn/'
 
-const getAppVersion = (): string => {
-  if (typeof document === 'undefined') {
-    return '0.1.1'
-  }
-  return (
-    document.querySelector('meta[name="application-version"]')?.getAttribute('content') || '0.1.1'
-  )
-}
-
 /**
  * 原生 DeepSeek 风格设置面板：
  * - 根页面按「账户 / 应用 / 语音 / 关于 / 退出登录」分组卡片呈现；
@@ -95,6 +91,13 @@ const SettingsContent = () => {
   const dshAccountLabel = useSettings((state) => state.dshAccountLabel)
   const apiModel = useSettings((state) => state.apiModel)
   const historyBusy = historyImport.busy || historyDelete.busy || replacingHistory
+  const [appVersion, setAppVersion] = useState(getWebAppVersion)
+  const checkingUpdate = useAppUpdateStore((state) => state.checking)
+  const checkForUpdates = useAppUpdateStore((state) => state.checkForUpdates)
+
+  useEffect(() => {
+    void getCurrentAppVersion().then(setAppVersion)
+  }, [])
 
   const accountSummary = isAccount
     ? dshAccountLabel || t('dshAccountLabel')
@@ -235,8 +238,24 @@ const SettingsContent = () => {
                     <IconInfoCircleOutline18 />
                   </span>
                   <span className={styles.rowLabel}>{t('settingsVersion')}</span>
-                  <span className={styles.rowValue}>{getAppVersion()}</span>
+                  <span className={styles.rowValue}>{appVersion}</span>
                 </div>
+                <button
+                  type="button"
+                  className={clsx(styles.groupRow, styles.groupRowButton)}
+                  disabled={checkingUpdate}
+                  onClick={() => void checkForUpdates()}
+                >
+                  <span className={styles.rowIcon}>
+                    <IconDownloadOutline16 />
+                  </span>
+                  <span className={styles.rowLabel}>
+                    {checkingUpdate ? t('settingsCheckingUpdate') : t('settingsCheckUpdate')}
+                  </span>
+                  <span className={styles.rowChevron}>
+                    <IconChevronRightOutline14 />
+                  </span>
+                </button>
                 <a
                   className={clsx(styles.groupRow, styles.groupRowButton)}
                   href={DOCS_URL}

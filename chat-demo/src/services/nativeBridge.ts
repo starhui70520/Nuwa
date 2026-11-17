@@ -19,6 +19,11 @@ export type DeepSeekMigrationPlugin = {
   startSpeechRecognition: (options: { locale: string }) => Promise<void>
   stopSpeechRecognition: () => Promise<{ text: string }>
   cancelSpeechRecognition: () => Promise<void>
+  getAppVersion: () => Promise<{ versionName: string; versionCode: number }>
+  downloadAndInstallApk: (options: { url: string }) => Promise<{
+    started: boolean
+    needsInstallPermission?: boolean
+  }>
 }
 
 export const DeepSeekMigration = registerPlugin<DeepSeekMigrationPlugin>('DeepSeekMigration')

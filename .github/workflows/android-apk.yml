@@ -1,0 +1,109 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'chat-demo/**'
+      - '.github/workflows/android-apk.yml'
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12.6.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: chat-demo/pnpm-lock.yaml
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install web dependencies
+        working-directory: chat-demo
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck & Lint
+        working-directory: chat-demo
+        run: |
+          pnpm type
+          pnpm lint
+
+      - name: Build web assets & sync Capacitor
+        working-directory: chat-demo
+        run: |
+          pnpm build
+          npx cap sync android
+
+      - name: Resolve app version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VER="${GITHUB_REF#refs/tags/v}"
+          else
+            VER=$(node -p "require('./chat-demo/package.json').version")
+          fi
+          echo "name=${VER}" >> "$GITHUB_OUTPUT"
+          echo "NUWA_VERSION_NAME=${VER}" >> "$GITHUB_ENV"
+
+      - name: Build Android APK
+        working-directory: chat-demo/android
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          NUWA_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          NUWA_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          NUWA_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          chmod +x ./gradlew
+          if [ -n "${KEYSTORE_B64}" ]; then
+            echo "${KEYSTORE_B64}" | base64 -d > /tmp/nuwa-release.keystore
+            export NUWA_KEYSTORE_FILE="/tmp/nuwa-release.keystore"
+            ./gradlew assembleRelease
+            cp app/build/outputs/apk/release/app-release.apk "${GITHUB_WORKSPACE}/Nuwa-v${{ steps.version.outputs.name }}.apk"
+          else
+            ./gradlew assembleDebug
+            cp app/build/outputs/apk/debug/app-debug.apk "${GITHUB_WORKSPACE}/Nuwa-v${{ steps.version.outputs.name }}-debug.apk"
+          fi
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nuwa-APK-v${{ steps.version.outputs.name }}
+          path: Nuwa-*.apk
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: Nuwa-*.apk

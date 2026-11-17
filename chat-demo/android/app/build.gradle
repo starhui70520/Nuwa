@@ -1,5 +1,32 @@
 apply plugin: 'com.android.application'
 
+def resolvePackageVersion() {
+    def pkgFile = file('../../package.json')
+    if (pkgFile.exists()) {
+        def parsed = new groovy.json.JsonSlurper().parse(pkgFile)
+        if (parsed?.version) {
+            return parsed.version.toString()
+        }
+    }
+    return "0.1.1"
+}
+
+def resolvedVersionName = System.getenv("NUWA_VERSION_NAME") ?: resolvePackageVersion()
+
+def computeVersionCode(String ver) {
+    def envCode = System.getenv("NUWA_VERSION_CODE")
+    if (envCode != null && envCode.isInteger()) {
+        return envCode.toInteger()
+    }
+    def parts = ver.replaceAll(/[^0-9.].*$/, '').tokenize('.')
+    def major = parts.size() > 0 && parts[0].isInteger() ? parts[0].toInteger() : 0
+    def minor = parts.size() > 1 && parts[1].isInteger() ? parts[1].toInteger() : 0
+    def patch = parts.size() > 2 && parts[2].isInteger() ? parts[2].toInteger() : 0
+    return Math.max(1, major * 10000 + minor * 100 + patch)
+}
+
+def keystoreFileEnv = System.getenv("NUWA_KEYSTORE_FILE")
+
 android {
     namespace = "com.dsapp.chat"
     compileSdk = rootProject.ext.compileSdkVersion
@@ -7,8 +34,8 @@ android {
         applicationId "com.dsapp.chat"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode computeVersionCode(resolvedVersionName)
+        versionName resolvedVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -16,8 +43,21 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    if (keystoreFileEnv) {
+        signingConfigs {
+            release {
+                storeFile file(keystoreFileEnv)
+                storePassword System.getenv("NUWA_KEYSTORE_PASSWORD")
+                keyAlias System.getenv("NUWA_KEY_ALIAS")
+                keyPassword System.getenv("NUWA_KEY_PASSWORD")
+            }
+        }
+    }
     buildTypes {
         release {
+            if (keystoreFileEnv) {
+                signingConfig signingConfigs.release
+            }
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }

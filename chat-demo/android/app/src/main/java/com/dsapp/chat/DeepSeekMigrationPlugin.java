@@ -4,14 +4,19 @@ import android.Manifest;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
+import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
 import androidx.core.content.ContextCompat;
+import androidx.core.content.FileProvider;
 
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -22,6 +27,8 @@ import com.getcapacitor.annotation.Permission;
 import com.getcapacitor.annotation.PermissionCallback;
 
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
@@ -42,6 +49,7 @@ public class DeepSeekMigrationPlugin extends Plugin {
     private PluginCall pendingStopCall;
     private Runnable stopTimeoutRunnable;
     private long lastRmsEmitMs = 0L;
+    private volatile boolean updateDownloading = false;
     @PluginMethod
     public void openExportBrowser(PluginCall call) {
         Intent intent = new Intent(getContext(), MigrationWebViewActivity.class);
@@ -439,6 +447,164 @@ public class DeepSeekMigrationPlugin extends Plugin {
             }
             speechRecognizer = null;
         }
+    }
+
+    @PluginMethod
+    public void getAppVersion(PluginCall call) {
+        try {
+            PackageInfo info = getContext().getPackageManager().getPackageInfo(
+                getContext().getPackageName(),
+                0
+            );
+            long versionCode = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+                ? info.getLongVersionCode()
+                : info.versionCode;
+            JSObject ret = new JSObject();
+            ret.put("versionName", info.versionName != null ? info.versionName : "0.1.1");
+            ret.put("versionCode", versionCode);
+            call.resolve(ret);
+        } catch (Exception e) {
+            call.reject("Failed to read app version", e);
+        }
+    }
+
+    @PluginMethod
+    public void downloadAndInstallApk(PluginCall call) {
+        String downloadUrl = call.getString("url");
+        if (downloadUrl == null || (!downloadUrl.startsWith("https://") && !downloadUrl.startsWith("http://"))) {
+            call.reject("Invalid APK URL");
+            return;
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+            && !getContext().getPackageManager().canRequestPackageInstalls()) {
+            Intent permIntent = new Intent(
+                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                Uri.parse("package:" + getContext().getPackageName())
+            );
+            permIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            getContext().startActivity(permIntent);
+            JSObject ret = new JSObject();
+            ret.put("started", false);
+            ret.put("needsInstallPermission", true);
+            call.resolve(ret);
+            return;
+        }
+
+        if (updateDownloading) {
+            call.reject("Update download already in progress");
+            return;
+        }
+
+        updateDownloading = true;
+        new Thread(() -> {
+            HttpURLConnection conn = null;
+            try {
+                String currentUrl = downloadUrl;
+                for (int hop = 0; hop < 6; hop++) {
+                    URL url = new URL(currentUrl);
+                    conn = (HttpURLConnection) url.openConnection();
+                    conn.setInstanceFollowRedirects(false);
+                    conn.setConnectTimeout(15000);
+                    conn.setReadTimeout(30000);
+                    conn.setRequestProperty("User-Agent", "Nuwa-Android-Updater");
+                    int code = conn.getResponseCode();
+                    if (code == HttpURLConnection.HTTP_MOVED_PERM
+                        || code == HttpURLConnection.HTTP_MOVED_TEMP
+                        || code == HttpURLConnection.HTTP_SEE_OTHER
+                        || code == 307
+                        || code == 308) {
+                        String location = conn.getHeaderField("Location");
+                        conn.disconnect();
+                        conn = null;
+                        if (location == null || location.isEmpty()) {
+                            throw new IllegalStateException("Redirect without Location header");
+                        }
+                        currentUrl = new URL(url, location).toString();
+                        continue;
+                    }
+                    break;
+                }
+
+                if (conn == null || conn.getResponseCode() < 200 || conn.getResponseCode() >= 300) {
+                    int status = conn != null ? conn.getResponseCode() : -1;
+                    throw new IllegalStateException("HTTP " + status);
+                }
+
+                long totalBytes = conn.getContentLengthLong();
+                File updateDir = new File(getContext().getCacheDir(), "updates");
+                if (!updateDir.exists()) {
+                    //noinspection ResultOfMethodCallIgnored
+                    updateDir.mkdirs();
+                }
+                File partFile = new File(updateDir, "nuwa-update.apk.part");
+                File targetFile = new File(updateDir, "nuwa-update.apk");
+                if (partFile.exists()) {
+                    //noinspection ResultOfMethodCallIgnored
+                    partFile.delete();
+                }
+
+                try (InputStream in = conn.getInputStream();
+                     FileOutputStream out = new FileOutputStream(partFile)) {
+                    byte[] buffer = new byte[16384];
+                    long downloaded = 0L;
+                    int lastPercent = -1;
+                    long lastEmitMs = 0L;
+                    int read;
+                    while ((read = in.read(buffer)) != -1) {
+                        out.write(buffer, 0, read);
+                        downloaded += read;
+                        if (totalBytes > 0) {
+                            int pct = (int) Math.min(100L, (downloaded * 100L) / totalBytes);
+                            long now = System.currentTimeMillis();
+                            if (pct != lastPercent && (now - lastEmitMs >= 120 || pct == 100)) {
+                                lastPercent = pct;
+                                lastEmitMs = now;
+                                emitWebEvent(
+                                    "window.dispatchEvent(new CustomEvent('dsapp:update-progress',{detail:{progress:"
+                                        + pct
+                                        + "}}));"
+                                );
+                            }
+                        }
+                    }
+                    out.flush();
+                }
+
+                if (targetFile.exists()) {
+                    //noinspection ResultOfMethodCallIgnored
+                    targetFile.delete();
+                }
+                if (!partFile.renameTo(targetFile)) {
+                    throw new IllegalStateException("Failed to finalize APK file");
+                }
+
+                emitWebEvent("window.dispatchEvent(new CustomEvent('dsapp:update-progress',{detail:{progress:100}}));");
+
+                Uri apkUri = FileProvider.getUriForFile(
+                    getContext(),
+                    getContext().getPackageName() + ".fileprovider",
+                    targetFile
+                );
+                Intent installIntent = new Intent(Intent.ACTION_VIEW);
+                installIntent.setDataAndType(apkUri, "application/vnd.android.package-archive");
+                installIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+
+                mainHandler.post(() -> {
+                    getContext().startActivity(installIntent);
+                    JSObject ret = new JSObject();
+                    ret.put("started", true);
+                    call.resolve(ret);
+                });
+            } catch (Exception e) {
+                mainHandler.post(() -> call.reject("APK download failed: " + e.getMessage(), e));
+            } finally {
+                updateDownloading = false;
+                if (conn != null) {
+                    conn.disconnect();
+                }
+            }
+        }).start();
     }
 
     private void emitWebEvent(final String script) {
