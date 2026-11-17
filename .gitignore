@@ -1,0 +1,29 @@
+# Dependencies & build outputs
+node_modules/
+dist/
+build/
+.pnpm-store/
+.cache/
+tmp/
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+
+# Android & IDE artifacts
+.gradle/
+local.properties
+*.apk
+*.aab
+*.ap_
+*.dex
+.idea/
+.vscode/
+
+# OS & logs
+.DS_Store
+Thumbs.db
+*.log

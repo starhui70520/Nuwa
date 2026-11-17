@@ -1,0 +1,290 @@
+import clsx from 'clsx'
+import { useEffect, useMemo, useState } from 'react'
+import logoUrl from '../../assets/logo.png'
+import { useTranslate } from '../../i18n/index.js'
+import { refreshBalance, useBalance } from '../../services/api/balance.js'
+import { searchSessionIdsByContent } from '../../services/chat/db.js'
+import { groupSessions } from '../../services/chat/sessionGroups.js'
+import { newChat, removeSession, useChatStore } from '../../services/chat/store.js'
+import type { SessionSummary } from '../../services/chat/types.js'
+import { isUsingDeepSeekAccount, setSiderCollapsed, useSettings } from '../../services/settings.js'
+import { Button } from '../base/Button.js'
+import { IconButton } from '../base/IconButton.js'
+import {
+  IconCloseFill14,
+  IconEllipsisOutline16,
+  IconPanelLeftOutline16,
+  IconSearchOutline16,
+  NewChatIcon,
+} from '../base/icons.js'
+import { Modal } from '../base/Modal.js'
+import { showToast } from '../base/toastState.js'
+import { openSettings } from '../settings/settingsDialogState.js'
+import { closeMobileSider, useMobileSider } from './mobileSiderState.js'
+import { SessionItem } from './SessionItem.js'
+import styles from './Sider.module.css'
+
+/** 展开的侧边栏：搜索框 / 会话列表 / 底部账号入口 */
+export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
+  const t = useTranslate()
+  const sessions = useChatStore((state) => state.sessions)
+  const activeId = useChatStore((state) => state.activeId)
+  const isAccount = useSettings((state) => isUsingDeepSeekAccount(state))
+  const dshAccountLabel = useSettings((state) => state.dshAccountLabel)
+  const apiModel = useSettings((state) => state.apiModel)
+  const balance = useBalance((state) => state.balance)
+  const mobileOpen = useMobileSider((state) => state.open)
+  const [now, setNow] = useState(Date.now)
+  const [query, setQuery] = useState('')
+  const [contentSearch, setContentSearch] = useState<{
+    keyword: string
+    ids: Set<string>
+  } | null>(null)
+  const [deleting, setDeleting] = useState<SessionSummary | null>(null)
+  const [deletePending, setDeletePending] = useState(false)
+
+  const normalizedQuery = query.trim().toLowerCase()
+
+  useEffect(() => {
+    if (!normalizedQuery) {
+      return
+    }
+    const controller = new AbortController()
+    const timer = setTimeout(() => {
+      void searchSessionIdsByContent(normalizedQuery, controller.signal)
+        .then((ids) => {
+          if (!controller.signal.aborted) {
+            setContentSearch({ keyword: normalizedQuery, ids })
+          }
+        })
+        .catch(() => {
+          // 检索中断时保留当前标题匹配结果
+        })
+    }, 180)
+    return () => {
+      clearTimeout(timer)
+      controller.abort()
+    }
+  }, [normalizedQuery])
+
+  const filteredSessions = useMemo(() => {
+    if (!normalizedQuery) {
+      return sessions
+    }
+    const contentIds =
+      contentSearch && contentSearch.keyword === normalizedQuery ? contentSearch.ids : null
+    return sessions.filter((session) => {
+      const title = (session.title || t('untitledChat')).toLowerCase()
+      return title.includes(normalizedQuery) || Boolean(contentIds?.has(session.id))
+    })
+  }, [sessions, normalizedQuery, contentSearch, t])
+
+  const groups = useMemo(() => groupSessions(filteredSessions, now, t), [filteredSessions, now, t])
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout>
+    const refresh = () => {
+      clearTimeout(timer)
+      const time = Date.now()
+      setNow(time)
+      const midnight = new Date(time).setHours(24, 0, 0, 0)
+      timer = setTimeout(refresh, midnight - time)
+    }
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        refresh()
+        void refreshBalance()
+      }
+    }
+    const onFocus = () => {
+      refresh()
+      void refreshBalance()
+    }
+    refresh()
+    void refreshBalance()
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    window.addEventListener('focus', onFocus)
+    return () => {
+      clearTimeout(timer)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!mobile || mobileOpen) {
+      void refreshBalance()
+    }
+  }, [mobile, mobileOpen])
+
+  const profileName = isAccount
+    ? dshAccountLabel || t('dshAccountLabel')
+    : apiModel.trim() || t('appName')
+
+  return (
+    <div className={clsx(styles.sider, mobile && styles.mobile)}>
+      {!mobile ? (
+        <>
+          <div className={styles.top}>
+            <div className={styles.brand}>
+              <img src={logoUrl} alt="" className={styles.brandLogo} />
+              <div className={styles.appName}>{t('appName')}</div>
+            </div>
+            <IconButton
+              size="m"
+              icon={<IconPanelLeftOutline16 />}
+              tooltip={t('collapseSiderbarButton')}
+              tooltipPlacement="bottom"
+              onClick={() => setSiderCollapsed(true)}
+            />
+          </div>
+          <button
+            type="button"
+            className={styles.newChat}
+            onClick={() => {
+              newChat()
+              closeMobileSider()
+            }}
+          >
+            <span className={styles.newChatIcon}>
+              <NewChatIcon />
+            </span>
+            {t('newChat')}
+          </button>
+        </>
+      ) : null}
+
+      <div className={styles.searchWrap}>
+        <span className={styles.searchIcon}>
+          <IconSearchOutline16 />
+        </span>
+        <input
+          type="search"
+          className={styles.searchInput}
+          placeholder={t('siderSearchPlaceholder')}
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+        {query ? (
+          <button
+            type="button"
+            className={styles.searchClear}
+            aria-label={t('close')}
+            onClick={() => setQuery('')}
+          >
+            <IconCloseFill14 />
+          </button>
+        ) : null}
+      </div>
+
+      <div className={styles.listWrap}>
+        {sessions.length === 0 ? (
+          <div className={styles.emptyState}>
+            <div className={styles.emptyTitle}>{t('siderEmptyTitle')}</div>
+            <div className={styles.emptySubtitle}>{t('siderEmptySubtitle')}</div>
+            <button
+              type="button"
+              className={styles.emptyAction}
+              onClick={() => {
+                newChat({ silentIfAlreadyNew: mobile })
+                closeMobileSider()
+              }}
+            >
+              {t('newChat')}
+            </button>
+          </div>
+        ) : filteredSessions.length === 0 ? (
+          <div className={styles.emptySearch}>{t('siderSearchEmpty')}</div>
+        ) : (
+          <div className={styles.list}>
+            {groups.map((group) => (
+              <div key={group.key} className={styles.section}>
+                <div className={styles.sectionHeader}>{group.label}</div>
+                {group.sessions.map((session) => (
+                  <SessionItem
+                    key={session.id}
+                    session={session}
+                    active={session.id === activeId}
+                    onDelete={() => setDeleting(session)}
+                  />
+                ))}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className={styles.bottom}>
+        <button type="button" className={styles.settings} onClick={() => openSettings('general')}>
+          <img src={logoUrl} alt="" className={styles.profileAvatar} />
+          <span className={styles.profileMain}>
+            <span className={styles.settingsLabel}>{profileName}</span>
+            {balance ? (
+              <span
+                className={clsx(
+                  styles.profileBalance,
+                  (!balance.isAvailable || Number(balance.totalBalance) <= 0) &&
+                    styles.profileBalanceLow
+                )}
+                title={t('accountBalanceTooltip', { amount: balance.formatted })}
+              >
+                {balance.formatted}
+              </span>
+            ) : null}
+          </span>
+          <span className={styles.profileMore}>
+            <IconEllipsisOutline16 />
+          </span>
+        </button>
+      </div>
+
+      {deleting ? (
+        <Modal
+          title={t('deleteSessionModalContentTitle')}
+          onClose={() => {
+            if (!deletePending) {
+              setDeleting(null)
+            }
+          }}
+          footer={
+            <>
+              <Button variant="outlined" disabled={deletePending} onClick={() => setDeleting(null)}>
+                {t('cancel')}
+              </Button>
+              <Button
+                variant="danger"
+                disabled={deletePending}
+                onClick={async () => {
+                  setDeletePending(true)
+                  try {
+                    if (await removeSession(deleting.id)) {
+                      setDeleting(null)
+                    } else {
+                      showToast({ key: 'sessionDeleteFailed', type: 'error' })
+                    }
+                  } finally {
+                    setDeletePending(false)
+                  }
+                }}
+              >
+                {t('delete')}
+              </Button>
+            </>
+          }
+        >
+          {t('deleteSessionWithFilesDescription')}
+        </Modal>
+      ) : null}
+    </div>
+  )
+}
+
+/** 移动端推拉式抽屉：位于主卡片层下方 */
+export const MobileSider = () => {
+  const open = useMobileSider((state) => state.open)
+  return (
+    <div className={clsx(styles.drawer, open && styles.drawerOpen)} aria-hidden={!open}>
+      <Sider mobile />
+    </div>
+  )
+}

@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Nuwa 历史记录迁移助手",
+  "version": "0.1.0",
+  "description": "自动监听 DeepSeek 官方导出的 deepseek_data-*.zip 并一键导入到本地 Nuwa 客户端",
+  "permissions": ["downloads", "storage", "tabs"],
+  "host_permissions": ["http://localhost:8090/*", "file:///*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://localhost:8090/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Nuwa 迁移助手"
+  }
+}

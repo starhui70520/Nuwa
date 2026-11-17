@@ -1,0 +1,20 @@
+declare const styles: {
+  readonly "screen": string;
+  readonly "topBar": string;
+  readonly "topAction": string;
+  readonly "hero": string;
+  readonly "heroLogo": string;
+  readonly "heroTitle": string;
+  readonly "bottom": string;
+  readonly "pillButton": string;
+  readonly "pillPrimary": string;
+  readonly "formGroup": string;
+  readonly "field": string;
+  readonly "fieldLabel": string;
+  readonly "inputPill": string;
+  readonly "rowBetween": string;
+  readonly "helperLink": string;
+  readonly "errorText": string;
+  readonly "footerNote": string;
+};
+export = styles;

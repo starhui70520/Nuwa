@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Nuwa</string>
+    <string name="title_activity_main">Nuwa</string>
+    <string name="package_name">com.dsapp.chat</string>
+    <string name="custom_url_scheme">com.dsapp.chat</string>
+</resources>
