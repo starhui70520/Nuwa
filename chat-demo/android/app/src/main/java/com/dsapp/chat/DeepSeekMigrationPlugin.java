@@ -15,6 +15,8 @@ import android.provider.Settings;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
+import android.speech.tts.TextToSpeech;
+import android.speech.tts.UtteranceProgressListener;
 import androidx.core.content.ContextCompat;
 import androidx.core.content.FileProvider;
 
@@ -32,6 +34,9 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.UUID;
 
 @CapacitorPlugin(
     name = "DeepSeekMigration",
@@ -49,6 +54,12 @@ public class DeepSeekMigrationPlugin extends Plugin {
     private PluginCall pendingStopCall;
     private Runnable stopTimeoutRunnable;
     private long lastRmsEmitMs = 0L;
+    private TextToSpeech textToSpeech;
+    private boolean ttsReady = false;
+    private boolean ttsInitializing = false;
+    private String activeUtteranceId;
+    private final List<Runnable> pendingTtsActions = new ArrayList<>();
+    private final List<Runnable> pendingTtsErrors = new ArrayList<>();
     private volatile boolean updateDownloading = false;
     @PluginMethod
     public void openExportBrowser(PluginCall call) {
@@ -396,6 +407,19 @@ public class DeepSeekMigrationPlugin extends Plugin {
             speechActive = false;
             pendingStopCall = null;
             destroySpeechRecognizerInternal();
+            activeUtteranceId = null;
+            pendingTtsActions.clear();
+            pendingTtsErrors.clear();
+            if (textToSpeech != null) {
+                try {
+                    textToSpeech.stop();
+                    textToSpeech.shutdown();
+                } catch (Exception ignored) {
+                }
+                textToSpeech = null;
+            }
+            ttsReady = false;
+            ttsInitializing = false;
         });
         super.handleOnDestroy();
     }
@@ -605,6 +629,185 @@ public class DeepSeekMigrationPlugin extends Plugin {
                 }
             }
         }).start();
+    }
+
+    @PluginMethod
+    public void speakText(PluginCall call) {
+        final String rawText = call.getString("text", "");
+        final String locale = call.getString("locale", "zh-CN");
+        final String text = rawText != null ? rawText.trim() : "";
+        if (text.isEmpty()) {
+            call.reject("EMPTY_TEXT");
+            return;
+        }
+        mainHandler.post(() -> ensureTtsInitialized(
+            () -> {
+                if (textToSpeech == null) {
+                    call.reject("TTS_UNAVAILABLE");
+                    return;
+                }
+                Locale targetLocale = (locale != null && locale.toLowerCase(Locale.ROOT).startsWith("en"))
+                    ? Locale.US
+                    : Locale.SIMPLIFIED_CHINESE;
+                int langRes = textToSpeech.setLanguage(targetLocale);
+                if (langRes == TextToSpeech.LANG_MISSING_DATA || langRes == TextToSpeech.LANG_NOT_SUPPORTED) {
+                    textToSpeech.setLanguage(Locale.getDefault());
+                }
+
+                final String utteranceId = UUID.randomUUID().toString();
+                activeUtteranceId = utteranceId;
+                int maxLen = Math.max(500, Math.min(3800, TextToSpeech.getMaxSpeechInputLength() - 200));
+                List<String> chunks = splitTtsChunks(text, maxLen);
+                for (int i = 0; i < chunks.size(); i++) {
+                    int queueMode = (i == 0) ? TextToSpeech.QUEUE_FLUSH : TextToSpeech.QUEUE_ADD;
+                    String chunkId = (i == chunks.size() - 1) ? utteranceId : (utteranceId + ":" + i);
+                    int status = textToSpeech.speak(chunks.get(i), queueMode, null, chunkId);
+                    if (status != TextToSpeech.SUCCESS) {
+                        activeUtteranceId = null;
+                        call.reject("TTS_SPEAK_FAILED");
+                        return;
+                    }
+                }
+                JSObject ret = new JSObject();
+                ret.put("utteranceId", utteranceId);
+                call.resolve(ret);
+            },
+            () -> call.reject("TTS_UNAVAILABLE")
+        ));
+    }
+
+    @PluginMethod
+    public void stopSpeaking(PluginCall call) {
+        mainHandler.post(() -> {
+            activeUtteranceId = null;
+            pendingTtsActions.clear();
+            pendingTtsErrors.clear();
+            if (textToSpeech != null) {
+                try {
+                    textToSpeech.stop();
+                } catch (Exception ignored) {
+                }
+            }
+            call.resolve();
+        });
+    }
+
+    private void ensureTtsInitialized(Runnable onReady, Runnable onError) {
+        if (textToSpeech != null && ttsReady) {
+            onReady.run();
+            return;
+        }
+        pendingTtsActions.add(onReady);
+        pendingTtsErrors.add(onError);
+        if (ttsInitializing) {
+            return;
+        }
+        ttsInitializing = true;
+        textToSpeech = new TextToSpeech(getContext().getApplicationContext(), (status) -> mainHandler.post(() -> {
+            ttsInitializing = false;
+            List<Runnable> readyList = new ArrayList<>(pendingTtsActions);
+            List<Runnable> errorList = new ArrayList<>(pendingTtsErrors);
+            pendingTtsActions.clear();
+            pendingTtsErrors.clear();
+
+            if (status == TextToSpeech.SUCCESS && textToSpeech != null) {
+                ttsReady = true;
+                textToSpeech.setOnUtteranceProgressListener(new UtteranceProgressListener() {
+                    @Override
+                    public void onStart(String id) {
+                        emitTtsState(id, "playing", false);
+                    }
+
+                    @Override
+                    public void onDone(String id) {
+                        emitTtsState(id, "done", true);
+                    }
+
+                    @Override
+                    public void onError(String id) {
+                        emitTtsState(id, "error", false);
+                    }
+
+                    @Override
+                    public void onError(String id, int errorCode) {
+                        emitTtsState(id, "error", false);
+                    }
+
+                    @Override
+                    public void onStop(String id, boolean interrupted) {
+                        emitTtsState(id, "done", false);
+                    }
+                });
+                for (Runnable action : readyList) {
+                    action.run();
+                }
+            } else {
+                ttsReady = false;
+                if (textToSpeech != null) {
+                    try {
+                        textToSpeech.shutdown();
+                    } catch (Exception ignored) {
+                    }
+                    textToSpeech = null;
+                }
+                for (Runnable err : errorList) {
+                    err.run();
+                }
+            }
+        }));
+    }
+
+    private void emitTtsState(final String id, final String state, final boolean requireExactId) {
+        mainHandler.post(() -> {
+            if (activeUtteranceId == null || id == null) {
+                return;
+            }
+            boolean exact = id.equals(activeUtteranceId);
+            boolean prefix = id.startsWith(activeUtteranceId + ":");
+            if (requireExactId ? !exact : !(exact || prefix)) {
+                return;
+            }
+            final String rootId = activeUtteranceId;
+            if (!"playing".equals(state)) {
+                activeUtteranceId = null;
+            }
+            emitWebEvent(
+                "window.dispatchEvent(new CustomEvent('dsapp:tts-state',{detail:{id:'"
+                    + rootId
+                    + "',state:'"
+                    + state
+                    + "'}}));"
+            );
+        });
+    }
+
+    private List<String> splitTtsChunks(String text, int maxLen) {
+        List<String> chunks = new ArrayList<>();
+        int start = 0;
+        int total = text.length();
+        while (start < total) {
+            int end = Math.min(total, start + maxLen);
+            if (end < total) {
+                int minBreak = start + maxLen / 2;
+                int breakAt = -1;
+                for (int i = end - 1; i >= minBreak; i--) {
+                    char c = text.charAt(i);
+                    if (c == '。' || c == '！' || c == '？' || c == '.' || c == '!' || c == '?' || c == '\n' || c == ' ') {
+                        breakAt = i + 1;
+                        break;
+                    }
+                }
+                if (breakAt > start) {
+                    end = breakAt;
+                }
+            }
+            String part = text.substring(start, end).trim();
+            if (!part.isEmpty()) {
+                chunks.add(part);
+            }
+            start = end;
+        }
+        return chunks;
     }
 
     private void emitWebEvent(final String script) {

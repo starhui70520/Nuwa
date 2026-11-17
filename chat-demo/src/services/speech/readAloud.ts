@@ -3,7 +3,8 @@ import type { TranslationMessage } from '../../i18n/index.js'
 import { ApiError } from '../api/client.js'
 import { classifyApiError } from '../api/errors.js'
 import { synthesize, TTS_SAMPLE_RATE } from '../api/speech.js'
-import { getActiveSecret, useSettings } from '../settings.js'
+import { DeepSeekMigration, isNativeAndroid } from '../nativeBridge.js'
+import { getActiveSecret, isUsingDeepSeekAccount, useSettings } from '../settings.js'
 
 /**
  * 朗读：同一时间只读一条回复。
@@ -24,6 +25,29 @@ export const useReadAloud = create<ReadAloudState>(() => ({ messageId: null, sta
 const START_DELAY = 0.1
 
 let current: { controller: AbortController; context: AudioContext } | null = null
+let nativeCurrent: { cleanup: () => void } | null = null
+
+const canUseCloudTts = (): boolean => {
+  const state = useSettings.getState()
+  return (
+    Boolean(state.apiKey) &&
+    (isUsingDeepSeekAccount(state) || state.apiBaseUrl.includes('deepseek.com'))
+  )
+}
+
+const stripMarkdownForTts = (raw: string): string =>
+  raw
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/`([^`]*)`/g, '$1')
+    .replace(/^\s{0,3}#{1,6}\s+/gm, '')
+    .replace(/^\s{0,3}>\s?/gm, '')
+    .replace(/^\s*[-*+]\s+/gm, '')
+    .replace(/^\s*\d+\.\s+/gm, '')
+    .replace(/[*_~]+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
 
 const finish = (controller: AbortController) => {
   if (current?.controller !== controller) {
@@ -36,6 +60,12 @@ const finish = (controller: AbortController) => {
 
 /** 停止当前朗读（发送、停止生成、切换会话等场景调用） */
 export const stopReadAloud = () => {
+  if (nativeCurrent) {
+    nativeCurrent.cleanup()
+    nativeCurrent = null
+    useReadAloud.setState({ messageId: null, status: 'idle' })
+    void DeepSeekMigration.stopSpeaking().catch(() => {})
+  }
   if (current) {
     const { controller } = current
     controller.abort()
@@ -87,6 +117,66 @@ export const toggleReadAloud = (
   if (reading === messageId) {
     return
   }
+
+  if (isNativeAndroid() && !canUseCloudTts()) {
+    const cleaned = stripMarkdownForTts(text)
+    if (!cleaned) {
+      onError(new ApiError('http', 'empty', 400))
+      return
+    }
+    let targetUtteranceId: string | null = null
+    let cancelled = false
+    const cleanup = () => {
+      cancelled = true
+      window.removeEventListener('dsapp:tts-state', onState)
+    }
+    const onState = (event: Event) => {
+      if (cancelled) {
+        return
+      }
+      const detail = (event as CustomEvent<{ id?: string; state?: string }>).detail
+      if (!detail || (targetUtteranceId !== null && detail.id !== targetUtteranceId)) {
+        return
+      }
+      if (detail.state === 'playing') {
+        useReadAloud.setState({ status: 'playing' })
+      } else if (detail.state === 'done') {
+        cleanup()
+        if (nativeCurrent?.cleanup === cleanup) {
+          nativeCurrent = null
+        }
+        useReadAloud.setState({ messageId: null, status: 'idle' })
+      } else if (detail.state === 'error') {
+        cleanup()
+        if (nativeCurrent?.cleanup === cleanup) {
+          nativeCurrent = null
+        }
+        useReadAloud.setState({ messageId: null, status: 'idle' })
+        onError(new Error('TTS_FAILED'))
+      }
+    }
+
+    window.addEventListener('dsapp:tts-state', onState)
+    nativeCurrent = { cleanup }
+    useReadAloud.setState({ messageId, status: 'loading' })
+
+    void DeepSeekMigration.speakText({ text: cleaned, locale: useSettings.getState().locale })
+      .then(({ utteranceId }) => {
+        if (!cancelled) {
+          targetUtteranceId = utteranceId
+        }
+      })
+      .catch((error) => {
+        if (!cancelled && nativeCurrent?.cleanup === cleanup) {
+          cleanup()
+          nativeCurrent = null
+          useReadAloud.setState({ messageId: null, status: 'idle' })
+          onError(error)
+        }
+      })
+    return
+  }
+
   const controller = new AbortController()
   const context = new AudioContext({ sampleRate: TTS_SAMPLE_RATE })
   current = { controller, context }

@@ -24,6 +24,8 @@ export type DeepSeekMigrationPlugin = {
     started: boolean
     needsInstallPermission?: boolean
   }>
+  speakText: (options: { text: string; locale: string }) => Promise<{ utteranceId: string }>
+  stopSpeaking: () => Promise<void>
 }
 
 export const DeepSeekMigration = registerPlugin<DeepSeekMigrationPlugin>('DeepSeekMigration')
