@@ -27,3 +27,11 @@ local.properties
 .DS_Store
 Thumbs.db
 *.log
+
+# HarmonyOS build & dependencies
+harmony/.hvigor/
+harmony/**/build/
+harmony/oh_modules/
+harmony/**/oh_modules/
+harmony/entry/src/main/resources/rawfile/web/*
+!harmony/entry/src/main/resources/rawfile/web/.gitkeep
