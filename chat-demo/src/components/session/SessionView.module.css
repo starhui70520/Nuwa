@@ -23,6 +23,8 @@
   text-overflow: ellipsis;
   font: var(--dsw-font-s-strong-14);
   color: var(--dsw-alias-label-primary);
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .withCollapsedSider {

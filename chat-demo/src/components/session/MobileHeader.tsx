@@ -13,7 +13,13 @@ import { openMobileSider } from '../sider/mobileSiderState.js'
 import styles from './MobileHeader.module.css'
 
 /** 移动端顶栏：左上角悬浮圆形菜单按钮 + 中间标题 + 右上角朗读静音与新对话悬浮胶囊 */
-export const MobileHeader = ({ title }: { title?: string }) => {
+export const MobileHeader = ({
+  title,
+  onTitleTap,
+}: {
+  title?: string
+  onTitleTap?: () => void
+}) => {
   const t = useTranslate()
   const reading = useReadAloud((state) => state.status !== 'idle')
   const ttsMuted = useSettings((state) => state.ttsMuted)
@@ -40,7 +46,13 @@ export const MobileHeader = ({ title }: { title?: string }) => {
       >
         <IconNativeMenu20 />
       </button>
-      {title !== undefined ? <div className={styles.title}>{title}</div> : <div className={styles.spacer} />}
+      {title !== undefined ? (
+        <div className={styles.title} onClick={onTitleTap}>
+          {title}
+        </div>
+      ) : (
+        <div className={styles.spacer} />
+      )}
       <div className={styles.capsule}>
         <button
           type="button"

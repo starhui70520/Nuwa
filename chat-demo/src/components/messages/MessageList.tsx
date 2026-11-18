@@ -37,10 +37,12 @@ export const MessageList = ({
   session,
   streaming,
   footer,
+  scrollToTopRef,
 }: {
   session: Session
   streaming: boolean
   footer: React.ReactNode
+  scrollToTopRef?: React.MutableRefObject<(() => void) | null>
 }) => {
   const isMobile = useIsMobile()
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -67,6 +69,30 @@ export const MessageList = ({
       scrollTopRef.current = el.scrollTop
     }
   }, [])
+
+  const scrollToTop = useCallback(() => {
+    const el = scrollRef.current
+    if (!el) {
+      return
+    }
+    stickyRef.current = false
+    scrollTopRef.current = 0
+    if (typeof el.scrollTo === 'function') {
+      el.scrollTo({ top: 0, behavior: 'smooth' })
+    } else {
+      el.scrollTop = 0
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!scrollToTopRef) {
+      return
+    }
+    scrollToTopRef.current = scrollToTop
+    return () => {
+      scrollToTopRef.current = null
+    }
+  }, [scrollToTopRef, scrollToTop])
 
   // 内容、键盘和输入框高度变化时，继续遵循当前跟随状态。
   useLayoutEffect(() => {
