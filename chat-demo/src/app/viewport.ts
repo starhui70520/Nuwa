@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useSyncExternalStore } from 'react'
+import { isNativeAndroid } from '../services/nativeBridge.js'
 
 /** 窄于 768px 按移动端布局 */
 const query = window.matchMedia('not all and (min-width: 768px)')
@@ -52,6 +53,7 @@ export const useMobileViewport = (enabled: boolean) => {
       return
     }
     const viewport = window.visualViewport
+    const nativeAndroid = isNativeAndroid()
     const inputSelector = 'textarea, input:not([type="file"])'
     let animationFrame = 0
     const reset = () => {
@@ -68,11 +70,10 @@ export const useMobileViewport = (enabled: boolean) => {
         reset()
         return
       }
-      frame.style.setProperty(
-        '--app-viewport-height',
-        `${viewport?.height ?? window.innerHeight}px`
-      )
-      frame.style.setProperty('--app-viewport-top', `${viewport?.offsetTop ?? 0}px`)
+      const height = nativeAndroid ? window.innerHeight : (viewport?.height ?? window.innerHeight)
+      const top = nativeAndroid ? 0 : (viewport?.offsetTop ?? 0)
+      frame.style.setProperty('--app-viewport-height', `${height}px`)
+      frame.style.setProperty('--app-viewport-top', `${top}px`)
     }
     const scheduleFrame = () => {
       cancelAnimationFrame(animationFrame)
