@@ -381,19 +381,46 @@ public class MigrationWebViewActivity extends Activity {
     private void downloadHttpFile(String urlStr, String userAgent, String fileName) {
         HttpURLConnection conn = null;
         try {
-            URL url = new URL(urlStr);
-            conn = (HttpURLConnection) url.openConnection();
-            conn.setInstanceFollowRedirects(true);
-            String cookies = CookieManager.getInstance().getCookie(urlStr);
-            if (cookies != null) {
-                conn.setRequestProperty("Cookie", cookies);
+            String currentUrl = urlStr;
+            int redirects = 0;
+            int code = 0;
+            while (true) {
+                URL url = new URL(currentUrl);
+                conn = (HttpURLConnection) url.openConnection();
+                conn.setInstanceFollowRedirects(false);
+                conn.setConnectTimeout(15000);
+                conn.setReadTimeout(30000);
+                String host = url.getHost() != null ? url.getHost().toLowerCase() : "";
+                if (host.endsWith("deepseek.com")) {
+                    String cookies = CookieManager.getInstance().getCookie(currentUrl);
+                    if (cookies != null && !cookies.isEmpty()) {
+                        conn.setRequestProperty("Cookie", cookies);
+                    }
+                    conn.setRequestProperty("Referer", TARGET_URL);
+                }
+                if (userAgent != null && !userAgent.isEmpty()) {
+                    conn.setRequestProperty("User-Agent", userAgent);
+                }
+                conn.connect();
+                code = conn.getResponseCode();
+                if (code == HttpURLConnection.HTTP_MOVED_TEMP
+                    || code == HttpURLConnection.HTTP_MOVED_PERM
+                    || code == HttpURLConnection.HTTP_SEE_OTHER
+                    || code == 307
+                    || code == 308) {
+                    String location = conn.getHeaderField("Location");
+                    conn.disconnect();
+                    conn = null;
+                    if (location == null || location.isEmpty() || redirects >= 5) {
+                        throw new RuntimeException("HTTP " + code);
+                    }
+                    currentUrl = new URL(url, location).toString();
+                    redirects++;
+                    continue;
+                }
+                break;
             }
-            if (userAgent != null) {
-                conn.setRequestProperty("User-Agent", userAgent);
-            }
-            conn.connect();
 
-            int code = conn.getResponseCode();
             if (code < 200 || code >= 300) {
                 throw new RuntimeException("HTTP " + code);
             }
@@ -407,8 +434,20 @@ public class MigrationWebViewActivity extends Activity {
                     out.write(buf, 0, len);
                 }
             }
+
+            Log.d(TAG, "Downloaded HTTP file: size=" + outFile.length() + ", type=" + conn.getContentType());
+            if (!isZipMagic(outFile)) {
+                Log.e(TAG, "Downloaded file is not a ZIP archive");
+                //noinspection ResultOfMethodCallIgnored
+                outFile.delete();
+                runOnUiThread(() ->
+                    Toast.makeText(this, "下载到的不是有效 ZIP 导出包，请重试", Toast.LENGTH_LONG).show()
+                );
+                return;
+            }
             finishWithFile(outFile, fileName);
         } catch (Exception e) {
+            Log.e(TAG, "downloadHttpFile failed: " + e.getMessage(), e);
             runOnUiThread(() ->
                 Toast.makeText(this, "下载接管失败: " + e.getMessage(), Toast.LENGTH_LONG).show()
             );
@@ -417,6 +456,30 @@ public class MigrationWebViewActivity extends Activity {
                 conn.disconnect();
             }
         }
+    }
+
+    private static boolean isZipMagic(File file) {
+        if (file == null || !file.exists() || file.length() < 4) {
+            return false;
+        }
+        try (java.io.FileInputStream fis = new java.io.FileInputStream(file)) {
+            byte[] header = new byte[4];
+            if (fis.read(header) != 4) {
+                return false;
+            }
+            return isZipMagic(header);
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private static boolean isZipMagic(byte[] bytes) {
+        return bytes != null
+            && bytes.length >= 4
+            && bytes[0] == 0x50
+            && bytes[1] == 0x4B
+            && bytes[2] == 0x03
+            && bytes[3] == 0x04;
     }
 
     private class MigrationJsBridge {
@@ -461,12 +524,21 @@ public class MigrationWebViewActivity extends Activity {
         public void onBlobDownloaded(String base64Data, String fileName) {
             try {
                 byte[] bytes = Base64.decode(base64Data, Base64.DEFAULT);
+                Log.d(TAG, "onBlobDownloaded: bytes=" + bytes.length);
+                if (!isZipMagic(bytes)) {
+                    Log.e(TAG, "Blob is not a ZIP archive");
+                    runOnUiThread(() ->
+                        Toast.makeText(MigrationWebViewActivity.this, "导出的不是有效 ZIP 文件，请重试", Toast.LENGTH_LONG).show()
+                    );
+                    return;
+                }
                 File outFile = new File(getFilesDir(), "pending_migration.zip");
                 try (FileOutputStream out = new FileOutputStream(outFile)) {
                     out.write(bytes);
                 }
                 finishWithFile(outFile, fileName);
             } catch (Exception e) {
+                Log.e(TAG, "onBlobDownloaded failed", e);
                 runOnUiThread(() ->
                     Toast.makeText(MigrationWebViewActivity.this, "解析导出包失败", Toast.LENGTH_LONG).show()
                 );
@@ -515,7 +587,11 @@ public class MigrationWebViewActivity extends Activity {
         mainHandler.removeCallbacks(loginPollTask);
         executor.shutdownNow();
         if (webView != null) {
+            if (webView.getParent() instanceof ViewGroup) {
+                ((ViewGroup) webView.getParent()).removeView(webView);
+            }
             webView.destroy();
+            webView = null;
         }
         super.onDestroy();
     }

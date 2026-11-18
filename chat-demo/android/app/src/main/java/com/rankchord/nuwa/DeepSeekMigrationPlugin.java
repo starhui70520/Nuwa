@@ -115,6 +115,7 @@ public class DeepSeekMigrationPlugin extends Plugin {
             return;
         }
 
+        android.util.Log.d("DSAPP_MIGRATION", "consumePendingExport: " + file.getAbsolutePath() + " size=" + file.length());
         ret.put("hasPending", true);
         ret.put("filePath", file.getAbsolutePath());
         ret.put("fileName", name);
