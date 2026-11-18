@@ -216,7 +216,7 @@
 
 .ds-markdown {
   table code {
-    font-size: 13px;
+    font-size: 0.8125rem;
   }
 }
 
@@ -287,7 +287,7 @@
   white-space: nowrap;
 
   background: var(--dsw-alias-markdown-placeholder);
-  font: 500 9px/14px var(--ds-font-family-code);
+  font: 500 0.5625rem/0.875rem var(--ds-font-family-code);
   color: var(--dsw-alias-label-tertiary);
 
   display: inline-flex;
@@ -376,5 +376,5 @@
   min-height: 160px;
   padding: 16px;
   color: var(--dsw-alias-label-secondary);
-  font-size: 14px;
+  font-size: 0.875rem;
 }

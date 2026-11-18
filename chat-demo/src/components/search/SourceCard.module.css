@@ -57,7 +57,7 @@
   display: -webkit-box;
   margin-top: 6px;
   overflow: hidden;
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 20px;
   color: var(--search-view-card-secondary-color, var(--dsw-alias-label-secondary));
   line-clamp: 2;

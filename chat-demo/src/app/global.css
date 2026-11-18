@@ -3,6 +3,10 @@
   --message-list-padding-horizontal: 44px;
 }
 
+html {
+  font-size: calc(16px * var(--ds-chat-font-scale, 1));
+}
+
 @media (max-width: 1023px) {
   :root {
     --message-list-max-width: 712px;

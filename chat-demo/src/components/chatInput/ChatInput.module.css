@@ -1,12 +1,12 @@
 .wrapper {
-  --line-height: calc(24px * var(--ds-chat-font-scale, 1));
+  --line-height: 1.5rem;
   --input-padding-top: 12px;
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
   width: 100%;
   cursor: text;
-  font-size: calc(16px * var(--ds-chat-font-scale, 1));
+  font-size: 1rem;
   line-height: var(--line-height);
   border-radius: 24px;
   border: 1px solid rgba(0, 0, 0, 0.07);
@@ -171,7 +171,7 @@
   overflow: hidden;
   max-width: 100%;
   margin-top: 2px;
-  font-size: 11px;
+  font-size: 0.6875rem;
   line-height: 14px;
   font-weight: 500;
   text-align: center;
@@ -314,7 +314,7 @@
   background-color: transparent;
   color: var(--dsw-alias-label-primary);
   font: inherit;
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 20px;
   font-weight: 500;
   white-space: nowrap;

@@ -12,7 +12,7 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 20px;
   color: var(--dsw-alias-label-secondary);
 }
@@ -23,7 +23,7 @@
   padding: 10px 12px;
   border-radius: 10px;
   background: var(--dsw-alias-bg-secondary);
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 20px;
   color: var(--dsw-alias-label-primary);
   white-space: pre-wrap;
@@ -52,7 +52,7 @@
 }
 
 .progressText {
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 16px;
   color: var(--dsw-alias-label-tertiary);
 }

@@ -2,7 +2,7 @@
   display: inline-flex;
   align-items: center;
   flex-shrink: 0;
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 17px;
   color: var(--dsw-alias-label-caption);
   font-variant-numeric: tabular-nums;

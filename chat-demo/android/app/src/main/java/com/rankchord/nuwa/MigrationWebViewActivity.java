@@ -51,6 +51,7 @@ public class MigrationWebViewActivity extends Activity {
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private volatile boolean completed = false;
     private volatile boolean autoExportTriggered = false;
+    private volatile boolean pendingStorageClear = false;
 
     private final Runnable loginPollTask = new Runnable() {
         @Override
@@ -58,7 +59,9 @@ public class MigrationWebViewActivity extends Activity {
             if (completed || autoExportTriggered || webView == null) {
                 return;
             }
-            checkLoginState();
+            if (!pendingStorageClear) {
+                checkLoginState();
+            }
             mainHandler.postDelayed(this, 1200);
         }
     };
@@ -144,6 +147,18 @@ public class MigrationWebViewActivity extends Activity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
+                if (pendingStorageClear && url != null && url.contains("deepseek.com")) {
+                    pendingStorageClear = false;
+                    view.evaluateJavascript(
+                        "(function(){"
+                            + "try{localStorage.clear();sessionStorage.clear();}catch(e){}"
+                            + "try{if(window.indexedDB&&indexedDB.databases){indexedDB.databases().then(function(ds){ds.forEach(function(d){if(d&&d.name)indexedDB.deleteDatabase(d.name);});}).catch(function(){});}}catch(e){}"
+                            + "setTimeout(function(){location.replace('" + TARGET_URL + "');},80);"
+                            + "})()",
+                        null
+                    );
+                    return;
+                }
                 if (!autoExportTriggered) {
                     checkLoginState();
                 }
@@ -152,7 +167,7 @@ public class MigrationWebViewActivity extends Activity {
             @Override
             public void doUpdateVisitedHistory(WebView view, String url, boolean isReload) {
                 super.doUpdateVisitedHistory(view, url, isReload);
-                if (!autoExportTriggered) {
+                if (!pendingStorageClear && !autoExportTriggered) {
                     checkLoginState();
                 }
             }
@@ -201,34 +216,22 @@ public class MigrationWebViewActivity extends Activity {
     }
 
     private void clearDeepSeekSession(Runnable afterClear) {
-        CookieManager cookieManager = CookieManager.getInstance();
-        String[] urls = new String[] {
-            "https://chat.deepseek.com",
-            "https://deepseek.com",
-            "https://www.deepseek.com"
-        };
-        for (String url : urls) {
-            String cookies = cookieManager.getCookie(url);
-            if (cookies == null || cookies.isEmpty()) {
-                continue;
-            }
-            for (String pair : cookies.split(";")) {
-                int eq = pair.indexOf('=');
-                String name = (eq > 0 ? pair.substring(0, eq) : pair).trim();
-                if (name.isEmpty()) {
-                    continue;
-                }
-                cookieManager.setCookie(url, name + "=; Max-Age=0; Path=/");
-                cookieManager.setCookie(url, name + "=; Max-Age=0; Path=/; Domain=.deepseek.com");
-            }
+        pendingStorageClear = true;
+        if (webView != null) {
+            webView.clearCache(true);
         }
-        cookieManager.flush();
-        WebStorage.getInstance().deleteOrigin(TARGET_URL);
-        mainHandler.post(afterClear);
+        WebStorage webStorage = WebStorage.getInstance();
+        webStorage.deleteOrigin("https://chat.deepseek.com");
+        webStorage.deleteOrigin(TARGET_URL);
+        CookieManager cookieManager = CookieManager.getInstance();
+        cookieManager.removeAllCookies(ignored -> {
+            cookieManager.flush();
+            mainHandler.post(afterClear);
+        });
     }
 
     private void checkLoginState() {
-        if (webView == null || autoExportTriggered || completed) {
+        if (webView == null || autoExportTriggered || completed || pendingStorageClear) {
             return;
         }
         String js = "(function(){"

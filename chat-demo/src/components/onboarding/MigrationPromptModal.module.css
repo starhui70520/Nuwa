@@ -19,7 +19,7 @@
 }
 
 .description {
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 20px;
   color: var(--dsw-alias-label-secondary);
 }

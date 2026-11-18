@@ -633,6 +633,7 @@ const DeepSeekAccountSetting = () => {
 const OneClickMigrateSetting = ({ disabled }: { disabled: boolean }) => {
   const t = useTranslate()
   const [choosingAccount, setChoosingAccount] = useState(false)
+  const hasSessions = useChatStore((state) => state.sessions.length > 0)
 
   const launch = (clearSession: boolean) => {
     setChoosingAccount(false)
@@ -653,7 +654,7 @@ const OneClickMigrateSetting = ({ disabled }: { disabled: boolean }) => {
             className={styles.cellButton}
             disabled={disabled}
             onClick={() => {
-              if (isNativeAndroid() && hasUsedOneClickMigration()) {
+              if (isNativeAndroid() && (hasUsedOneClickMigration() || hasSessions)) {
                 setChoosingAccount(true)
                 return
               }

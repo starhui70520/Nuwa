@@ -80,7 +80,7 @@
 
 .caption {
   overflow: hidden;
-  font-size: 14px;
+  font-size: 0.875rem;
   line-height: 22px;
   font-weight: 400;
   white-space: nowrap;
@@ -90,7 +90,7 @@
 
 .subCaption {
   overflow: hidden;
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 18px;
   white-space: nowrap;
   text-overflow: ellipsis;
