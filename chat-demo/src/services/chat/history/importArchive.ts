@@ -114,6 +114,9 @@ export const importArchive = async (file: File): Promise<void> => {
       } else if (path === USER_PATH && !index && imported.size === 0) {
         // 账号信息（已脱敏）不导入；文件可能缺失。
         await skipEntry(entry)
+      } else if (path === 'yejian_meta.json' || path.startsWith('yejian/')) {
+        // 兼容第三方衍生客户端（如夜笺）附带的扩展元数据/配置条目，导入时跳过。
+        await skipEntry(entry)
       } else if (sessionId !== null && !index) {
         const local = toLocalSession(readSessionFile(await readJson(entry)))
         if (local.session.id !== sessionId || imported.has(sessionId)) {
