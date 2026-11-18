@@ -3,9 +3,11 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useIsMobile } from '../../app/viewport.js'
 import { useTranslate, type TranslationKey, type TranslationMessage } from '../../i18n/index.js'
 import {
+  fetchReleaseHistory,
   getCurrentAppVersion,
   getWebAppVersion,
   useAppUpdateStore,
+  type ReleaseHistoryItem,
 } from '../../services/appUpdate.js'
 import {
   logoutDeepSeekAccount,
@@ -72,7 +74,7 @@ import { ApiKeyConfirm, ApiKeyField, useApiKeyEditor } from './ApiKeyField.js'
 import styles from './Settings.module.css'
 import { closeSettings, useSettingsDialog } from './settingsDialogState.js'
 
-type SettingsPage = 'root' | 'account' | 'data'
+type SettingsPage = 'root' | 'account' | 'data' | 'changelog'
 
 const DOCS_URL = 'https://api-docs.deepseek.com/zh-cn/'
 
@@ -120,7 +122,9 @@ const SettingsContent = () => {
       ? t('settingsAccountManage')
       : page === 'data'
         ? t('settingsDataManage')
-        : t('settings')
+        : page === 'changelog'
+          ? t('settingsReleaseNotes')
+          : t('settings')
 
   const onSignOutAll = () => {
     void logoutDeepSeekAccount()
@@ -291,6 +295,19 @@ const SettingsContent = () => {
                     <IconChevronRightOutline14 />
                   </span>
                 </button>
+                <button
+                  type="button"
+                  className={clsx(styles.groupRow, styles.groupRowButton)}
+                  onClick={() => setPage('changelog')}
+                >
+                  <span className={styles.rowIcon}>
+                    <IconDocOutline18 />
+                  </span>
+                  <span className={styles.rowLabel}>{t('settingsReleaseNotes')}</span>
+                  <span className={styles.rowChevron}>
+                    <IconChevronRightOutline14 />
+                  </span>
+                </button>
                 {harmonyBridge?.openPrivacyPolicy && (
                   <button
                     type="button"
@@ -347,6 +364,8 @@ const SettingsContent = () => {
               </div>
               {isMobile ? <ApiKeyConfirm editor={apiKeyEditor} /> : null}
             </>
+          ) : page === 'changelog' ? (
+            <ReleaseNotesPage />
           ) : (
             <>
               <div className={styles.groupCard}>
@@ -379,6 +398,81 @@ const SettingsContent = () => {
       {historyImport.file ? <ImportConfirm historyImport={historyImport} /> : null}
       {historyDelete.opened ? <DeleteAllConfirm historyDelete={historyDelete} /> : null}
     </>
+  )
+}
+
+const formatReleaseDate = (iso: string) => {
+  if (!iso) {
+    return ''
+  }
+  const date = new Date(iso)
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString()
+}
+
+/** 历史版本更新日志列表页（从官网发布接口读取） */
+const ReleaseNotesPage = () => {
+  const t = useTranslate()
+  const [items, setItems] = useState<ReleaseHistoryItem[]>([])
+  const [loading, setLoading] = useState(true)
+  const [failed, setFailed] = useState(false)
+  const [reloadKey, setReloadKey] = useState(0)
+
+  useEffect(() => {
+    let active = true
+    setLoading(true)
+    setFailed(false)
+    void fetchReleaseHistory()
+      .then((list) => {
+        if (active) {
+          setItems(list)
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setFailed(true)
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setLoading(false)
+        }
+      })
+    return () => {
+      active = false
+    }
+  }, [reloadKey])
+
+  if (loading) {
+    return <div className={styles.releaseStatus}>{t('releaseNotesLoading')}</div>
+  }
+
+  if (failed) {
+    return (
+      <div className={styles.releaseStatus}>
+        <div>{t('releaseNotesLoadFailed')}</div>
+        <Button size="m" onClick={() => setReloadKey((n) => n + 1)}>
+          {t('retry')}
+        </Button>
+      </div>
+    )
+  }
+
+  if (items.length === 0) {
+    return <div className={styles.releaseStatus}>{t('releaseNotesEmpty')}</div>
+  }
+
+  return (
+    <div className={styles.releaseList}>
+      {items.map((item) => (
+        <div key={item.id} className={clsx(styles.groupCard, styles.releaseItem)}>
+          <div className={styles.releaseHeader}>
+            <span className={styles.releaseVersion}>v{item.version}</span>
+            <span className={styles.releaseDate}>{formatReleaseDate(item.createdAt)}</span>
+          </div>
+          <p className={styles.releaseNotes}>{item.changelog || t('updateNoNotes')}</p>
+        </div>
+      ))}
+    </div>
   )
 }
 

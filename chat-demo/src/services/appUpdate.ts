@@ -2,7 +2,8 @@ import { create } from 'zustand'
 import { showToast } from '../components/base/toastState.js'
 import { DeepSeekMigration, isNativeAndroid } from './nativeBridge.js'
 
-const GITHUB_LATEST_RELEASE_URL = 'https://api.github.com/repos/starhui70520/Nuwa/releases/latest'
+const PORTAL_BASE_URL = 'https://dl.rankchord.com'
+const PORTAL_RELEASES_URL = `${PORTAL_BASE_URL}/api/releases`
 const LAST_AUTO_CHECK_KEY = 'nuwa_last_update_check_at'
 const AUTO_CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000
 
@@ -15,14 +16,27 @@ export type AppUpdateInfo = {
   apkUrl: string | null
 }
 
-type GitHubReleaseResponse = {
-  tag_name?: string
-  body?: string
-  html_url?: string
-  assets?: Array<{
-    name?: string
-    browser_download_url?: string
-  }>
+export type ReleaseHistoryItem = {
+  id: string
+  version: string
+  changelog: string
+  createdAt: string
+}
+
+type PortalReleaseItem = {
+  id?: string
+  platform?: string
+  version?: string
+  changelog?: string
+  createdAt?: string
+  published?: boolean
+}
+
+type PortalReleasesResponse = {
+  latest?: {
+    android?: PortalReleaseItem | null
+  }
+  releases?: PortalReleaseItem[]
 }
 
 /** 从构建注入的 meta 标签读取默认版本号 */
@@ -76,43 +90,64 @@ export const compareVersions = (a: string, b: string): number => {
   return 0
 }
 
-/** 查询 GitHub Releases 最新版本 */
-export const fetchLatestAppUpdate = async (): Promise<AppUpdateInfo> => {
-  const currentVersion = normalizeVersion(await getCurrentAppVersion())
-  const res = await fetch(GITHUB_LATEST_RELEASE_URL, {
-    headers: { Accept: 'application/vnd.github+json' },
+const fetchPortalReleases = async (): Promise<PortalReleasesResponse> => {
+  const res = await fetch(PORTAL_RELEASES_URL, {
+    headers: { Accept: 'application/json' },
     cache: 'no-store',
   })
+  if (!res.ok) {
+    throw new Error(`Portal releases API ${res.status}`)
+  }
+  return (await res.json()) as PortalReleasesResponse
+}
 
-  if (res.status === 404) {
+/** 从官网 MinIO 发布服务查询最新版本 */
+export const fetchLatestAppUpdate = async (): Promise<AppUpdateInfo> => {
+  const currentVersion = normalizeVersion(await getCurrentAppVersion())
+  const data = await fetchPortalReleases()
+  const latest =
+    data.latest?.android ??
+    data.releases?.find((item) => item.platform === 'android' && item.published !== false) ??
+    null
+
+  if (!latest) {
     return {
       currentVersion,
       latestVersion: currentVersion,
       hasUpdate: false,
       notes: '',
-      releaseUrl: 'https://github.com/starhui70520/Nuwa/releases',
+      releaseUrl: PORTAL_BASE_URL,
       apkUrl: null,
     }
   }
 
-  if (!res.ok) {
-    throw new Error(`GitHub API ${res.status}`)
-  }
-
-  const data = (await res.json()) as GitHubReleaseResponse
-  const latestVersion = normalizeVersion(data.tag_name || currentVersion)
-  const apkAsset = data.assets?.find(
-    (asset) => typeof asset.name === 'string' && asset.name.toLowerCase().endsWith('.apk')
-  )
+  const latestVersion = normalizeVersion(latest.version || currentVersion)
+  const apkUrl = latest.id
+    ? `${PORTAL_BASE_URL}/api/releases/${encodeURIComponent(latest.id)}/download`
+    : null
 
   return {
     currentVersion,
     latestVersion,
     hasUpdate: compareVersions(latestVersion, currentVersion) > 0,
-    notes: (data.body || '').trim(),
-    releaseUrl: data.html_url || 'https://github.com/starhui70520/Nuwa/releases',
-    apkUrl: apkAsset?.browser_download_url || null,
+    notes: (latest.changelog || '').trim(),
+    releaseUrl: PORTAL_BASE_URL,
+    apkUrl,
   }
+}
+
+/** 获取历史版本更新日志列表（按发布时间倒序） */
+export const fetchReleaseHistory = async (): Promise<ReleaseHistoryItem[]> => {
+  const data = await fetchPortalReleases()
+  const list = (data.releases ?? []).filter(
+    (item) => item.platform === 'android' && item.published !== false && item.version
+  )
+  return list.map((item, index) => ({
+    id: item.id || `${item.version}-${index}`,
+    version: normalizeVersion(item.version || ''),
+    changelog: (item.changelog || '').trim(),
+    createdAt: item.createdAt || '',
+  }))
 }
 
 type AppUpdateState = {
