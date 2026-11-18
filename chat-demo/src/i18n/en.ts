@@ -211,6 +211,8 @@ export const en = {
   settingsDataManage: 'Data Management',
   settingsAppearance: 'Appearance',
   settingsAppearanceSystem: 'System',
+  settingsFontSize: 'Font Size',
+  settingsFontSizeDefault: '{size}px (Default)',
   settingsVoiceHint: 'Voice input and read-aloud use your active API credential',
   settingsHarmonyVoiceHint: 'HarmonyOS handles voice input and read-aloud using system speech services',
   settingsVersion: 'Version',

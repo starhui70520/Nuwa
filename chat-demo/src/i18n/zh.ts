@@ -203,6 +203,8 @@ export const zh = {
   settingsDataManage: '数据管理',
   settingsAppearance: '外观',
   settingsAppearanceSystem: '系统',
+  settingsFontSize: '字体大小',
+  settingsFontSizeDefault: '{size}px（默认）',
   settingsVoiceHint: '语音输入与回答朗读将使用当前生效的接口凭据',
   settingsHarmonyVoiceHint: '语音输入与回答朗读由鸿蒙系统语音服务处理',
   settingsVersion: '当前版本',

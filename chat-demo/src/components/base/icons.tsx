@@ -765,3 +765,16 @@ export const IconLogoutOutline18 = () => (
     />
   </svg>
 )
+
+/** 设置-字体大小图标 */
+export const IconFontSizeOutline18 = () => (
+  <svg width={18} height={18} viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path
+      d="M3.25 4.75V3.5h9v1.25M7.75 3.5v11M5.75 14.5h4M11.25 8.5h4M13.25 8.5v6"
+      stroke="currentColor"
+      strokeWidth={1.6}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+)

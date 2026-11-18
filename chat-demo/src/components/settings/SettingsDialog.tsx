@@ -23,6 +23,8 @@ import { triggerOneClickMigration } from '../../services/chat/migrationBridge.js
 import { useChatStore } from '../../services/chat/store.js'
 import { getRegionName, provinces, regionCodes } from '../../services/location.js'
 import {
+  CHAT_FONT_SIZES,
+  DEFAULT_CHAT_FONT_SIZE,
   isChineseBrowser,
   isUsingDeepSeekAccount,
   setApiBaseUrl,
@@ -30,6 +32,7 @@ import {
   setApiModel,
   setApiProtocol,
   setAuthMode,
+  setChatFontSize,
   setIcloudAutoBackup,
   setLocale,
   setLocation,
@@ -38,6 +41,7 @@ import {
   setTtsVoice,
   useSettings,
   type ApiProtocol,
+  type ChatFontSize,
   type SpeechEngine,
   type ThemePreference,
 } from '../../services/settings.js'
@@ -51,6 +55,7 @@ import {
   IconDataOutline16,
   IconDocOutline18,
   IconDownloadOutline16,
+  IconFontSizeOutline18,
   IconGlobeOutline18,
   IconInfoCircleOutline18,
   IconLogoutOutline18,
@@ -216,6 +221,13 @@ const SettingsContent = () => {
                   </span>
                   <span className={styles.rowLabel}>{t('settingsAppearance')}</span>
                   <AppearanceInlineSelect />
+                </div>
+                <div className={styles.groupRow}>
+                  <span className={styles.rowIcon}>
+                    <IconFontSizeOutline18 />
+                  </span>
+                  <span className={styles.rowLabel}>{t('settingsFontSize')}</span>
+                  <FontSizeInlineSelect />
                 </div>
                 <div className={clsx(styles.groupRow, styles.locationGroupRow)}>
                   <span className={styles.rowIcon}>
@@ -695,6 +707,26 @@ const AppearanceInlineSelect = () => {
         { value: 'dark', label: t('avatarMenuSettingsDialogThemeSelectDarkOption') },
       ]}
       onChange={(value) => setThemePreference(value as ThemePreference)}
+    />
+  )
+}
+
+const FontSizeInlineSelect = () => {
+  const t = useTranslate()
+  const chatFontSize = useSettings((state) => state.chatFontSize)
+  return (
+    <Select
+      variant="inline"
+      ariaLabel={t('settingsFontSize')}
+      value={String(chatFontSize)}
+      options={CHAT_FONT_SIZES.map((size) => ({
+        value: String(size),
+        label:
+          size === DEFAULT_CHAT_FONT_SIZE
+            ? t('settingsFontSizeDefault', { size })
+            : `${size}px`,
+      }))}
+      onChange={(value) => setChatFontSize(Number(value) as ChatFontSize)}
     />
   )
 }

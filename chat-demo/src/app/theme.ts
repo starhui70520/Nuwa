@@ -1,6 +1,11 @@
 import { useSyncExternalStore } from 'react'
 import { DeepSeekMigration, isNativeAndroid } from '../services/nativeBridge.js'
-import { useSettings, type ThemePreference } from '../services/settings.js'
+import {
+  DEFAULT_CHAT_FONT_SIZE,
+  useSettings,
+  type ChatFontSize,
+  type ThemePreference,
+} from '../services/settings.js'
 
 export type Theme = 'light' | 'dark'
 
@@ -55,6 +60,7 @@ const applyTheme = (theme: Theme) => {
 }
 
 let appliedTheme: Theme | null = null
+let appliedFontSize: ChatFontSize | null = null
 
 const syncTheme = () => {
   const theme = resolveTheme(useSettings.getState().themePreference, getOsTheme())
@@ -64,12 +70,27 @@ const syncTheme = () => {
   }
 }
 
-/** 首屏渲染前同步应用一次，之后随主题设置与系统深浅色变化更新 */
+const syncFontSize = () => {
+  const fontSize = useSettings.getState().chatFontSize
+  if (fontSize !== appliedFontSize) {
+    appliedFontSize = fontSize
+    document.documentElement.style.setProperty(
+      '--ds-chat-font-scale',
+      String(fontSize / DEFAULT_CHAT_FONT_SIZE)
+    )
+  }
+}
+
+/** 首屏渲染前同步应用一次，之后随主题设置、字号与系统深浅色变化更新 */
 export const setupTheme = () => {
   syncTheme()
+  syncFontSize()
   if (document.readyState !== 'complete') {
     window.addEventListener('load', syncPageBackground, { once: true })
   }
   query.addEventListener('change', syncTheme)
-  useSettings.subscribe(syncTheme)
+  useSettings.subscribe(() => {
+    syncTheme()
+    syncFontSize()
+  })
 }

@@ -7,6 +7,11 @@ export type Locale = 'zh-CN' | 'en-US'
 /** 主题偏好；默认跟随系统 */
 export type ThemePreference = 'light' | 'dark' | 'system'
 
+/** 聊天正文字号（px）；默认 16px */
+export const CHAT_FONT_SIZES = [12, 14, 16, 18, 20, 22] as const
+export type ChatFontSize = (typeof CHAT_FONT_SIZES)[number]
+export const DEFAULT_CHAT_FONT_SIZE: ChatFontSize = 16
+
 /** API 接口协议 */
 export type ApiProtocol = 'openai' | 'anthropic'
 
@@ -26,6 +31,7 @@ type Settings = {
   showMigrationPrompt: boolean
   locale: Locale
   themePreference: ThemePreference
+  chatFontSize: ChatFontSize
   location: UserLocation | null
   ttsVoice: TtsVoice
   ttsMuted: boolean
@@ -48,6 +54,7 @@ const KEYS = {
   locale: 'chat-demo:locale',
   location: 'chat-demo:location',
   themePreference: 'chat-demo:theme-preference',
+  chatFontSize: 'chat-demo:chat-font-size',
   ttsVoice: 'chat-demo:tts-voice',
   ttsMuted: 'chat-demo:tts-muted',
   speechEngine: 'chat-demo:speech-engine',
@@ -111,6 +118,14 @@ const initialThemePreference = (): ThemePreference => {
   return saved === 'light' || saved === 'dark' ? saved : 'system'
 }
 
+/** 未保存过时默认 16px */
+const initialChatFontSize = (): ChatFontSize => {
+  const saved = Number(read(KEYS.chatFontSize))
+  return (CHAT_FONT_SIZES as readonly number[]).includes(saved)
+    ? (saved as ChatFontSize)
+    : DEFAULT_CHAT_FONT_SIZE
+}
+
 /** 未保存过时使用服务端默认音色 stella（海星） */
 const initialTtsVoice = (): TtsVoice => (read(KEYS.ttsVoice) === 'tide' ? 'tide' : 'stella')
 
@@ -150,6 +165,7 @@ export const useSettings = create<Settings>(() => ({
   locale: initialLocale(),
   location: initialLocation(),
   themePreference: initialThemePreference(),
+  chatFontSize: initialChatFontSize(),
   ttsVoice: initialTtsVoice(),
   ttsMuted: read(KEYS.ttsMuted) !== 'false',
   speechEngine: initialSpeechEngine(),
@@ -182,6 +198,11 @@ export const setLocation = (value: UserLocation | null) => {
 export const setThemePreference = (themePreference: ThemePreference) => {
   write(KEYS.themePreference, themePreference)
   useSettings.setState({ themePreference })
+}
+
+export const setChatFontSize = (chatFontSize: ChatFontSize) => {
+  write(KEYS.chatFontSize, String(chatFontSize))
+  useSettings.setState({ chatFontSize })
 }
 
 export const setTtsVoice = (ttsVoice: TtsVoice) => {
