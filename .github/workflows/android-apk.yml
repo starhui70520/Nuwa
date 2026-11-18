@@ -110,6 +110,7 @@ jobs:
           files: Nuwa-*.apk
 
       - name: Push APK to Nuwa Portal (MinIO)
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         env:
           NUWA_PORTAL_TOKEN: ${{ secrets.NUWA_PORTAL_TOKEN }}
           NUWA_PORTAL_URL: ${{ vars.NUWA_PORTAL_URL || 'https://dl.rankchord.com' }}
@@ -118,13 +119,28 @@ jobs:
             echo "NUWA_PORTAL_TOKEN not set, skipping upload."
             exit 0
           fi
+          VER="${{ steps.version.outputs.name }}"
+          CHANGELOG=""
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TAG_NAME="${GITHUB_REF#refs/tags/}"
+            TAG_BODY=$(git tag -l --format='%(contents:body)' "${TAG_NAME}" | sed -e 's/[[:space:]]*$//')
+            TAG_SUBJECT=$(git tag -l --format='%(contents:subject)' "${TAG_NAME}" | sed -e 's/[[:space:]]*$//')
+            if [ -n "${TAG_BODY}" ]; then
+              CHANGELOG="${TAG_BODY}"
+            elif [ -n "${TAG_SUBJECT}" ] && [ "${TAG_SUBJECT}" != "${TAG_NAME}" ] && [ "${TAG_SUBJECT}" != "${VER}" ]; then
+              CHANGELOG="${TAG_SUBJECT}"
+            fi
+          fi
+          if [ -z "${CHANGELOG}" ]; then
+            CHANGELOG="Nuwa v${VER} 自动构建发布"
+          fi
           APK_FILE=$(ls Nuwa-*.apk | head -n 1)
           curl -fsSL -X POST "${NUWA_PORTAL_URL}/api/admin/releases" \
             -H "Authorization: Bearer ${NUWA_PORTAL_TOKEN}" \
             -F "platform=android" \
-            -F "version=${{ steps.version.outputs.name }}" \
+            -F "version=${VER}" \
             -F "versionCode=${{ github.run_number }}" \
             -F "isLatest=true" \
             -F "published=true" \
-            -F "changelog=Nuwa v${{ steps.version.outputs.name }} 自动构建发布" \
+            -F "changelog=${CHANGELOG}" \
             -F "file=@${APK_FILE}"

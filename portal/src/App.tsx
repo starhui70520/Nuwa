@@ -90,6 +90,27 @@ export function App() {
     ? decodeURIComponent(pathname.slice('/research/'.length))
     : '';
 
+  useEffect(() => {
+    if (isAdmin) {
+      document.title = '管理后台 | RankChord';
+    } else if (isNuwa) {
+      document.title = 'Nuwa 客户端下载 | RankChord';
+    } else if (isAbout) {
+      document.title = '关于我们 | RankChord';
+    } else if (isResearchDetail) {
+      const matched = articles.find((a) => a.slug === researchSlug);
+      document.title = matched ? `${matched.title} | RankChord` : '研究 | RankChord';
+    } else if (isResearchList) {
+      document.title = '研究 | RankChord';
+    } else {
+      document.title = 'RankChord | 通用人工智能系统';
+    }
+    const iconLink = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+    if (iconLink) {
+      iconLink.href = isNuwa ? '/logo.png' : '/rankchord-symbol.png';
+    }
+  }, [articles, isAbout, isAdmin, isNuwa, isResearchDetail, isResearchList, researchSlug]);
+
   return (
     <div className="min-h-screen flex flex-col bg-white text-[#18181b]">
       {/* Header — 1:1 restored from rankchord.com + Nuwa added under 成果 */}
@@ -487,7 +508,14 @@ export function App() {
             </p>
             <div className="flex flex-wrap gap-[22px]">
               <span>HarmonyOS Sans</span>
-              <span>粤ICP备2026010599号</span>
+              <a
+                href="https://beian.miit.gov.cn/"
+                target="_blank"
+                rel="noreferrer"
+                className="hover:text-[#18181b] transition-colors"
+              >
+                粤ICP备2026010599号
+              </a>
             </div>
           </div>
         </div>
