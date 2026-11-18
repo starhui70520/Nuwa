@@ -57,10 +57,15 @@ export const importHistoryFromBytes = (
   data: Uint8Array | ArrayBuffer,
   name = 'deepseek_data.zip'
 ): Promise<number> => {
-  const bytes = data instanceof Uint8Array ? data : new Uint8Array(data)
-  const copy = new Uint8Array(bytes.byteLength)
-  copy.set(bytes)
-  return importHistory(new File([copy], name, { type: 'application/zip' }))
+  const part: BlobPart =
+    data instanceof Uint8Array
+      ? data.byteOffset === 0 &&
+        data.byteLength === data.buffer.byteLength &&
+        data.buffer instanceof ArrayBuffer
+        ? data.buffer
+        : data.slice()
+      : data
+  return importHistory(new File([part], name, { type: 'application/zip' }))
 }
 
 /** 确认删除后调用：以空历史原子替换全部本地会话与附件，保留 API Key 和其他设置。 */

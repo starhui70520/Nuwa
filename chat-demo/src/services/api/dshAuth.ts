@@ -5,6 +5,7 @@ import {
   isNativeIos,
   type HarmonySpeechBridge,
 } from '../nativeBridge.js'
+import { createId } from '../../utils/id.js'
 import { clearDeepSeekAccountAuth, setDeepSeekAccountAuth, useSettings } from '../settings.js'
 
 const WEB_PKCE_STORAGE_KEY = 'nuwa:dsh-pkce-state'
@@ -30,11 +31,11 @@ const getOrCreateWebDeviceId = (): string => {
     if (existing) {
       return existing
     }
-    const created = crypto.randomUUID()
+    const created = createId()
     localStorage.setItem(WEB_DEVICE_ID_KEY, created)
     return created
   } catch {
-    return crypto.randomUUID()
+    return createId()
   }
 }
 
