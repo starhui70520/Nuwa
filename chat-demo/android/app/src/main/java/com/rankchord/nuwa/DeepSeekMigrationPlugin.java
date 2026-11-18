@@ -86,7 +86,9 @@ public class DeepSeekMigrationPlugin extends Plugin {
     private volatile boolean updateDownloading = false;
     @PluginMethod
     public void openExportBrowser(PluginCall call) {
+        boolean clearSession = Boolean.TRUE.equals(call.getBoolean("clearSession", false));
         Intent intent = new Intent(getContext(), MigrationWebViewActivity.class);
+        intent.putExtra(MigrationWebViewActivity.EXTRA_CLEAR_SESSION, clearSession);
         getActivity().startActivity(intent);
         call.resolve();
     }

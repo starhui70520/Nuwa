@@ -150,14 +150,40 @@ export const bindMigrationBridge = (): (() => void) => {
   }
 }
 
+const ONE_CLICK_MIGRATION_USED_KEY = 'nuwa:one_click_migration_used'
+
+export const hasUsedOneClickMigration = (): boolean => {
+  try {
+    return localStorage.getItem(ONE_CLICK_MIGRATION_USED_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+const markOneClickMigrationUsed = () => {
+  try {
+    localStorage.setItem(ONE_CLICK_MIGRATION_USED_KEY, '1')
+  } catch {
+    // 忽略存储受限
+  }
+}
+
+export type OneClickMigrationOptions = {
+  clearSession?: boolean
+}
+
 /** 安卓原生内嵌浏览器迁移：打开官方页，用户登录并点导出后自动接管并导入 */
-export const launchAndroidMigrationBrowser = async (): Promise<void> => {
-  await DeepSeekMigration.openExportBrowser()
+export const launchAndroidMigrationBrowser = async (
+  options?: OneClickMigrationOptions
+): Promise<void> => {
+  await DeepSeekMigration.openExportBrowser(options)
 }
 
 /** iOS 原生内嵌浏览器迁移：打开官方页自动导出，导出包落盘后直接导入 */
-export const launchIosMigrationBrowser = async (): Promise<void> => {
-  const result = await DeepSeekMigration.openExportBrowser()
+export const launchIosMigrationBrowser = async (
+  options?: OneClickMigrationOptions
+): Promise<void> => {
+  const result = await DeepSeekMigration.openExportBrowser(options)
   if (!result?.filePath) {
     return
   }
@@ -171,13 +197,17 @@ export const launchIosMigrationBrowser = async (): Promise<void> => {
 }
 
 /** 跨端统一一键迁移入口 */
-export const triggerOneClickMigration = async (): Promise<void> => {
+export const triggerOneClickMigration = async (
+  options?: OneClickMigrationOptions
+): Promise<void> => {
   if (isNativeAndroid()) {
-    await launchAndroidMigrationBrowser()
+    markOneClickMigrationUsed()
+    await launchAndroidMigrationBrowser(options)
     return
   }
   if (isNativeIos()) {
-    await launchIosMigrationBrowser()
+    markOneClickMigrationUsed()
+    await launchIosMigrationBrowser(options)
     return
   }
   if (window.__NUWA_HARMONY__?.openExportBrowser) {

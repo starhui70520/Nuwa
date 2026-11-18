@@ -47,8 +47,15 @@ const FILE_RETRY_LIMIT = 2
 /** 退避基数，第 n 次重试等待 2^n 倍；连续失败达到上限就放弃，把原始报错展示出来 */
 const FILE_RETRY_BASE_DELAY = 1000
 
-/** 阅读链接始终开启，智能搜索开关控制是否另行声明搜索工具（含边想边搜）。 */
-const serverTools = (search: boolean): CreateMessageRequest['tools'] => {
+/**
+ * 扩展工具会触发服务端 32K 输入上限；仅在需要时声明：
+ * - 开启智能搜索时声明搜索 + 读链接；
+ * - 未开搜索但未走 1M 降级时，仅在消息或上下文中出现网址（或非文档普通对话）时声明读链接。
+ */
+const serverTools = (search: boolean, allowExtended: boolean): CreateMessageRequest['tools'] => {
+  if (!allowExtended) {
+    return []
+  }
   const tools: CreateMessageRequest['tools'] = [
     { type: 'deepseek_read_url', name: 'deepseek_read_url' },
   ]
@@ -57,6 +64,10 @@ const serverTools = (search: boolean): CreateMessageRequest['tools'] => {
   }
   return tools
 }
+
+const is32kInputLimitError = (error: unknown): boolean =>
+  error instanceof ApiError &&
+  /user input too long.*exceeds max 32768 tokens/i.test(error.message)
 
 /** 允许自动补标题的请求；手动重命名后取消本轮标题写入，包含主动清空标题的情况。 */
 const titleRequests = new Set<AbortController>()
@@ -1023,6 +1034,7 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
   set((state) => ({ streaming: { ...state.streaming, [sessionId]: controller } }))
   let reply = initial
   let frame = 0
+  let dropExtendedFor1M = false
   const flush = () => {
     cancelAnimationFrame(frame)
     frame = 0
@@ -1056,6 +1068,14 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
         const resolvedModel = isUsingDeepSeekAccount()
           ? MODEL
           : configuredModel || initial.model || MODEL
+        // 服务端只要收到 tools 或 title.enabled 就会把用户输入上限降到 32,768 tokens；
+        // 有文档附件且未开搜索、未带网址时直接走 1M 通道，其他场景命中 32K 上限则自动降级重试。
+        const omitExtended =
+          dropExtendedFor1M ||
+          (!initial.search &&
+            prepared.question.files.some((file) => !file.isImage) &&
+            !/https?:\/\//i.test(prepared.question.content))
+        const tools = serverTools(initial.search ?? false, !omitExtended) ?? []
         const events = streamMessage(
           getActiveSecret(),
           {
@@ -1064,8 +1084,8 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
             messages,
             thinking: { type: initial.thinking ? 'enabled' : 'disabled' },
             safety_check: SAFETY_CHECK,
-            tools: serverTools(initial.search ?? false),
-            ...(titleRequests.has(controller) ? { title: { enabled: true } } : {}),
+            ...(tools.length > 0 ? { tools } : {}),
+            ...(!omitExtended && titleRequests.has(controller) ? { title: { enabled: true } } : {}),
           },
           controller.signal
         )
@@ -1106,6 +1126,11 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
             retryable: isRetryableApiError(error),
           })
           break
+        }
+        // 扩展参数（tools / title）触发服务端 32K 限流时，自动剥离并重试一次以使用 1M 上下文。
+        if (!receivedContent && !dropExtendedFor1M && is32kInputLimitError(error)) {
+          dropExtendedFor1M = true
+          continue
         }
         // 附件失效：重新补传后重发。收到过内容块（含丢弃的客户端工具）后不自动重发。
         if (

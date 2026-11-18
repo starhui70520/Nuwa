@@ -21,7 +21,10 @@ import {
   importHistory,
   maybeAutoBackupToIcloud,
 } from '../../services/chat/backup.js'
-import { triggerOneClickMigration } from '../../services/chat/migrationBridge.js'
+import {
+  hasUsedOneClickMigration,
+  triggerOneClickMigration,
+} from '../../services/chat/migrationBridge.js'
 import { useChatStore } from '../../services/chat/store.js'
 import { getRegionName, provinces, regionCodes } from '../../services/location.js'
 import {
@@ -629,26 +632,57 @@ const DeepSeekAccountSetting = () => {
 
 const OneClickMigrateSetting = ({ disabled }: { disabled: boolean }) => {
   const t = useTranslate()
+  const [choosingAccount, setChoosingAccount] = useState(false)
+
+  const launch = (clearSession: boolean) => {
+    setChoosingAccount(false)
+    closeSettings()
+    void triggerOneClickMigration({ clearSession }).catch(() => {})
+  }
+
   return (
-    <SettingCell
-      label={t('historyOneClickImportLabel')}
-      description={t('historyOneClickImportDesc')}
-      status={null}
-      action={
-        <Button
-          variant="primary"
-          size="m"
-          className={styles.cellButton}
-          disabled={disabled}
-          onClick={() => {
-            closeSettings()
-            void triggerOneClickMigration().catch(() => {})
-          }}
+    <>
+      <SettingCell
+        label={t('historyOneClickImportLabel')}
+        description={t('historyOneClickImportDesc')}
+        status={null}
+        action={
+          <Button
+            variant="primary"
+            size="m"
+            className={styles.cellButton}
+            disabled={disabled}
+            onClick={() => {
+              if (isNativeAndroid() && hasUsedOneClickMigration()) {
+                setChoosingAccount(true)
+                return
+              }
+              launch(false)
+            }}
+          >
+            {t('historyOneClickImportBtn')}
+          </Button>
+        }
+      />
+      {choosingAccount ? (
+        <Modal
+          title={t('historyMigrationAccountTitle')}
+          onClose={() => setChoosingAccount(false)}
+          footer={
+            <>
+              <Button variant="outlined" onClick={() => launch(true)}>
+                {t('historyMigrationSwitchAccount')}
+              </Button>
+              <Button variant="primary" onClick={() => launch(false)}>
+                {t('historyMigrationContinueAccount')}
+              </Button>
+            </>
+          }
         >
-          {t('historyOneClickImportBtn')}
-        </Button>
-      }
-    />
+          <p className={styles.modalText}>{t('historyMigrationAccountDesc')}</p>
+        </Modal>
+      ) : null}
+    </>
   )
 }
 

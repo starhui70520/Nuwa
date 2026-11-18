@@ -1,7 +1,9 @@
 import { Capacitor, registerPlugin } from '@capacitor/core'
 
 export type DeepSeekMigrationPlugin = {
-  openExportBrowser: () => Promise<{ filePath?: string; fileName?: string } | undefined>
+  openExportBrowser: (options?: {
+    clearSession?: boolean
+  }) => Promise<{ filePath?: string; fileName?: string } | undefined>
   consumePendingExport: () => Promise<{
     hasPending: boolean
     filePath?: string

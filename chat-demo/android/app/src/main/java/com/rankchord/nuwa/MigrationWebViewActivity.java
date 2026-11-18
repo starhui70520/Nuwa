@@ -19,6 +19,7 @@ import android.webkit.JavascriptInterface;
 import android.webkit.URLUtil;
 import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
+import android.webkit.WebStorage;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Button;
@@ -41,6 +42,7 @@ public class MigrationWebViewActivity extends Activity {
     public static final String KEY_PENDING_NAME = "pending_name";
     public static final String EXTRA_FILE_PATH = "filePath";
     public static final String EXTRA_FILE_NAME = "fileName";
+    public static final String EXTRA_CLEAR_SESSION = "clear_session";
     private static final String TARGET_URL = "https://chat.deepseek.com/";
 
     private WebView webView;
@@ -91,6 +93,14 @@ public class MigrationWebViewActivity extends Activity {
             1f
         );
         banner.addView(guideView, guideParams);
+
+        Button switchBtn = new Button(this);
+        switchBtn.setText("换号");
+        switchBtn.setTextColor(Color.WHITE);
+        switchBtn.setTextSize(12.5f);
+        switchBtn.setBackgroundColor(Color.TRANSPARENT);
+        switchBtn.setOnClickListener(v -> switchAccount());
+        banner.addView(switchBtn);
 
         Button autoBtn = new Button(this);
         autoBtn.setText("自动导出");
@@ -157,8 +167,64 @@ public class MigrationWebViewActivity extends Activity {
         ));
 
         setContentView(root);
-        webView.loadUrl(TARGET_URL);
-        mainHandler.postDelayed(loginPollTask, 1500);
+        boolean clearSession = getIntent().getBooleanExtra(EXTRA_CLEAR_SESSION, false);
+        if (clearSession) {
+            guideView.setText("已清除上次登录状态，请登录要导入的 DeepSeek 账号");
+            clearDeepSeekSession(() -> {
+                if (webView != null && !completed) {
+                    webView.loadUrl(TARGET_URL);
+                    mainHandler.postDelayed(loginPollTask, 1500);
+                }
+            });
+        } else {
+            webView.loadUrl(TARGET_URL);
+            mainHandler.postDelayed(loginPollTask, 1500);
+        }
+    }
+
+    private void switchAccount() {
+        if (webView == null || completed) {
+            return;
+        }
+        autoExportTriggered = false;
+        mainHandler.removeCallbacks(loginPollTask);
+        guideView.setText("正在切换账号，请登录新的 DeepSeek 账号");
+        webView.evaluateJavascript(
+            "try{localStorage.clear();sessionStorage.clear();}catch(e){}",
+            value -> clearDeepSeekSession(() -> {
+                if (webView != null && !completed) {
+                    webView.loadUrl(TARGET_URL);
+                    mainHandler.postDelayed(loginPollTask, 1500);
+                }
+            })
+        );
+    }
+
+    private void clearDeepSeekSession(Runnable afterClear) {
+        CookieManager cookieManager = CookieManager.getInstance();
+        String[] urls = new String[] {
+            "https://chat.deepseek.com",
+            "https://deepseek.com",
+            "https://www.deepseek.com"
+        };
+        for (String url : urls) {
+            String cookies = cookieManager.getCookie(url);
+            if (cookies == null || cookies.isEmpty()) {
+                continue;
+            }
+            for (String pair : cookies.split(";")) {
+                int eq = pair.indexOf('=');
+                String name = (eq > 0 ? pair.substring(0, eq) : pair).trim();
+                if (name.isEmpty()) {
+                    continue;
+                }
+                cookieManager.setCookie(url, name + "=; Max-Age=0; Path=/");
+                cookieManager.setCookie(url, name + "=; Max-Age=0; Path=/; Domain=.deepseek.com");
+            }
+        }
+        cookieManager.flush();
+        WebStorage.getInstance().deleteOrigin(TARGET_URL);
+        mainHandler.post(afterClear);
     }
 
     private void checkLoginState() {
