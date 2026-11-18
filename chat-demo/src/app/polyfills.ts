@@ -25,6 +25,109 @@ if (typeof Array.prototype.at !== 'function') {
   })
 }
 
+if (typeof Array.prototype.toSorted !== 'function') {
+  Object.defineProperty(Array.prototype, 'toSorted', {
+    value: function toSorted<T>(this: T[], compareFn?: (a: T, b: T) => number): T[] {
+      return [...this].sort(compareFn)
+    },
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  })
+}
+
+if (typeof Array.prototype.toReversed !== 'function') {
+  Object.defineProperty(Array.prototype, 'toReversed', {
+    value: function toReversed<T>(this: T[]): T[] {
+      return [...this].reverse()
+    },
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  })
+}
+
+if (typeof Array.prototype.toSpliced !== 'function') {
+  Object.defineProperty(Array.prototype, 'toSpliced', {
+    value: function toSpliced<T>(
+      this: T[],
+      start: number,
+      deleteCount?: number,
+      ...items: T[]
+    ): T[] {
+      const copy = [...this]
+      if (deleteCount === undefined) {
+        copy.splice(start)
+      } else {
+        copy.splice(start, deleteCount, ...items)
+      }
+      return copy
+    },
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  })
+}
+
+if (typeof Array.prototype.with !== 'function') {
+  Object.defineProperty(Array.prototype, 'with', {
+    value: function withAt<T>(this: T[], index: number, value: T): T[] {
+      const copy = [...this]
+      const len = copy.length
+      const rel = Math.trunc(Number(index) || 0)
+      const actual = rel < 0 ? len + rel : rel
+      if (actual < 0 || actual >= len) {
+        throw new RangeError('Invalid index')
+      }
+      copy[actual] = value
+      return copy
+    },
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  })
+}
+
+if (typeof Array.prototype.findLast !== 'function') {
+  Object.defineProperty(Array.prototype, 'findLast', {
+    value: function findLast<T>(
+      this: T[],
+      predicate: (value: T, index: number, obj: T[]) => boolean,
+      thisArg?: unknown
+    ): T | undefined {
+      for (let i = this.length - 1; i >= 0; i--) {
+        if (predicate.call(thisArg, this[i], i, this)) {
+          return this[i]
+        }
+      }
+      return undefined
+    },
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  })
+}
+
+if (typeof Array.prototype.findLastIndex !== 'function') {
+  Object.defineProperty(Array.prototype, 'findLastIndex', {
+    value: function findLastIndex<T>(
+      this: T[],
+      predicate: (value: T, index: number, obj: T[]) => boolean,
+      thisArg?: unknown
+    ): number {
+      for (let i = this.length - 1; i >= 0; i--) {
+        if (predicate.call(thisArg, this[i], i, this)) {
+          return i
+        }
+      }
+      return -1
+    },
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  })
+}
+
 if (typeof String.prototype.at !== 'function') {
   Object.defineProperty(String.prototype, 'at', {
     value: function at(this: string, index: number): string | undefined {
