@@ -26,6 +26,16 @@ export const runZipImport = async (
     )
     return count
   } catch (error) {
+    ;(
+      window as Window & {
+        __NUWA_LAST_IMPORT_ERR__?: string
+      }
+    ).__NUWA_LAST_IMPORT_ERR__ =
+      error instanceof BackupError
+        ? `BackupError:${error.key}`
+        : error instanceof Error
+          ? `${error.name}:${error.message}`
+          : String(error)
     showToast({
       key: error instanceof BackupError ? error.key : 'historyImportFailed',
       type: 'error',

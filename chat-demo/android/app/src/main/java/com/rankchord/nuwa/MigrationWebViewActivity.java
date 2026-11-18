@@ -445,6 +445,7 @@ public class MigrationWebViewActivity extends Activity {
                 );
                 return;
             }
+            logZipSummary(outFile);
             finishWithFile(outFile, fileName);
         } catch (Exception e) {
             Log.e(TAG, "downloadHttpFile failed: " + e.getMessage(), e);
@@ -455,6 +456,27 @@ public class MigrationWebViewActivity extends Activity {
             if (conn != null) {
                 conn.disconnect();
             }
+        }
+    }
+
+    private static void logZipSummary(File file) {
+        try (java.util.zip.ZipFile zf = new java.util.zip.ZipFile(file)) {
+            java.util.Enumeration<? extends java.util.zip.ZipEntry> entries = zf.entries();
+            StringBuilder sb = new StringBuilder();
+            int total = 0;
+            while (entries.hasMoreElements()) {
+                java.util.zip.ZipEntry e = entries.nextElement();
+                if (total < 6) {
+                    if (total > 0) {
+                        sb.append(", ");
+                    }
+                    sb.append(e.getName()).append("(").append(e.getSize()).append(")");
+                }
+                total++;
+            }
+            Log.d(TAG, "ZIP summary: total=" + total + " first=[" + sb + "]");
+        } catch (Exception e) {
+            Log.e(TAG, "logZipSummary failed: " + e.getMessage());
         }
     }
 
