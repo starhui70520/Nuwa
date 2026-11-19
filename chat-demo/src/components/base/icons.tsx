@@ -801,3 +801,16 @@ export const IconWalletOutline18 = () => (
     <circle cx="12.5" cy="9" r="0.85" fill="currentColor" />
   </svg>
 )
+
+/** 会话置顶图标 */
+export const IconPinOutline16 = () => (
+  <svg width={16} height={16} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path
+      d="M9.75 2.5L13.5 6.25L12.1 7.65L10.95 7.25L8.2 10L8.55 11.45L7.35 12.65L5.1 10.4L2.5 13.5L5.6 10.9L3.35 8.65L4.55 7.45L6 7.8L8.75 5.05L8.35 3.9L9.75 2.5Z"
+      stroke="currentColor"
+      strokeWidth={1.35}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+)

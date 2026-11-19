@@ -148,7 +148,14 @@ export const useChatStore = create<ChatState>(() => ({
 const { getState: get, setState: set } = useChatStore
 
 const sortSessions = (sessions: SessionSummary[]) =>
-  [...sessions].sort((a, b) => b.updatedAt - a.updatedAt)
+  [...sessions].sort((a, b) => {
+    const pinA = a.pinnedAt ?? 0
+    const pinB = b.pinnedAt ?? 0
+    if (pinA !== pinB) {
+      return pinB - pinA
+    }
+    return b.updatedAt - a.updatedAt
+  })
 
 const getSession = (id: string) => {
   const cache = get().sessionCache
@@ -161,7 +168,10 @@ const getStreamController = (id: string) => {
 }
 
 const sameSummary = (a: SessionSummary, b: SessionSummary) =>
-  a.title === b.title && a.createdAt === b.createdAt && a.updatedAt === b.updatedAt
+  a.title === b.title &&
+  a.createdAt === b.createdAt &&
+  a.updatedAt === b.updatedAt &&
+  a.pinnedAt === b.pinnedAt
 
 const sessionAccess = new Map<string, number>()
 const unsavedSessions = new Set<string>()
@@ -589,6 +599,47 @@ export const renameSession = (id: string, title: string) => {
   }
 }
 
+export const togglePinSession = (id: string) => {
+  if (get().importingHistory || deletingSessions.has(id)) {
+    return
+  }
+  const summary = get().sessions.find((session) => session.id === id)
+  if (!summary) {
+    return
+  }
+  const nextPinnedAt = summary.pinnedAt ? undefined : Date.now()
+  if (getSession(id)) {
+    updateSession(id, (session) => {
+      const next: Session = { ...session }
+      if (nextPinnedAt) {
+        next.pinnedAt = nextPinnedAt
+      } else {
+        delete next.pinnedAt
+      }
+      return next
+    })
+    persist(id)
+  } else {
+    set((state) => ({
+      sessions: sortSessions(
+        state.sessions.map((session) => {
+          if (session.id !== id) {
+            return session
+          }
+          const next: SessionSummary = { ...session }
+          if (nextPinnedAt) {
+            next.pinnedAt = nextPinnedAt
+          } else {
+            delete next.pinnedAt
+          }
+          return next
+        })
+      ),
+    }))
+    void db.setSessionPinned(id, nextPinnedAt).catch(db.reportStorageError('pin session'))
+  }
+}
+
 /**
  * 删除会话；本地原件仅在没有其他会话引用时清理。远端文件不删：导入、编辑、重新生成都会复用同一个附件，
  * 同一服务端文件可能被多个会话引用，不维护引用计数。
@@ -686,7 +737,7 @@ export const sendMessage = (targetSessionId: string | null) => {
     sessionId = session.id
     touchSession(session.id)
     set((state) => ({
-      sessions: [toSessionSummary(session), ...state.sessions],
+      sessions: sortSessions([toSessionSummary(session), ...state.sessions]),
       sessionCache: { ...state.sessionCache, [session.id]: session },
       activeId: session.id,
     }))
