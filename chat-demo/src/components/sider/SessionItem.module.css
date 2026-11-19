@@ -33,6 +33,38 @@
   }
 }
 
+.checkbox {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  box-sizing: border-box;
+  width: 20px;
+  height: 20px;
+  margin-right: 10px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(0, 0, 0, 0.2);
+  background-color: transparent;
+  color: #ffffff;
+  transition:
+    background-color var(--ds-transition-duration) var(--ds-ease-in-out),
+    border-color var(--ds-transition-duration) var(--ds-ease-in-out);
+
+  [data-ds-dark-theme] & {
+    border-color: rgba(255, 255, 255, 0.28);
+  }
+}
+
+.checkboxChecked {
+  border-color: #4d6bfe;
+  background-color: #4d6bfe;
+
+  [data-ds-dark-theme] & {
+    border-color: #4d6bfe;
+    background-color: #4d6bfe;
+  }
+}
+
 .pinBadge {
   display: inline-flex;
   align-items: center;

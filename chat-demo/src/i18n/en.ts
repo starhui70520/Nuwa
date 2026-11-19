@@ -19,11 +19,16 @@ export const en = {
   deleteSessionModalContentTitle: 'Delete chat?',
   deleteSessionWithFilesDescription:
     'This chat and its uploaded files will be permanently deleted and cannot be recovered. Delete this chat?',
+  deleteBatchSessionsTitle: 'Delete {count} selected chats?',
+  deleteBatchSessionsDescription:
+    'Selected chats and their uploaded files will be permanently deleted and cannot be recovered. Continue?',
   cancel: 'Cancel',
   delete: 'Delete',
   sessionItemMenuRenameOption: 'Rename',
   sessionItemMenuPinOption: 'Pin',
   sessionItemMenuUnpinOption: 'Unpin',
+  sessionItemMenuSelectOption: 'Select',
+  siderSelectedCount: '{count} selected',
   more: 'More',
   close: 'Close',
   sessionHistoryTimelineLabelPinned: 'Pinned',

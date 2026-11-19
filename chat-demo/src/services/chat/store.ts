@@ -640,6 +640,49 @@ export const togglePinSession = (id: string) => {
   }
 }
 
+export const setSessionsPinned = (ids: string[], pinned: boolean) => {
+  if (get().importingHistory || ids.length === 0) {
+    return
+  }
+  const baseTime = Date.now()
+  ids.forEach((id, index) => {
+    if (deletingSessions.has(id)) {
+      return
+    }
+    const nextPinnedAt = pinned ? baseTime + (ids.length - index) : undefined
+    if (getSession(id)) {
+      updateSession(id, (session) => {
+        const next: Session = { ...session }
+        if (nextPinnedAt) {
+          next.pinnedAt = nextPinnedAt
+        } else {
+          delete next.pinnedAt
+        }
+        return next
+      })
+      persist(id)
+    } else {
+      set((state) => ({
+        sessions: sortSessions(
+          state.sessions.map((session) => {
+            if (session.id !== id) {
+              return session
+            }
+            const next: SessionSummary = { ...session }
+            if (nextPinnedAt) {
+              next.pinnedAt = nextPinnedAt
+            } else {
+              delete next.pinnedAt
+            }
+            return next
+          })
+        ),
+      }))
+      void db.setSessionPinned(id, nextPinnedAt).catch(db.reportStorageError('pin session'))
+    }
+  })
+}
+
 /**
  * 删除会话；本地原件仅在没有其他会话引用时清理。远端文件不删：导入、编辑、重新生成都会复用同一个附件，
  * 同一服务端文件可能被多个会话引用，不维护引用计数。

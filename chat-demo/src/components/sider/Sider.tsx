@@ -6,16 +6,19 @@ import { refreshBalance, useBalance } from '../../services/api/balance.js'
 import { openExternalUrl } from '../../services/externalLink.js'
 import { searchSessionIdsByContent } from '../../services/chat/db.js'
 import { groupSessions } from '../../services/chat/sessionGroups.js'
-import { newChat, removeSession, useChatStore } from '../../services/chat/store.js'
+import { newChat, removeSession, setSessionsPinned, useChatStore } from '../../services/chat/store.js'
 import type { SessionSummary } from '../../services/chat/types.js'
 import { isUsingDeepSeekAccount, setSiderCollapsed, useSettings } from '../../services/settings.js'
 import { Button } from '../base/Button.js'
 import { IconButton } from '../base/IconButton.js'
 import {
   IconCloseFill14,
+  IconCloseOutline16,
   IconEllipsisOutline16,
   IconPanelLeftOutline16,
+  IconPinOutline16,
   IconSearchOutline16,
+  IconTrashOutline16,
   NewChatIcon,
 } from '../base/icons.js'
 import { Modal } from '../base/Modal.js'
@@ -43,6 +46,9 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
   } | null>(null)
   const [deleting, setDeleting] = useState<SessionSummary | null>(null)
   const [deletePending, setDeletePending] = useState(false)
+  const [selectMode, setSelectMode] = useState(false)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
+  const [batchDeleting, setBatchDeleting] = useState(false)
 
   const normalizedQuery = query.trim().toLowerCase()
 
@@ -116,7 +122,57 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
     if (!mobile || mobileOpen) {
       void refreshBalance()
     }
+    if (mobile && !mobileOpen) {
+      setSelectMode(false)
+      setSelectedIds(new Set())
+    }
   }, [mobile, mobileOpen])
+
+  const validSelectedIds = useMemo(() => {
+    if (!selectMode || selectedIds.size === 0) {
+      return []
+    }
+    const existing = new Set(sessions.map((session) => session.id))
+    return Array.from(selectedIds).filter((id) => existing.has(id))
+  }, [selectMode, selectedIds, sessions])
+
+  const allSelectedPinned = useMemo(() => {
+    if (validSelectedIds.length === 0) {
+      return false
+    }
+    const byId = new Map(sessions.map((session) => [session.id, session]))
+    return validSelectedIds.every((id) => Boolean(byId.get(id)?.pinnedAt))
+  }, [validSelectedIds, sessions])
+
+  const enterSelectMode = (initialId: string) => {
+    setSelectMode(true)
+    setSelectedIds(new Set([initialId]))
+  }
+
+  const exitSelectMode = () => {
+    setSelectMode(false)
+    setSelectedIds(new Set())
+  }
+
+  const toggleSelectedId = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) {
+        next.delete(id)
+      } else {
+        next.add(id)
+      }
+      return next
+    })
+  }
+
+  const onBatchPin = () => {
+    if (validSelectedIds.length === 0) {
+      return
+    }
+    setSessionsPinned(validSelectedIds, !allSelectedPinned)
+    exitSelectMode()
+  }
 
   const profileName = isAccount
     ? dshAccountLabel || t('dshAccountLabel')
@@ -124,59 +180,77 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
 
   return (
     <div className={clsx(styles.sider, mobile && styles.mobile)}>
-      {!mobile ? (
-        <>
-          <div className={styles.top}>
-            <div className={styles.brand}>
-              <img src={logoUrl} alt="" className={styles.brandLogo} />
-              <div className={styles.appName}>{t('appName')}</div>
-            </div>
-            <IconButton
-              size="m"
-              icon={<IconPanelLeftOutline16 />}
-              tooltip={t('collapseSiderbarButton')}
-              tooltipPlacement="bottom"
-              onClick={() => setSiderCollapsed(true)}
-            />
+      {selectMode ? (
+        <div className={styles.selectHeader}>
+          <div className={styles.selectTitle}>
+            {t('siderSelectedCount', { count: validSelectedIds.length })}
           </div>
           <button
             type="button"
-            className={styles.newChat}
-            onClick={() => {
-              newChat()
-              closeMobileSider()
-            }}
-          >
-            <span className={styles.newChatIcon}>
-              <NewChatIcon />
-            </span>
-            {t('newChat')}
-          </button>
-        </>
-      ) : null}
-
-      <div className={styles.searchWrap}>
-        <span className={styles.searchIcon}>
-          <IconSearchOutline16 />
-        </span>
-        <input
-          type="search"
-          className={styles.searchInput}
-          placeholder={t('siderSearchPlaceholder')}
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-        />
-        {query ? (
-          <button
-            type="button"
-            className={styles.searchClear}
+            className={styles.selectClose}
             aria-label={t('close')}
-            onClick={() => setQuery('')}
+            onClick={exitSelectMode}
           >
-            <IconCloseFill14 />
+            <IconCloseOutline16 />
           </button>
-        ) : null}
-      </div>
+        </div>
+      ) : (
+        <>
+          {!mobile ? (
+            <>
+              <div className={styles.top}>
+                <div className={styles.brand}>
+                  <img src={logoUrl} alt="" className={styles.brandLogo} />
+                  <div className={styles.appName}>{t('appName')}</div>
+                </div>
+                <IconButton
+                  size="m"
+                  icon={<IconPanelLeftOutline16 />}
+                  tooltip={t('collapseSiderbarButton')}
+                  tooltipPlacement="bottom"
+                  onClick={() => setSiderCollapsed(true)}
+                />
+              </div>
+              <button
+                type="button"
+                className={styles.newChat}
+                onClick={() => {
+                  newChat()
+                  closeMobileSider()
+                }}
+              >
+                <span className={styles.newChatIcon}>
+                  <NewChatIcon />
+                </span>
+                {t('newChat')}
+              </button>
+            </>
+          ) : null}
+
+          <div className={styles.searchWrap}>
+            <span className={styles.searchIcon}>
+              <IconSearchOutline16 />
+            </span>
+            <input
+              type="search"
+              className={styles.searchInput}
+              placeholder={t('siderSearchPlaceholder')}
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+            {query ? (
+              <button
+                type="button"
+                className={styles.searchClear}
+                aria-label={t('close')}
+                onClick={() => setQuery('')}
+              >
+                <IconCloseFill14 />
+              </button>
+            ) : null}
+          </div>
+        </>
+      )}
 
       <div className={styles.listWrap}>
         {sessions.length === 0 ? (
@@ -206,6 +280,10 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
                     key={session.id}
                     session={session}
                     active={session.id === activeId}
+                    selectMode={selectMode}
+                    selected={selectedIds.has(session.id)}
+                    onToggleSelect={() => toggleSelectedId(session.id)}
+                    onEnterSelect={() => enterSelectMode(session.id)}
                     onDelete={() => setDeleting(session)}
                   />
                 ))}
@@ -216,41 +294,118 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
       </div>
 
       <div className={styles.bottom}>
-        <button type="button" className={styles.settings} onClick={() => openSettings('general')}>
-          <img src={logoUrl} alt="" className={styles.profileAvatar} />
-          <span className={styles.profileMain}>
-            <span className={styles.settingsLabel}>{profileName}</span>
-            {balance ? (
-              <span
-                role="button"
-                tabIndex={0}
-                className={clsx(
-                  styles.profileBalance,
-                  (!balance.isAvailable || Number(balance.totalBalance) <= 0) &&
-                    styles.profileBalanceLow
-                )}
-                title={t('accountBalanceTooltip', { amount: balance.formatted })}
-                onClick={(event) => {
-                  event.stopPropagation()
-                  openExternalUrl('https://platform.deepseek.com/top_up')
-                }}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault()
+        {selectMode ? (
+          <div className={styles.selectBar}>
+            <button
+              type="button"
+              className={styles.selectAction}
+              disabled={validSelectedIds.length === 0}
+              onClick={onBatchPin}
+            >
+              <IconPinOutline16 />
+              <span>
+                {allSelectedPinned
+                  ? t('sessionItemMenuUnpinOption')
+                  : t('sessionItemMenuPinOption')}
+              </span>
+            </button>
+            <span className={styles.selectDivider} aria-hidden="true" />
+            <button
+              type="button"
+              className={clsx(styles.selectAction, styles.selectActionDanger)}
+              disabled={validSelectedIds.length === 0}
+              onClick={() => setBatchDeleting(true)}
+            >
+              <IconTrashOutline16 />
+              <span>{t('delete')}</span>
+            </button>
+          </div>
+        ) : (
+          <button type="button" className={styles.settings} onClick={() => openSettings('general')}>
+            <img src={logoUrl} alt="" className={styles.profileAvatar} />
+            <span className={styles.profileMain}>
+              <span className={styles.settingsLabel}>{profileName}</span>
+              {balance ? (
+                <span
+                  role="button"
+                  tabIndex={0}
+                  className={clsx(
+                    styles.profileBalance,
+                    (!balance.isAvailable || Number(balance.totalBalance) <= 0) &&
+                      styles.profileBalanceLow
+                  )}
+                  title={t('accountBalanceTooltip', { amount: balance.formatted })}
+                  onClick={(event) => {
                     event.stopPropagation()
                     openExternalUrl('https://platform.deepseek.com/top_up')
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault()
+                      event.stopPropagation()
+                      openExternalUrl('https://platform.deepseek.com/top_up')
+                    }
+                  }}
+                >
+                  {balance.formatted}
+                </span>
+              ) : null}
+            </span>
+            <span className={styles.profileMore}>
+              <IconEllipsisOutline16 />
+            </span>
+          </button>
+        )}
+      </div>
+
+      {batchDeleting ? (
+        <Modal
+          title={t('deleteBatchSessionsTitle', { count: validSelectedIds.length })}
+          onClose={() => {
+            if (!deletePending) {
+              setBatchDeleting(false)
+            }
+          }}
+          footer={
+            <>
+              <Button
+                variant="outlined"
+                disabled={deletePending}
+                onClick={() => setBatchDeleting(false)}
+              >
+                {t('cancel')}
+              </Button>
+              <Button
+                variant="danger"
+                disabled={deletePending}
+                onClick={async () => {
+                  setDeletePending(true)
+                  try {
+                    let anyFailed = false
+                    for (const id of validSelectedIds) {
+                      const ok = await removeSession(id)
+                      if (!ok) {
+                        anyFailed = true
+                      }
+                    }
+                    setBatchDeleting(false)
+                    exitSelectMode()
+                    if (anyFailed) {
+                      showToast({ key: 'sessionDeleteFailed', type: 'error' })
+                    }
+                  } finally {
+                    setDeletePending(false)
                   }
                 }}
               >
-                {balance.formatted}
-              </span>
-            ) : null}
-          </span>
-          <span className={styles.profileMore}>
-            <IconEllipsisOutline16 />
-          </span>
-        </button>
-      </div>
+                {t('delete')}
+              </Button>
+            </>
+          }
+        >
+          {t('deleteBatchSessionsDescription')}
+        </Modal>
+      ) : null}
 
       {deleting ? (
         <Modal

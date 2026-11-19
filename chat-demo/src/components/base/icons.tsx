@@ -814,3 +814,30 @@ export const IconPinOutline16 = () => (
     />
   </svg>
 )
+
+/** 会话多选图标 */
+export const IconMultiSelectOutline16 = () => (
+  <svg width={16} height={16} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth={1.35} />
+    <path
+      d="M5.4 8.1L7.15 9.85L10.75 6.25"
+      stroke="currentColor"
+      strokeWidth={1.35}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+)
+
+/** 多选勾选对号图标 */
+export const IconCheckMark12 = () => (
+  <svg width={12} height={12} viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path
+      d="M2.5 6.1L4.9 8.5L9.5 3.7"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+)
