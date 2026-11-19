@@ -20,6 +20,8 @@ certs/
 *.mobileprovision
 *.certSigningRequest
 *.ipa
+ios/Nuwa.xcodeproj/
+ios/build/
 
 # Android & IDE artifacts
 .gradle/

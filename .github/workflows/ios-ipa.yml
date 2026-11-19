@@ -1,10 +1,10 @@
-name: Build iOS IPA & TestFlight
+name: Build Native iOS IPA & TestFlight
 
 on:
   push:
     branches: [main]
     paths:
-      - 'chat-demo/**'
+      - 'ios/**'
       - '.github/workflows/ios-ipa.yml'
     tags:
       - 'v*'
@@ -32,30 +32,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 12.6.0
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: pnpm
-          cache-dependency-path: chat-demo/pnpm-lock.yaml
-
-      - name: Install web dependencies
-        working-directory: chat-demo
-        run: pnpm install --frozen-lockfile
-
-      - name: Build web assets & prepare Capacitor iOS
-        working-directory: chat-demo
+      - name: Install XcodeGen & generate Nuwa.xcodeproj
+        working-directory: ios
         run: |
-          pnpm build
-          if [ ! -d "ios" ]; then
-            npx cap add ios
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
           fi
-          npx cap sync ios
+          xcodegen generate
 
       - name: Resolve app version
         id: version
@@ -91,18 +74,12 @@ jobs:
             echo "can_upload=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build unsigned iOS app
-        working-directory: chat-demo
+      - name: Build unsigned native iOS app
+        working-directory: ios
         run: |
-          if [ -d "ios/App/App.xcworkspace" ]; then
-            TARGET_ARGS="-workspace ios/App/App.xcworkspace"
-          else
-            TARGET_ARGS="-project ios/App/App.xcodeproj"
-          fi
-
           xcodebuild \
-            ${TARGET_ARGS} \
-            -scheme App \
+            -project Nuwa.xcodeproj \
+            -scheme Nuwa \
             -configuration Release \
             -sdk iphoneos \
             -derivedDataPath build/ios \
@@ -114,16 +91,16 @@ jobs:
             build
 
       - name: Package unsigned IPA
-        working-directory: chat-demo
+        working-directory: ios
         run: |
-          APP_PATH="build/ios/Build/Products/Release-iphoneos/App.app"
+          APP_PATH="build/ios/Build/Products/Release-iphoneos/Nuwa.app"
           if [ ! -d "${APP_PATH}" ]; then
-            echo "App.app not found at ${APP_PATH}"
+            echo "Nuwa.app not found at ${APP_PATH}"
             exit 1
           fi
           rm -rf build/Payload
           mkdir -p build/Payload
-          cp -R "${APP_PATH}" build/Payload/App.app
+          cp -R "${APP_PATH}" build/Payload/Nuwa.app
           cd build
           zip -qry "${GITHUB_WORKSPACE}/Nuwa-v${{ steps.version.outputs.name }}-unsigned.ipa" Payload
 
@@ -183,50 +160,26 @@ jobs:
 
       - name: Archive & export signed App Store IPA
         if: steps.signing.outputs.can_sign == 'true'
-        working-directory: chat-demo
+        working-directory: ios
         shell: bash
         env:
           TEAM_ID: ${{ steps.apple_cert.outputs.team_id }}
           PROFILE_NAME: ${{ steps.apple_cert.outputs.profile_name }}
           BUNDLE_ID: ${{ steps.apple_cert.outputs.bundle_id }}
         run: |
-          # Patch only the App target's Release configuration for manual distribution signing
-          # so SPM targets (CapApp-SPM) are not forced to use a provisioning profile.
-          python3 - <<'PYEOF'
-          import os
-          import re
-          from pathlib import Path
-          team_id = os.environ["TEAM_ID"]
-          profile_name = os.environ["PROFILE_NAME"]
-          p = Path("ios/App/App.xcodeproj/project.pbxproj")
-          text = p.read_text(encoding="utf-8")
-          pattern = r'(504EC3181FED79650016851F /\* Release \*/ = \{[\s\S]*?buildSettings = \{[\s\S]*?)CODE_SIGN_STYLE = Automatic;'
-          replacement = (
-              r'\1CODE_SIGN_STYLE = Manual;\n'
-              f'\t\t\t\tCODE_SIGN_IDENTITY = "Apple Distribution";\n'
-              f'\t\t\t\tDEVELOPMENT_TEAM = {team_id};\n'
-              f'\t\t\t\tPROVISIONING_PROFILE_SPECIFIER = "{profile_name}";'
-          )
-          new_text, count = re.subn(pattern, replacement, text, count=1)
-          if count != 1:
-              raise RuntimeError(f"Expected to patch 1 Release block, patched {count}")
-          p.write_text(new_text, encoding="utf-8")
-          PYEOF
-
-          if [ -d "ios/App/App.xcworkspace" ]; then
-            TARGET_ARGS="-workspace ios/App/App.xcworkspace"
-          else
-            TARGET_ARGS="-project ios/App/App.xcodeproj"
-          fi
-
           xcodebuild \
-            ${TARGET_ARGS} \
-            -scheme App \
+            -project Nuwa.xcodeproj \
+            -scheme Nuwa \
             -configuration Release \
             -sdk iphoneos \
             -archivePath build/Nuwa.xcarchive \
             MARKETING_VERSION="${{ steps.version.outputs.name }}" \
             CURRENT_PROJECT_VERSION="${{ steps.version.outputs.build }}" \
+            CODE_SIGN_STYLE=Manual \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
+            PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
             archive
 
           cat > build/ExportOptions.plist <<EOF
