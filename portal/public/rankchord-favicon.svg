@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <style>
+    .bg { fill: #0A0A0B; }
+    .fg { fill: #FFFFFF; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #FFFFFF; }
+      .fg { fill: #0A0A0B; }
+    }
+  </style>
+  <rect class="bg" width="64" height="64" rx="14"/>
+  <g transform="translate(12, 12) skewX(-12) translate(4.20, 0)" class="fg">
+    <path d="M 8 21.2 H 10.5 Q 12.5 21.2 12.5 23.2 V 32.5 Q 12.5 34.5 10.5 34.5 H 8 Q 6 34.5 6 32.5 V 23.2 Q 6 21.2 8 21.2 Z"/>
+    <path d="M 18.75 13.3 H 21.25 Q 23.25 13.3 23.25 15.3 V 32.5 Q 23.25 34.5 21.25 34.5 H 18.75 Q 16.75 34.5 16.75 32.5 V 15.3 Q 16.75 13.3 18.75 13.3 Z"/>
+    <path d="M 29.5 5.5 H 32 Q 34 5.5 34 7.5 V 32.5 Q 34 34.5 32 34.5 H 29.5 Q 27.5 34.5 27.5 32.5 V 7.5 Q 27.5 5.5 29.5 5.5 Z"/>
+  </g>
+</svg>

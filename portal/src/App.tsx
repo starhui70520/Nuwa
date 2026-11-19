@@ -107,7 +107,8 @@ export function App() {
     }
     const iconLink = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
     if (iconLink) {
-      iconLink.href = isNuwa ? '/logo.png' : '/rankchord-symbol.png';
+      iconLink.type = isNuwa ? 'image/png' : 'image/svg+xml';
+      iconLink.href = isNuwa ? '/logo.png' : '/rankchord-favicon.svg';
     }
   }, [articles, isAbout, isAdmin, isNuwa, isResearchDetail, isResearchList, researchSlug]);
 
@@ -122,16 +123,11 @@ export function App() {
             aria-label="RankChord 首页"
             className="mr-[34px] inline-flex items-center cursor-pointer"
           >
-            <span className="inline-flex items-center gap-2 max-[680px]:gap-1.5">
-              <span className="w-[32.26px] h-[32px] max-[680px]:w-[28.23px] max-[680px]:h-[28px] inline-flex items-center justify-center">
-                <img
-                  src="/rankchord-symbol.png"
-                  alt=""
-                  className="w-full h-full object-contain"
-                />
-              </span>
-              <span className="brand-wordmark">RankChord</span>
-            </span>
+            <img
+              src="/rankchord-logo-light.svg"
+              alt="RankChord"
+              className="h-[32px] max-[680px]:h-[28px] w-auto block"
+            />
           </button>
 
           {/* Desktop Nav */}
@@ -437,14 +433,11 @@ export function App() {
                 onClick={() => navigate('/')}
                 className="inline-flex items-center gap-2 cursor-pointer"
               >
-                <span className="w-[32.26px] h-[32px] inline-flex items-center justify-center">
-                  <img
-                    src="/rankchord-symbol.png"
-                    alt=""
-                    className="w-full h-full object-contain"
-                  />
-                </span>
-                <span className="brand-wordmark">RankChord</span>
+                <img
+                  src="/rankchord-logo-light.svg"
+                  alt="RankChord"
+                  className="h-[32px] w-auto block"
+                />
               </button>
               <p className="mt-[18px] text-[12px] text-[#686d74]">
                 General intelligence systems, built for real work.
