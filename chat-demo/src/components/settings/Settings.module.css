@@ -195,6 +195,33 @@
   color: var(--dsw-alias-label-tertiary);
 }
 
+.balanceBadge {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.8125rem;
+  line-height: 18px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: #4d6bfe;
+  background: rgba(77, 107, 254, 0.1);
+
+  [data-ds-dark-theme] & {
+    color: #85a5ff;
+    background: rgba(77, 107, 254, 0.18);
+  }
+}
+
+.balanceBadgeLow {
+  color: #dc2626;
+  background: rgba(220, 38, 38, 0.1);
+
+  [data-ds-dark-theme] & {
+    color: #f87171;
+    background: rgba(248, 113, 113, 0.16);
+  }
+}
+
 .rowChevron {
   display: inline-flex;
   align-items: center;

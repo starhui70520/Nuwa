@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react'
 import logoUrl from '../../assets/logo.png'
 import { useTranslate } from '../../i18n/index.js'
 import { refreshBalance, useBalance } from '../../services/api/balance.js'
+import { openExternalUrl } from '../../services/externalLink.js'
 import { searchSessionIdsByContent } from '../../services/chat/db.js'
 import { groupSessions } from '../../services/chat/sessionGroups.js'
 import { newChat, removeSession, useChatStore } from '../../services/chat/store.js'
@@ -221,12 +222,25 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
             <span className={styles.settingsLabel}>{profileName}</span>
             {balance ? (
               <span
+                role="button"
+                tabIndex={0}
                 className={clsx(
                   styles.profileBalance,
                   (!balance.isAvailable || Number(balance.totalBalance) <= 0) &&
                     styles.profileBalanceLow
                 )}
                 title={t('accountBalanceTooltip', { amount: balance.formatted })}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  openExternalUrl('https://platform.deepseek.com/top_up')
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    openExternalUrl('https://platform.deepseek.com/top_up')
+                  }
+                }}
               >
                 {balance.formatted}
               </span>

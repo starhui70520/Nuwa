@@ -778,3 +778,26 @@ export const IconFontSizeOutline18 = () => (
     />
   </svg>
 )
+
+/** 设置-余额钱包图标 */
+export const IconWalletOutline18 = () => (
+  <svg width={18} height={18} viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <rect
+      x="2.25"
+      y="3.75"
+      width="13.5"
+      height="10.5"
+      rx="2.25"
+      stroke="currentColor"
+      strokeWidth={1.6}
+    />
+    <path
+      d="M15.75 7.25h-3.25a1.75 1.75 0 1 0 0 3.5h3.25"
+      stroke="currentColor"
+      strokeWidth={1.6}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <circle cx="12.5" cy="9" r="0.85" fill="currentColor" />
+  </svg>
+)

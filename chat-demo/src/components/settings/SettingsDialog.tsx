@@ -9,6 +9,7 @@ import {
   useAppUpdateStore,
   type ReleaseHistoryItem,
 } from '../../services/appUpdate.js'
+import { refreshBalance, useBalance } from '../../services/api/balance.js'
 import {
   logoutDeepSeekAccount,
   PlatformAuthUnavailableError,
@@ -51,7 +52,7 @@ import {
   type ThemePreference,
 } from '../../services/settings.js'
 import { DeepSeekMigration, isNativeAndroid, isNativeIos } from '../../services/nativeBridge.js'
-import { handleExternalAnchorClick } from '../../services/externalLink.js'
+import { handleExternalAnchorClick, openExternalUrl } from '../../services/externalLink.js'
 import { Button } from '../base/Button.js'
 import {
   IconChevronLeftOutline18,
@@ -69,6 +70,7 @@ import {
   IconUploadOutline14,
   IconUserOutline18,
   IconVolumeOutline18,
+  IconWalletOutline18,
 } from '../base/icons.js'
 import { Modal } from '../base/Modal.js'
 import { Select } from '../base/Select.js'
@@ -81,6 +83,7 @@ import { closeSettings, useSettingsDialog } from './settingsDialogState.js'
 type SettingsPage = 'root' | 'account' | 'data' | 'changelog' | 'feedback'
 
 const DOCS_URL = 'https://api-docs.deepseek.com/zh-cn/'
+const TOP_UP_URL = 'https://platform.deepseek.com/top_up'
 
 /**
  * 原生 DeepSeek 风格设置面板：
@@ -107,6 +110,7 @@ const SettingsContent = () => {
   const isAccount = useSettings((state) => isUsingDeepSeekAccount(state))
   const dshAccountLabel = useSettings((state) => state.dshAccountLabel)
   const apiModel = useSettings((state) => state.apiModel)
+  const balance = useBalance((state) => state.balance)
   const historyBusy = historyImport.busy || historyDelete.busy || replacingHistory
   const [appVersion, setAppVersion] = useState(getWebAppVersion)
   const checkingUpdate = useAppUpdateStore((state) => state.checking)
@@ -120,6 +124,7 @@ const SettingsContent = () => {
 
   useEffect(() => {
     void getCurrentAppVersion().then(setAppVersion)
+    void refreshBalance()
   }, [])
 
   useEffect(
@@ -345,6 +350,32 @@ const SettingsContent = () => {
                   </span>
                   <span className={styles.rowLabel}>{t('settingsAccountManage')}</span>
                   <span className={styles.rowValue}>{accountSummary}</span>
+                  <span className={styles.rowChevron}>
+                    <IconChevronRightOutline14 />
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className={clsx(styles.groupRow, styles.groupRowButton)}
+                  onClick={() => openExternalUrl(TOP_UP_URL)}
+                >
+                  <span className={styles.rowIcon}>
+                    <IconWalletOutline18 />
+                  </span>
+                  <span className={styles.rowLabel}>{t('settingsApiBalance')}</span>
+                  {balance ? (
+                    <span
+                      className={clsx(
+                        styles.balanceBadge,
+                        (!balance.isAvailable || Number(balance.totalBalance) <= 0) &&
+                          styles.balanceBadgeLow
+                      )}
+                    >
+                      {balance.formatted}
+                    </span>
+                  ) : (
+                    <span className={styles.rowValue}>{t('settingsApiBalanceTopUp')}</span>
+                  )}
                   <span className={styles.rowChevron}>
                     <IconChevronRightOutline14 />
                   </span>

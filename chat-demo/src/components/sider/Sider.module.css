@@ -328,6 +328,18 @@
   font-variant-numeric: tabular-nums;
   color: #4d6bfe;
   background: rgba(77, 107, 254, 0.1);
+  cursor: pointer;
+  transition: opacity var(--ds-transition-duration) var(--ds-ease-in-out);
+
+  &:active {
+    opacity: 0.72;
+  }
+
+  @media (hover: hover) {
+    &:hover {
+      opacity: 0.82;
+    }
+  }
 
   [data-ds-dark-theme] & {
     color: #85a5ff;
