@@ -344,8 +344,12 @@ export function HomePage({ articles, onNavigate }: HomePageProps) {
         <div className="site-container grid grid-cols-1 min-[1041px]:grid-cols-[minmax(330px,0.72fr)_minmax(0,1.28fr)] items-start gap-[clamp(52px,6vw,96px)] max-[680px]:gap-[32px]">
           <div>
             <p className="eyebrow">COMPANY</p>
-            <h2 className="mt-[21px] max-[680px]:mt-4 text-[clamp(60px,5.4vw,76px)] max-[680px]:text-[50px] font-medium tracking-[-1.5px] max-[680px]:tracking-[-1.2px] leading-none text-[#18181b]">
-              RankChord
+            <h2 className="mt-[21px] max-[680px]:mt-4 m-0" aria-label="RankChord">
+              <img
+                src="/rankchord-wordmark-light.svg"
+                alt="RankChord"
+                className="h-[clamp(66px,5.8vw,84px)] max-[680px]:h-[54px] w-auto max-w-full block"
+              />
             </h2>
             <p className="mt-[30px] max-[680px]:mt-[22px] text-[14px] max-[680px]:text-[13px] leading-[1.65] text-[#686d74]">
               General intelligence systems,
