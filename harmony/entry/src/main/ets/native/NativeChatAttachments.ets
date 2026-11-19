@@ -1,10 +1,12 @@
 import { common } from '@kit.AbilityKit';
 import { uniformTypeDescriptor } from '@kit.ArkData';
 import { url, util } from '@kit.ArkTS';
+import { zlib } from '@kit.BasicServicesKit';
 import { fileIo, fileUri, picker } from '@kit.CoreFileKit';
 import { image } from '@kit.ImageKit';
 import { http } from '@kit.NetworkKit';
 import { NativeChatConfig } from './NativeChatClient';
+import { NativeBackupZipInput } from './NativeBackupZip';
 
 export interface NativeAttachment {
   id: string;
@@ -160,6 +162,10 @@ function sniffMime(data: Uint8Array): string {
     return 'image/avif';
   }
   return '';
+}
+
+export function attachmentUploadImageMime(header: Uint8Array): string {
+  return sniffMime(header.subarray(0, 16));
 }
 
 function safeDimensions(width: number, height: number): boolean {
@@ -359,8 +365,9 @@ async function convertImage(file: UploadFile): Promise<UploadFile> {
     if (!size || size > MAX_BYTES) {
       throw new Error('图片转换大小无效。');
     }
+    const dot = file.name.lastIndexOf('.');
     return {
-      localPath: path, mimeType: 'image/jpeg', name: file.name.slice(0, file.name.lastIndexOf('.')) + '.jpg',
+      localPath: path, mimeType: 'image/jpeg', name: (dot > 0 ? file.name.slice(0, dot) : file.name) + '.jpg',
       temporary: true,
     };
   } catch {
@@ -450,16 +457,16 @@ export class NativeChatAttachments {
     return item.local ? fileUri.getUriFromPath(attachmentPath(context, item)) : '';
   }
 
-  async storeOriginal(context: common.UIAbilityContext, item: NativeAttachment, data: Uint8Array,
-    mimeType: string): Promise<NativeAttachment> {
-    if (!data.length || data.length > MAX_BYTES) {
+  async storeOriginal(context: common.UIAbilityContext, item: NativeAttachment, source: NativeBackupZipInput,
+    mimeType: string, expectedChecksum?: number): Promise<NativeAttachment> {
+    if (!Number.isSafeInteger(source.size) || source.size <= 0 || source.size > MAX_BYTES) {
       throw new Error('本地附件大小无效。');
     }
     const stored: NativeAttachment = {
       id: util.generateRandomUUID(true),
       archiveId: item.archiveId ?? item.id,
       name: item.name,
-      size: data.length,
+      size: source.size,
       isImage: item.isImage,
       mimeType: mimeType,
       purpose: item.purpose,
@@ -467,12 +474,26 @@ export class NativeChatAttachments {
       serverId: null,
       local: true,
     };
+    const crc = expectedChecksum === undefined ? undefined : await zlib.createChecksum();
     await fileIo.mkdir(directory(context), true);
     const path = attachmentPath(context, stored);
     const target = await fileIo.open(path, fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
     try {
       try {
-        await writeChunk(target.fd, data.slice().buffer as ArrayBuffer);
+        let checksum = 0;
+        for (let offset = 0; offset < source.size; offset += IO_CHUNK) {
+          const length = Math.min(IO_CHUNK, source.size - offset);
+          const chunk = await source.read(offset, length);
+          if (chunk.byteLength !== length) {
+            throw new Error('图片原件读取未完成。');
+          }
+          const bytes = chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + length) as ArrayBuffer;
+          if (crc) checksum = (await crc.crc32(checksum, bytes)) >>> 0;
+          await writeChunk(target.fd, bytes);
+        }
+        if (expectedChecksum !== undefined && checksum !== expectedChecksum) {
+          throw new Error('图片原件校验失败。');
+        }
         await fileIo.fsync(target.fd);
       } finally {
         await fileIo.close(target);

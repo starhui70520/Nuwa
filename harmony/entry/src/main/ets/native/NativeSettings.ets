@@ -175,7 +175,7 @@ export class NativeSettingsController {
   }
 
   async save(context: common.UIAbilityContext, settings: NativeSettings,
-    manualPreference?: NativeManualPreference): Promise<void> {
+    manualPreference?: NativeManualPreference, verifiedCredential: boolean = false): Promise<void> {
     const operation = serializedWrites.then(async (): Promise<void> => {
       const store = await preferences.getPreferences(context, PREFERENCES_NAME);
       const credential = await readCredential();
@@ -183,12 +183,11 @@ export class NativeSettingsController {
 
       if (!settings.apiKey) {
         await writeApiKey('', '');
-      } else if (!credential || credential.apiKey !== settings.apiKey) {
+      } else if (!credential || credential.apiKey !== settings.apiKey ||
+        (verifiedCredential && credential.binding !== nextBinding)) {
         await writeApiKey(settings.apiKey, nextBinding);
       }
-      // If a caller changes endpoint/protocol while retaining the same key, keep
-      // the old binding. load() will hide that credential until the user enters
-      // a new key for the new endpoint.
+      // Only verification can bind an unchanged key to new endpoint settings.
       const writes = [
         store.put('baseUrl', settings.baseUrl),
         store.put('model', settings.model),

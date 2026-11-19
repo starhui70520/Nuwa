@@ -5,6 +5,32 @@ import { NativeLocale } from './NativeLocation';
 export type NativeOnboardingView = 'home' | 'deepseek-key' | 'third-party';
 const DEEPSEEK_BASE = 'https://api.deepseek.com';
 
+export function nativeCredentialError(error: Error, locale: NativeLocale): string {
+  const english = locale === 'en-US';
+  const message = error.message ?? '';
+  switch (message) {
+    case 'API Key 无效，请检查后重试':
+      return english ? 'Invalid API Key. Please check it and try again.' : message;
+    case '网络异常，请检查你的网络状况':
+      return english ? 'Network Error. Please check your network status.' : message;
+    case '请输入有效的 API 地址':
+      return english ? 'Verification failed: Enter a valid API Base URL.' : '校验失败：' + message;
+    case '请输入不含账号、密码或片段的 HTTP 或 HTTPS 地址':
+      return english ? 'Verification failed: Enter an HTTP or HTTPS address without credentials or a fragment.' : '校验失败：' + message;
+    case '请输入 API Key；仅局域网 OpenAI 兼容地址可留空':
+      return english ? 'Verification failed: Enter an API Key or use a local OpenAI-compatible endpoint.' : '校验失败：' + message;
+    case '使用 API Key 时，地址必须为 HTTPS':
+      return english ? 'Verification failed: An API Key requires an HTTPS address.' : '校验失败：' + message;
+    case 'API Key 中不能包含换行':
+      return english ? 'Verification failed: The API Key cannot contain line breaks.' : '校验失败：' + message;
+    case '请输入模型名称':
+      return english ? 'Verification failed: Enter a model name.' : '校验失败：' + message;
+    default:
+      return english ? 'Verification failed' + (message ? ': ' + message.replace(/^校验失败：/, '') : '.') :
+        message.startsWith('校验失败：') ? message : '校验失败' + (message ? '：' + message : '，请重试');
+  }
+}
+
 @Component
 export struct NativeOnboarding {
   @Prop locale: NativeLocale = 'zh-CN';
@@ -66,7 +92,7 @@ export struct NativeOnboarding {
       await this.onConnect(credential);
       this.apiKey = '';
     } catch (error) {
-      this.failure = (error as Error).message || this.text('校验失败，请重试', 'Verification failed. Please try again.');
+      this.failure = nativeCredentialError(error as Error, this.locale);
     } finally {
       this.verifying = false;
     }
@@ -92,7 +118,9 @@ export struct NativeOnboarding {
         .border({ width: 1, color: $r('app.color.native_chat_stroke') })
         .backgroundColor($r('app.color.native_chat_field')).fontColor($r('app.color.native_chat_primary'))
         .placeholderColor($r('app.color.native_chat_caption')).padding({ left: 16, right: 16 })
-        .enabled(!this.verifying).onChange(change)
+        .showPasswordIcon(false).enabled(!this.verifying).onChange(change)
+        .enterKeyType(EnterKeyType.Done)
+        .onSubmit(() => { if (input === InputType.Password) void this.connect(); })
     }
     .width('100%').alignItems(HorizontalAlign.Start)
   }
@@ -112,10 +140,12 @@ export struct NativeOnboarding {
         }
         .width('100%').padding({ left: 6 })
         this.field(() => this.text('API 地址 (Base URL)', 'API Base URL'), () => this.baseUrl,
-          () => this.text('例如 https://api.deepseek.com', 'e.g. https://api.deepseek.com'), InputType.Normal,
+          () => this.text('例如 https://api.deepseek.com 或 https://api.openai.com/v1',
+            'e.g. https://api.deepseek.com or https://api.openai.com/v1'), InputType.Normal,
           (value: string) => { this.baseUrl = value; })
         this.field(() => this.text('模型名称', 'Model Name'), () => this.model,
-          () => this.text('例如 deepseek-chat、gpt-4o', 'e.g. deepseek-chat or gpt-4o'), InputType.Normal,
+          () => this.text('例如 deepseek-chat、deepseek-reasoner、gpt-4o',
+            'e.g. deepseek-chat, deepseek-reasoner, gpt-4o'), InputType.Normal,
           (value: string) => { this.model = value; })
       }
       this.field(() => this.keylessApiAllowed() ? this.text('API Key（可选）', 'API Key (optional)') : 'API Key',

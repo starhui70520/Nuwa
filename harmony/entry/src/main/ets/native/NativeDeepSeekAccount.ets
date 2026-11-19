@@ -192,7 +192,7 @@ const normalizedBalance = (currency: string, total: string | number, available: 
   return { currency: upperCurrency, totalBalance: amount, formatted, isAvailable: available };
 };
 
-/** Native PKCE account transport. UI owns the WebView and should load only authorizeUrl. */
+/** Native PKCE account transport. Both the embedded page and browser use the validated authorizeUrl. */
 export class NativeDeepSeekAccountController {
   private locale: string = 'zh_CN';
   private verifier: string = '';
@@ -205,8 +205,13 @@ export class NativeDeepSeekAccountController {
   private activeRequest?: http.HttpRequest;
   private context?: common.UIAbilityContext;
 
-  async startLogin(context: common.UIAbilityContext, locale: string): Promise<NativeDeepSeekAuthChallenge> {
+  async startLogin(context: common.UIAbilityContext, locale: string, browserCallback?: string): Promise<NativeDeepSeekAuthChallenge> {
     this.cancel();
+    if (browserCallback !== undefined) {
+      const address = /^http:\/\/127\.0\.0\.1:(\d{1,5})\/oauth\/callback$/.exec(browserCallback);
+      const port = Number(address?.[1] ?? 0);
+      if (!address || port < 1024 || port > 65535) throw new Error('授权回调地址无效');
+    }
     this.context = context;
     const attempt = ++this.generation;
     this.locale = locale.toLowerCase().startsWith('zh') ? 'zh_CN' : 'en_US';
@@ -215,7 +220,7 @@ export class NativeDeepSeekAccountController {
     this.completed = false;
     this.exchanging = false;
     const port = 30000 + Math.floor(Math.random() * 25000);
-    this.redirectUri = `http://127.0.0.1:${port}/oauth/callback`;
+    this.redirectUri = browserCallback ?? `http://127.0.0.1:${port}/oauth/callback`;
     const body: AuthInitBody = {
       code_challenge: await sha256Base64Url(this.verifier),
       code_challenge_method: 'S256',
@@ -241,7 +246,7 @@ export class NativeDeepSeekAccountController {
     }
   }
 
-  /** Call from WebView navigation interception; it never accepts external redirect origins. */
+  /** Match the callback route before treating it as an authorization response. */
   isRedirect(target: string): boolean {
     if (!target || !this.redirectUri) {
       return false;
@@ -249,8 +254,18 @@ export class NativeDeepSeekAccountController {
     try {
       const targetUrl = url.URL.parseURL(target);
       const redirect = url.URL.parseURL(this.redirectUri);
-      return targetUrl.protocol === 'http:' && targetUrl.hostname === '127.0.0.1' &&
-        targetUrl.port === redirect.port && targetUrl.pathname === '/oauth/callback';
+      return targetUrl.protocol === 'http:' && targetUrl.hostname === '127.0.0.1' && !targetUrl.username &&
+        !targetUrl.password && !targetUrl.hash && targetUrl.port === redirect.port && targetUrl.pathname === '/oauth/callback';
+    } catch {
+      return false;
+    }
+  }
+
+  canHandleRedirect(target: string): boolean {
+    if (!this.isRedirect(target) || this.exchanging || this.completed || !this.state) return false;
+    try {
+      if (readQueryParameter(target, 'state') !== this.state) return false;
+      return !!readQueryParameter(target, 'code') !== !!readQueryParameter(target, 'error');
     } catch {
       return false;
     }
@@ -260,11 +275,9 @@ export class NativeDeepSeekAccountController {
     if (!this.isRedirect(target) || this.exchanging || this.completed) {
       return null;
     }
-    const receivedState = readQueryParameter(target, 'state');
+    if (!this.canHandleRedirect(target)) throw new Error('授权回调校验失败');
+    if (readQueryParameter(target, 'error')) throw new Error('DeepSeek 授权已取消');
     const code = readQueryParameter(target, 'code');
-    if (!code || !receivedState || receivedState !== this.state) {
-      throw new Error('授权回调校验失败');
-    }
     this.exchanging = true;
     const attempt = this.generation;
     const context = this.context;
@@ -432,7 +445,7 @@ export class NativeDeepSeekAccountController {
     }
     if (parsed.protocol !== 'https:' || parsed.hostname !== 'platform.deepseek.com' ||
       (parsed.pathname !== '/dsh/authorize' && !parsed.pathname.startsWith('/dsh/authorize/')) ||
-      parsed.username || parsed.password) {
+        parsed.username || parsed.password || (!!parsed.port && parsed.port !== '443')) {
       throw new Error('DeepSeek 返回了不受信任的授权地址');
     }
   }

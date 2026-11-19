@@ -2,7 +2,8 @@ import { common } from '@kit.AbilityKit';
 import { url, util } from '@kit.ArkTS';
 import { fileIo, fileUri, picker } from '@kit.CoreFileKit';
 import {
-  attachmentMime, attachmentPurpose, attachmentRasterMime, NativeAttachment, NativeChatAttachments,
+  attachmentMime, attachmentPurpose, attachmentRasterMime, attachmentUploadImageMime, NativeAttachment,
+  NativeChatAttachments,
 } from './NativeChatAttachments';
 import { NativeChatCitation, NativeChatSource, safeNativeSourceUrl } from './NativeChatSources';
 import { NativeConversation, NativeConversationMessage, NativeConversationState, visibleMessages } from './NativeConversation';
@@ -28,7 +29,7 @@ const USER = 'user.json';
 const VERSION = 3;
 const MAX_INLINE_IMAGE_BYTES = 16 * 1024 * 1024;
 const MAX_PREVIEW_BYTES = 1024 * 1024;
-const MAX_HYDRATE_BYTES = 16 * 1024 * 1024;
+const MAX_FILE_PREVIEW_BYTES = 16 * 1024 * 1024;
 const MAX_PORTABLE_SOURCES = 256;
 const MAX_PORTABLE_CITATIONS = 4_096;
 const base64 = new util.Base64Helper();
@@ -276,22 +277,23 @@ function textFragments(message: ArchiveMessage, type: string): string {
     .join(type === 'RESPONSE' || type === 'TEMPLATE_RESPONSE' ? '' : '\n');
 }
 
-export function nativeArchivedReplyTemplate(session: NativeConversation, messageId: string): string {
-  if (!session.archiveJson) return '';
+export function nativeArchivedReplyTemplate(session: NativeConversation, messageId: string): string | undefined {
+  if (!session.archiveJson) return undefined;
   if (recentTemplateArchive !== session.archiveJson) {
     recentTemplateArchive = session.archiveJson;
     recentArchiveTemplates.clear();
     try {
       const origin = JSON.parse(session.archiveJson) as ArchiveOrigin;
       for (const message of origin.session.messages) {
-        const template = textFragments(message, 'TEMPLATE_RESPONSE');
-        if (template) recentArchiveTemplates.set(message.id.toString(), template);
+        if (message.fragments.some((fragment: ArchiveFragment): boolean => fragment.type === 'TEMPLATE_RESPONSE')) {
+          recentArchiveTemplates.set(message.id.toString(), textFragments(message, 'TEMPLATE_RESPONSE'));
+        }
       }
     } catch {
       recentArchiveTemplates.clear();
     }
   }
-  return recentArchiveTemplates.get(messageId) ?? '';
+  return recentArchiveTemplates.get(messageId);
 }
 
 function importedTimeline(message: ArchiveMessage): NativeToolTimelineView | undefined {
@@ -557,7 +559,7 @@ function original(session: NativeConversation): ArchiveOrigin | undefined {
 }
 
 function retainedImage(session: NativeConversation, item: NativeAttachment): ArchiveImage | undefined {
-  if (!item.isImage || item.local || !session.archiveJson) {
+  if (!item.isImage || !session.archiveJson) {
     return undefined;
   }
   try {
@@ -596,7 +598,7 @@ export function importedAttachmentPreview(session: NativeConversation, item: Nat
     return '';
   }
   try {
-    if (context && image.blobId && image.size !== undefined && image.size <= MAX_HYDRATE_BYTES &&
+    if (context && image.blobId && image.size !== undefined && image.size <= MAX_FILE_PREVIEW_BYTES &&
       ['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(image.mimeType ?? '')) {
       return fileUri.getUriFromPath(backupImagePath(context, image.blobId));
     }
@@ -615,24 +617,28 @@ export function importedAttachmentPreview(session: NativeConversation, item: Nat
 
 export async function hydrateImportedAttachment(context: common.UIAbilityContext, session: NativeConversation,
   item: NativeAttachment): Promise<NativeAttachment | null> {
+  if (item.local) return null;
   const image = retainedImage(session, item);
-  if (!image || (image.size ?? item.size) > MAX_HYDRATE_BYTES) {
-    return null;
+  if (!image) return null;
+  const store = async (input: NativeBackupZipInput, checksum?: number): Promise<NativeAttachment | null> => {
+    if ((image.size !== undefined && input.size !== image.size) || input.size > MAX_BACKUP_ENTRY_BYTES) {
+      throw new Error('图片原件大小无效。');
+    }
+    if (input.size === 0) return null;
+    // Upload detection is independent of the inline preview's stricter format and dimension checks.
+    const mime = attachmentUploadImageMime(await input.read(0, Math.min(input.size, 16)));
+    return new NativeChatAttachments().storeOriginal(context, item, input, mime, checksum);
+  };
+  if (image.blobId) {
+    return withBackupInput<NativeAttachment | null>(backupImagePath(context, image.blobId),
+      (input: NativeBackupZipInput): Promise<NativeAttachment | null> => store(input, image.crc));
   }
-  const bytes = image.blobId ? await withBackupInput<Uint8Array>(backupImagePath(context, image.blobId),
-    (input: NativeBackupZipInput): Promise<Uint8Array> => {
-      if (input.size !== image.size || input.size > MAX_HYDRATE_BYTES) {
-        return Promise.reject(new Error('图片原件大小无效。'));
-      }
-      return input.read(0, input.size);
-    }) : (image.bytes && image.bytes.length <= Math.ceil(MAX_HYDRATE_BYTES / 3) * 4 ?
-    base64.decodeSync(image.bytes) : new Uint8Array(0));
+  if (!image.bytes || image.bytes.length > Math.ceil(MAX_INLINE_IMAGE_BYTES / 3) * 4) return null;
+  const bytes = base64.decodeSync(image.bytes);
   if (image.crc !== undefined && backupZipChecksum(bytes) !== image.crc) {
     throw new Error('图片原件校验失败。');
   }
-  const mime = attachmentRasterMime(bytes);
-  return mime && bytes.length <= MAX_HYDRATE_BYTES ?
-    new NativeChatAttachments().storeOriginal(context, item, bytes, mime) : null;
+  return store(memoryBackupInput(bytes));
 }
 
 function nativeFiles(message: ArchiveMessage): NativeAttachment[] | undefined {
