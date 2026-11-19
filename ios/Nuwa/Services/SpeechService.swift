@@ -212,7 +212,7 @@ final class SpeechService: NSObject, ObservableObject, AVSpeechSynthesizerDelega
         }
     }
 
-    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechSynthesizer) {
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
         Task { @MainActor in
             self.isSpeaking = false
             self.speakingMessageId = nil

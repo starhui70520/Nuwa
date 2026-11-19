@@ -23,7 +23,7 @@ final class PlatformAuthViewController: UIViewController, WKNavigationDelegate {
     private var completed = false
 
     private static func wireLocale() -> String {
-        let lang = Locale.current.languageCode ?? "zh"
+        let lang = Locale.current.language.languageCode?.identifier ?? "zh"
         return lang.lowercased().hasPrefix("zh") ? "zh_CN" : "en_US"
     }
 
