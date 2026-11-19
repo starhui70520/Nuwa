@@ -1,6 +1,12 @@
 import { common } from '@kit.AbilityKit';
+import { LengthMetrics } from '@kit.ArkUI';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { url } from '@kit.ArkTS';
+import { NativeMathEquation } from './NativeMathEquation';
+import {
+  findNativeDisplayMath, findNativeInlineMath, NativeMathMatch, NativeMathNode, NativeMathSpan, nativeMathSpans,
+  parseNativeMath,
+} from './NativeMarkdownMath';
 
 /**
  * Small native Markdown renderer for the Harmony chat surface.
@@ -18,6 +24,7 @@ interface MarkdownBlock {
   lang?: string;
   checked?: boolean;
   source?: string;
+  math?: NativeMathNode;
 }
 
 interface InlinePart {
@@ -30,6 +37,7 @@ interface InlinePart {
   source?: string;
   target?: string;
   citation?: number;
+  math?: NativeMathSpan[];
 }
 
 interface CodePart {
@@ -93,6 +101,17 @@ export struct NativeMarkdown {
       }
       if (trimmed.length === 0) {
         flushParagraph();
+        continue;
+      }
+
+      const equation = findNativeDisplayMath(lines, i);
+      if (equation) {
+        flushParagraph();
+        result.push({
+          kind: 'math', text: equation.formula, math: parseNativeMath(equation.formula) ?? undefined,
+          level: 0, ordered: false, marker: '',
+        });
+        i = equation.end - 1;
         continue;
       }
 
@@ -222,6 +241,40 @@ export struct NativeMarkdown {
     }
   }
 
+  private mathPart(value: string, match: NativeMathMatch, strong: boolean, italic: boolean): InlinePart {
+    const math = parseNativeMath(match.formula);
+    return {
+      text: math ? match.formula : value.slice(match.start, match.end),
+      strong, italic, code: false, strike: false, math: math ? nativeMathSpans(math) : undefined,
+    };
+  }
+
+  private addEmphasis(parts: InlinePart[], value: string, strong: boolean, italic: boolean): void {
+    let offset = 0;
+    let match = findNativeInlineMath(value);
+    while (match) {
+      if (match.start > offset) {
+        parts.push({ text: value.slice(offset, match.start), strong, italic, code: false, strike: false });
+      }
+      parts.push(this.mathPart(value, match, strong, italic));
+      offset = match.end;
+      match = findNativeInlineMath(value, offset);
+    }
+    if (offset < value.length) {
+      parts.push({ text: value.slice(offset), strong, italic, code: false, strike: false });
+    }
+  }
+
+  private emphasisEnd(value: string, delimiter: string): number {
+    let end = value.indexOf(delimiter, delimiter.length);
+    let match = findNativeInlineMath(value, delimiter.length);
+    while (match && end >= 0 && match.start < end) {
+      if (match.end > end) end = value.indexOf(delimiter, match.end);
+      match = findNativeInlineMath(value, match.end);
+    }
+    return end;
+  }
+
   private inlineParts(value: string): InlinePart[] {
     if (this.cachedCitationMode !== this.hasCitations) {
       this.cachedCitationMode = this.hasCitations;
@@ -233,7 +286,10 @@ export struct NativeMarkdown {
     }
     const parts: InlinePart[] = [];
     let rest: string = value;
+    let formula = findNativeInlineMath(value);
     while (rest.length > 0) {
+      const offset = value.length - rest.length;
+      if (formula && formula.start < offset) formula = findNativeInlineMath(value, offset);
       const boldAt: number = rest.indexOf('**');
       const codeAt: number = rest.indexOf('`');
       const linkAt: number = rest.indexOf('[');
@@ -255,16 +311,21 @@ export struct NativeMarkdown {
       if (linkAt >= 0 && linkAt < next) { next = linkAt; kind = 'link'; }
       if (strikeAt >= 0 && strikeAt < next) { next = strikeAt; kind = 'strike'; }
       if (italicAt >= 0 && italicAt < next) { next = italicAt; kind = 'italic'; }
+      if (formula && formula.start - offset < next) { next = formula.start - offset; kind = 'math'; }
       if (next > 0) {
         parts.push({ text: rest.substring(0, next), strong: false, code: false, italic: false, strike: false });
         rest = rest.substring(next);
         continue;
       }
 
-      if (kind === 'bold') {
-        const end: number = rest.indexOf('**', 2);
+      if (kind === 'math' && formula) {
+        parts.push(this.mathPart(value, formula, false, false));
+        rest = value.slice(formula.end);
+        formula = findNativeInlineMath(value, formula.end);
+      } else if (kind === 'bold') {
+        const end: number = this.emphasisEnd(rest, '**');
         if (end > 2) {
-          parts.push({ text: rest.substring(2, end), strong: true, code: false, italic: false, strike: false });
+          this.addEmphasis(parts, rest.substring(2, end), true, false);
           rest = rest.substring(end + 2);
           continue;
         }
@@ -324,9 +385,9 @@ export struct NativeMarkdown {
         rest = rest.substring(2);
       } else if (kind === 'italic') {
         const delimiter: string = rest.charAt(0);
-        const end: number = rest.indexOf(delimiter, 1);
+        const end: number = this.emphasisEnd(rest, delimiter);
         if (end > 1) {
-          parts.push({ text: rest.substring(1, end), strong: false, code: false, italic: true, strike: false });
+          this.addEmphasis(parts, rest.substring(1, end), false, true);
           rest = rest.substring(end + 1);
           continue;
         }
@@ -518,6 +579,16 @@ export struct NativeMarkdown {
           Span(part.text).fontSize(11 * this.fontScale).fontWeight(FontWeight.Medium)
             .fontColor($r('app.color.native_chat_blue_text')).backgroundColor($r('app.color.native_chat_field'))
             .onClick(() => { this.onCitation(part.citation ?? 0); })
+        } else if (part.math) {
+          ForEach(part.math, (span: NativeMathSpan) => {
+            Span(span.text)
+              .fontFamily('serif')
+              .fontSize(size * this.fontScale * span.scale)
+              .baselineOffset(LengthMetrics.fp(size * this.fontScale * span.offset))
+              .fontColor($r('app.color.native_chat_primary'))
+              .fontStyle(span.italic || part.italic ? FontStyle.Italic : FontStyle.Normal)
+              .fontWeight(span.bold || part.strong ? FontWeight.Bold : FontWeight.Regular)
+          }, (_span: NativeMathSpan, index: number): string => index.toString())
         } else {
           Span(part.text)
             .fontWeight(part.strong ? FontWeight.Bold : FontWeight.Regular)
@@ -582,6 +653,8 @@ export struct NativeMarkdown {
             .borderRadius(12)
             .clip(true)
             .backgroundColor($r('app.color.native_chat_field'))
+        } else if (block.kind === 'math') {
+          NativeMathEquation({ expression: block.math ?? null, source: block.text, formulaFontSize: 17 * this.fontScale })
         } else if (block.kind === 'heading') {
           this.inlineText(`**${block.text}**`, block.level === 1 ? 24 : (block.level === 2 ? 22 : (block.level === 3 ? 20 : 16)))
         } else if (block.kind === 'list') {
