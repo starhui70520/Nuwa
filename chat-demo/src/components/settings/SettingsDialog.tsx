@@ -187,7 +187,8 @@ const SettingsContent = () => {
       const dx = touch.clientX - startX
       const dy = touch.clientY - startY
       if (!active) {
-        if (dy < 6) {
+        const threshold = inHeader ? 3 : 5
+        if (dy < threshold) {
           if (dy < -6) {
             canDrag = false
           }
@@ -203,9 +204,19 @@ const SettingsContent = () => {
         }
         active = true
         dialog.classList.add(styles.dialogDragging)
+        dialog.style.transition = 'none'
+        const overlay = dialog.parentElement
+        if (overlay) {
+          overlay.style.transition = 'none'
+        }
       }
       currentY = Math.max(0, dy)
       dialog.style.transform = `translateY(${currentY}px)`
+      const overlay = dialog.parentElement
+      if (overlay) {
+        const progress = Math.min(1, currentY / Math.max(240, dialog.offsetHeight * 0.65))
+        overlay.style.backgroundColor = `rgba(0, 0, 0, calc(var(--overlay-opacity) * ${(1 - progress).toFixed(3)}))`
+      }
       if (event.cancelable) {
         event.preventDefault()
       }
@@ -221,14 +232,23 @@ const SettingsContent = () => {
       active = false
       canDrag = false
       dialog.classList.remove(styles.dialogDragging)
+      const overlay = dialog.parentElement
       if (currentY > 96 || velocity > 0.45) {
-        // 保持当前拖拽位置进入下一帧，再平滑滑出到底部，不闪跳
-        requestAnimationFrame(() => {
-          dialog.style.transform = ''
-          requestClose()
-        })
+        // 直接从当前跟手位置平滑滑出到底部，不回弹闪跳
+        dialog.style.transition = 'transform 0.24s cubic-bezier(0.32, 0.72, 0, 1)'
+        dialog.style.transform = 'translateY(100%)'
+        if (overlay) {
+          overlay.style.transition = 'background-color 0.24s ease-out'
+          overlay.style.backgroundColor = 'rgba(0, 0, 0, 0)'
+        }
+        requestClose()
       } else {
+        dialog.style.transition = ''
         dialog.style.transform = ''
+        if (overlay) {
+          overlay.style.transition = 'background-color 0.26s ease-out'
+          overlay.style.backgroundColor = ''
+        }
       }
     }
 
