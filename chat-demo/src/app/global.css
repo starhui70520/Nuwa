@@ -14,7 +14,7 @@ html {
   }
 }
 
-@media (max-width: 340px), (max-height: 420px) {
+@media (max-width: 340px) {
   :root {
     --message-list-padding-horizontal: 10px;
   }

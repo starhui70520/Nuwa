@@ -646,7 +646,7 @@
   opacity: 0.7;
 }
 
-@media (max-width: 340px), (max-height: 420px) {
+@media (max-width: 340px) {
   .dialog {
     width: 100%;
     height: 100%;

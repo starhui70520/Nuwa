@@ -15,8 +15,8 @@ const subscribe = (onChange: () => void) => {
 
 export const useIsMobile = () => useSyncExternalStore(subscribe, () => query.matches)
 
-/** 小方屏手表 / 极紧凑视口（宽 <= 340px 或高 <= 420px） */
-const compactQuery = window.matchMedia('(max-width: 340px), (max-height: 420px)')
+/** 小方屏手表 / 极紧凑视口（宽 <= 340px，不依赖高度避免软键盘弹出误触发） */
+const compactQuery = window.matchMedia('(max-width: 340px)')
 
 const subscribeCompact = (onChange: () => void) => {
   if (typeof compactQuery.addEventListener === 'function') {

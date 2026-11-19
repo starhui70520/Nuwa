@@ -564,7 +564,7 @@
   }
 }
 
-@media (max-width: 340px), (max-height: 420px) {
+@media (max-width: 340px) {
   .mobile {
     padding: 6px 10px 0;
 

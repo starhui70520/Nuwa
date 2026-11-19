@@ -510,7 +510,7 @@
   background-color: var(--dsw-alias-brand-primary);
 }
 
-@media (max-width: 340px), (max-height: 420px) {
+@media (max-width: 340px) {
   .wrapper {
     max-height: calc(100vh - 8px);
   }

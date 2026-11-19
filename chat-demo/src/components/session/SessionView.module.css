@@ -65,7 +65,7 @@
   }
 }
 
-@media (max-width: 340px), (max-height: 420px) {
+@media (max-width: 340px) {
   .inputContainer {
     padding: 0 6px 6px;
   }
