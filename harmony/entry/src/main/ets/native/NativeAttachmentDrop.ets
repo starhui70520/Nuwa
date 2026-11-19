@@ -50,7 +50,7 @@ function safeLocalPath(path: string): boolean {
   return !/[\u0000-\u001f\u007f\\]/.test(path) && !path.split('/').includes('..');
 }
 
-function localAttachmentUri(value: string, ownBundle: string): string {
+export function localAttachmentUri(value: string, ownBundle: string): string {
   if (typeof value !== 'string' || !value || value.length > MAX_URI_LENGTH ||
     /[\u0000-\u001f\u007f\\]/.test(value)) return '';
   if (value.startsWith('/storage/')) return safeLocalPath(value) ? value : '';

@@ -7,6 +7,7 @@ import { image } from '@kit.ImageKit';
 import { http } from '@kit.NetworkKit';
 import { NativeChatConfig } from './NativeChatClient';
 import { NativeBackupZipInput } from './NativeBackupZip';
+import type { NativeClipboardAttachments } from './NativeAttachmentClipboard';
 
 export interface NativeAttachment {
   id: string;
@@ -59,7 +60,7 @@ interface AttachmentJob {
 
 const DIRECTORY = 'nuwa-attachments';
 const ACCOUNT_ORIGIN = 'https://api.deepseek.com';
-const MAX_COUNT = 50;
+export const NATIVE_ATTACHMENT_MAX_COUNT = 50;
 const MAX_BYTES = 64 * 1024 * 1024;
 const IO_CHUNK = 256 * 1024;
 const MAX_ACTIVE_UPLOADS = 3;
@@ -386,20 +387,31 @@ export class NativeChatAttachments {
   private active = 0;
 
   async pick(context: common.UIAbilityContext, existingCount: number): Promise<NativeAttachment[]> {
-    if (existingCount >= MAX_COUNT) {
+    if (existingCount >= NATIVE_ATTACHMENT_MAX_COUNT) {
       throw new Error('一次最多添加 50 个附件。');
     }
     const options = new picker.DocumentSelectOptions();
-    options.maxSelectNumber = MAX_COUNT - existingCount;
+    options.maxSelectNumber = NATIVE_ATTACHMENT_MAX_COUNT - existingCount;
     const uris = await new picker.DocumentViewPicker(context).select(options);
     return this.importUris(context, uris, existingCount);
   }
 
   async importUris(context: common.UIAbilityContext, uris: string[], existingCount: number): Promise<NativeAttachment[]> {
-    if (uris.length + existingCount > MAX_COUNT) {
+    return this.importAttachments(context, uris, [], existingCount);
+  }
+
+  async importClipboard(context: common.UIAbilityContext, clipboard: NativeClipboardAttachments,
+    existingCount: number): Promise<NativeAttachment[]> {
+    return this.importAttachments(context, clipboard.uris, clipboard.pixelMaps, existingCount);
+  }
+
+  private async importAttachments(context: common.UIAbilityContext, uris: string[], pixelMaps: image.PixelMap[],
+    existingCount: number): Promise<NativeAttachment[]> {
+    const count = uris.length + pixelMaps.length;
+    if (count + existingCount > NATIVE_ATTACHMENT_MAX_COUNT) {
       throw new Error('一次最多添加 50 个附件。');
     }
-    if (uris.length === 0) {
+    if (count === 0) {
       return [];
     }
     await fileIo.mkdir(directory(context), true);
@@ -408,11 +420,38 @@ export class NativeChatAttachments {
       for (const uri of uris) {
         attachments.push(await this.saveSelected(context, uri));
       }
+      for (const bitmap of pixelMaps) {
+        attachments.push(await this.saveClipboardImage(context, bitmap));
+      }
       return attachments;
     } catch (error) {
       await Promise.all(attachments.map((item: NativeAttachment): Promise<void> =>
         this.remove(context, item).catch(() => {})));
       throw error as Error;
+    }
+  }
+
+  private async saveClipboardImage(context: common.UIAbilityContext, bitmap: image.PixelMap): Promise<NativeAttachment> {
+    const rawSize = bitmap.getPixelBytesNumber();
+    if (!Number.isSafeInteger(rawSize) || rawSize <= 0) {
+      throw new Error('无法读取剪贴板图片。');
+    }
+    const path = context.cacheDir + '/clipboard-' + util.generateRandomUUID(true) + '.png';
+    let packer: image.ImagePacker | undefined;
+    try {
+      packer = image.createImagePacker();
+      const staged = await fileIo.open(path, fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+      try {
+        await packer.packToFile(bitmap, staged.fd, { format: 'image/png', quality: 100 });
+      } finally {
+        await fileIo.close(staged);
+      }
+      const item = await this.saveSelected(context, path);
+      item.name = 'clipboard.png';
+      return item;
+    } finally {
+      await fileIo.unlink(path).catch(() => {});
+      await packer?.release().catch(() => {});
     }
   }
 

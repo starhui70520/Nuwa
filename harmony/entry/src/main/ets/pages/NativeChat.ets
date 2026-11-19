@@ -21,6 +21,9 @@ import { NativeOAuthLoopbackServer } from '../native/NativeOAuthLoopbackServer';
 import { nativeCredentialError, NativeOnboarding, NativeOnboardingView } from '../native/NativeOnboarding';
 import { NativeAttachment, NativeAttachmentUploadError, NativeChatAttachments } from '../native/NativeChatAttachments';
 import {
+  hasNativeClipboardAttachments, NativeClipboardAttachments, readNativeAttachmentClipboard, releaseNativeAttachmentClipboard,
+} from '../native/NativeAttachmentClipboard';
+import {
   hasNativeAttachmentDropType, hasNativeBackupDropType, NATIVE_ATTACHMENT_DROP_TYPES, NATIVE_COMPOSER_DROP_TYPES,
   nativeBackupDropUri, readNativeAttachmentDrop,
 } from '../native/NativeAttachmentDrop';
@@ -174,6 +177,8 @@ struct NativeChat {
   private editorComposing: boolean = false;
   private editorFocusPending: string = '';
   private readonly messageEditor = new TextAreaController();
+  private readonly composerEditor = new TextAreaController();
+  private composerSelection: TextRange = {};
   @State private replies: NativeReply[] = [];
   @State private recognitionId: string = '';
   @State private readingId: string = '';
@@ -256,7 +261,7 @@ struct NativeChat {
     if (state === 'done') {
       const result = text?.trim() ?? '';
       if (result) {
-        this.updateDraftText(this.draft ? `${this.draft} ${result}` : result);
+        this.insertComposerText(result, this.composerSelection);
       } else {
         this.toast(this.label('未识别到语音内容', 'No speech detected'));
       }
@@ -1140,6 +1145,7 @@ struct NativeChat {
     const draft = this.drafts.get(id);
     this.draft = draft?.text ?? '';
     this.draftFiles = draft?.files ?? [];
+    this.composerSelection = {};
   }
 
   private rememberCurrentDraft(): void {
@@ -1175,6 +1181,21 @@ struct NativeChat {
     if (value === this.draft) return;
     this.draft = value;
     this.scheduleDraftSave();
+  }
+
+  private insertComposerText(text: string, selection: TextRange): void {
+    const original = this.draft;
+    const limit = original.length;
+    const start = Math.max(0, Math.min(selection.start ?? limit, limit));
+    const end = Math.max(start, Math.min(selection.end ?? start, limit));
+    const updated = original.slice(0, start) + text + original.slice(end);
+    const cursor = start + text.length;
+    const id = this.history.activeId;
+    this.updateDraftText(updated);
+    this.composerSelection = { start: cursor, end: cursor };
+    setTimeout(() => {
+      if (this.history.activeId === id && this.draft === updated) this.composerEditor.caretPosition(cursor);
+    }, 0);
   }
 
   private scheduleDraftSave(immediate: boolean = false): void {
@@ -1243,7 +1264,13 @@ struct NativeChat {
     };
   }
 
-  private async acceptDraftFiles(drop?: DragEvent): Promise<void> {
+  private pasteComposerAttachments(selection: TextRange): boolean {
+    if (!this.canReceiveAttachmentDrop() || !hasNativeClipboardAttachments()) return false;
+    void this.acceptDraftFiles(undefined, selection);
+    return true;
+  }
+
+  private async acceptDraftFiles(drop?: DragEvent, pasteSelection?: TextRange): Promise<void> {
     if (this.attachmentIntakeDraftId !== null || this.backupBusy || this.signingOut || !this.authenticated()) {
       drop?.setResult(DragResult.DRAG_FAILED);
       return;
@@ -1251,8 +1278,20 @@ struct NativeChat {
     const id = this.history.activeId ?? '';
     const context = this.host();
     const binding = this.settings.attachmentBinding;
+    const originalDraft = this.draft;
+    let clipboard: NativeClipboardAttachments | undefined;
     this.attachmentIntakeDraftId = id;
     try {
+      if (pasteSelection) {
+        clipboard = await readNativeAttachmentClipboard(context.abilityInfo.bundleName);
+        if (!clipboard.uris.length && !clipboard.pixelMaps.length) {
+          if (clipboard.plainText && !this.backupBusy && !this.signingOut && this.authenticated() &&
+            (this.history.activeId ?? '') === id && this.draft === originalDraft) {
+            this.insertComposerText(clipboard.plainText, pasteSelection);
+          }
+          return;
+        }
+      }
       const uris = drop ? await readNativeAttachmentDrop(drop, context.abilityInfo.bundleName) : undefined;
       const archive = uris ? nativeBackupDropUri(uris) : undefined;
       if (archive && drop) {
@@ -1267,9 +1306,14 @@ struct NativeChat {
         return;
       }
       const existingCount = this.draftItems(id).length;
-      const items = uris ?
-        await this.attachments.importUris(context, uris, existingCount) :
-        await this.attachments.pick(context, existingCount);
+      let items: NativeAttachment[];
+      if (clipboard) {
+        items = await this.attachments.importClipboard(context, clipboard, existingCount);
+      } else if (uris) {
+        items = await this.attachments.importUris(context, uris, existingCount);
+      } else {
+        items = await this.attachments.pick(context, existingCount);
+      }
       if (this.backupBusy || this.signingOut || !this.authenticated() ||
         this.settings.attachmentBinding !== binding || (id && !this.session(id))) {
         await Promise.all(items.map((file: NativeAttachment): Promise<void> => this.attachments.remove(context, file).catch(() => {})));
@@ -1294,6 +1338,7 @@ struct NativeChat {
       this.toast((error as Error).message || this.label('添加附件失败', "Unable to add attachments"));
     } finally {
       this.attachmentIntakeDraftId = null;
+      if (clipboard) await releaseNativeAttachmentClipboard(clipboard);
     }
   }
 
@@ -2435,7 +2480,8 @@ struct NativeChat {
         }
         .width('100%').height(inline || this.viewportWidth < 440 ? 42 : 60).padding({ left: inline ? 6 : 16 })
       } else {
-          TextArea({ text: this.draft, placeholder: this.label('发消息或语音输入', 'Message or voice input') })
+        TextArea({ text: this.draft, placeholder: this.label('发消息或语音输入', 'Message or voice input'),
+          controller: this.composerEditor })
           .width('100%').constraintSize({ minHeight: inline || this.viewportWidth < 440 ? 42 : 60,
             maxHeight: inline ? 110 : 336 })
           .padding({ top: inline ? 10 : 12, bottom: 0, left: inline ? 4 : 16, right: inline ? 4 : 12 })
@@ -2449,6 +2495,25 @@ struct NativeChat {
           .onDragMove((event: DragEvent) => { this.trackAttachmentDrag(event); })
           .onDragLeave(() => { this.fileDropHint = null; })
           .onDrop((event: DragEvent) => { this.dropAttachments(event); })
+          .editMenuOptions({
+            onCreateMenu: (items: TextMenuItem[]): TextMenuItem[] => {
+              if (this.canReceiveAttachmentDrop() &&
+                !items.some((item: TextMenuItem): boolean => item.id.equals(TextMenuItemId.PASTE)) &&
+                hasNativeClipboardAttachments()) {
+                items.unshift({ content: this.label('粘贴', 'Paste'), id: TextMenuItemId.PASTE });
+              }
+              return items;
+            },
+            onMenuItemClick: (item: TextMenuItem, selection: TextRange): boolean =>
+              item.id.equals(TextMenuItemId.PASTE) && this.pasteComposerAttachments(selection),
+          })
+          .onKeyPreIme((event: KeyEvent): boolean => {
+            if (event.type !== KeyType.Down || event.keyCode !== KeyCode.KEYCODE_V ||
+              !event.getModifierKeyState?.(['Ctrl']) || event.getModifierKeyState?.(['Alt']) ||
+              event.getModifierKeyState?.(['Shift'])) return false;
+            return this.pasteComposerAttachments(this.composerSelection);
+          })
+          .onTextSelectionChange((start: number, end: number) => { this.composerSelection = { start, end }; })
           .onFocus(() => { this.compactToolsOpen = false; })
           .onChange((value: string) => { this.updateDraftText(value); })
       }
