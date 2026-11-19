@@ -7,8 +7,8 @@ private struct SessionGroup: Identifiable {
 }
 
 /// Exact 1:1 recreation of chat-demo/src/components/sider/Sider.tsx + SessionItem.tsx
-/// including multi-select batch pin/delete, time-grouped list, empty state,
-/// and direct settings opening (without jumping back to chat first!).
+/// including multi-select batch pin/delete, time-grouped list, bilingual labels,
+/// low-balance highlight, empty state, and direct settings opening (without jumping back to chat first!).
 struct SessionDrawerView: View {
     @ObservedObject var chatStore: ChatStore
     @ObservedObject var settings: SettingsStore
@@ -28,12 +28,14 @@ struct SessionDrawerView: View {
 
     private let topUpURL = URL(string: "https://platform.deepseek.com/top_up")!
 
+    private var loc: AppLocale { settings.locale }
+
     private var filteredSessions: [ChatSession] {
         let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !q.isEmpty else { return chatStore.sortedSessions }
         return chatStore.sortedSessions.filter { session in
             session.title.lowercased().contains(q) ||
-            session.messages.contains { $0.content.lowercased().contains(q) }
+            session.messages.contains { $0.fullTextContent.lowercased().contains(q) }
         }
     }
 
@@ -67,13 +69,14 @@ struct SessionDrawerView: View {
             }
         }
 
+        let isEn = loc == .enUS
         var groups: [SessionGroup] = []
-        if !pinned.isEmpty { groups.append(SessionGroup(id: "pinned", title: "置顶", sessions: pinned)) }
-        if !today.isEmpty { groups.append(SessionGroup(id: "today", title: "今天", sessions: today)) }
-        if !yesterday.isEmpty { groups.append(SessionGroup(id: "yesterday", title: "昨天", sessions: yesterday)) }
-        if !last7Days.isEmpty { groups.append(SessionGroup(id: "7days", title: "7 天内", sessions: last7Days)) }
-        if !last30Days.isEmpty { groups.append(SessionGroup(id: "30days", title: "30 天内", sessions: last30Days)) }
-        if !earlier.isEmpty { groups.append(SessionGroup(id: "earlier", title: "更早", sessions: earlier)) }
+        if !pinned.isEmpty { groups.append(SessionGroup(id: "pinned", title: isEn ? "Pinned" : "置顶", sessions: pinned)) }
+        if !today.isEmpty { groups.append(SessionGroup(id: "today", title: isEn ? "Today" : "今天", sessions: today)) }
+        if !yesterday.isEmpty { groups.append(SessionGroup(id: "yesterday", title: isEn ? "Yesterday" : "昨天", sessions: yesterday)) }
+        if !last7Days.isEmpty { groups.append(SessionGroup(id: "7days", title: isEn ? "Last 7 Days" : "7 天内", sessions: last7Days)) }
+        if !last30Days.isEmpty { groups.append(SessionGroup(id: "30days", title: isEn ? "Last 30 Days" : "30 天内", sessions: last30Days)) }
+        if !earlier.isEmpty { groups.append(SessionGroup(id: "earlier", title: isEn ? "Earlier" : "更早", sessions: earlier)) }
         return groups
     }
 
@@ -93,7 +96,7 @@ struct SessionDrawerView: View {
             // Top Header: Select Mode header OR Search bar (matching Sider.tsx)
             if selectMode {
                 HStack {
-                    Text("已选择 \(validSelectedIds.count) 个对话")
+                    Text(loc == .enUS ? "\(validSelectedIds.count) selected" : "已选择 \(validSelectedIds.count) 个对话")
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(Color.nuwaLabelPrimary)
                     Spacer()
@@ -117,7 +120,7 @@ struct SessionDrawerView: View {
                     Image(systemName: "magnifyingglass")
                         .font(.system(size: 14, weight: .medium))
                         .foregroundStyle(Color.nuwaLabelTertiary)
-                    TextField("搜索对话内容...", text: $searchText)
+                    TextField(L10n.t("searchPlaceholder", locale: loc), text: $searchText)
                         .font(.system(size: 14))
                         .foregroundStyle(Color.nuwaLabelPrimary)
                     if !searchText.isEmpty {
@@ -143,10 +146,10 @@ struct SessionDrawerView: View {
             if chatStore.sessions.isEmpty {
                 VStack(spacing: 10) {
                     Spacer()
-                    Text("暂无对话")
+                    Text(L10n.t("emptyTitle", locale: loc))
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(Color.nuwaLabelPrimary)
-                    Text("你与 Nuwa 的对话\n将展示在这里")
+                    Text(L10n.t("emptySubtitle", locale: loc))
                         .font(.system(size: 13))
                         .foregroundStyle(Color.nuwaLabelTertiary)
                         .multilineTextAlignment(.center)
@@ -154,7 +157,7 @@ struct SessionDrawerView: View {
                         chatStore.createNewSession(silentIfAlreadyNew: true)
                         onClose()
                     } label: {
-                        Text("开启新对话")
+                        Text(L10n.t("newChat", locale: loc))
                             .font(.system(size: 13, weight: .medium))
                             .foregroundStyle(Color.nuwaLabelPrimary)
                             .padding(.horizontal, 16)
@@ -169,7 +172,7 @@ struct SessionDrawerView: View {
             } else if filteredSessions.isEmpty {
                 VStack {
                     Spacer()
-                    Text("未找到匹配的对话")
+                    Text(L10n.t("emptySearch", locale: loc))
                         .font(.system(size: 13))
                         .foregroundStyle(Color.nuwaLabelTertiary)
                     Spacer()
@@ -207,7 +210,7 @@ struct SessionDrawerView: View {
                         HStack(spacing: 6) {
                             Image(systemName: allSelectedPinned ? "pin.slash" : "pin")
                                 .font(.system(size: 14, weight: .medium))
-                            Text(allSelectedPinned ? "取消置顶" : "置顶")
+                            Text(L10n.t(allSelectedPinned ? "unpin" : "pin", locale: loc))
                                 .font(.system(size: 14, weight: .medium))
                         }
                         .foregroundStyle(validSelectedIds.isEmpty ? Color.nuwaLabelTertiary : Color.nuwaLabelPrimary)
@@ -227,7 +230,7 @@ struct SessionDrawerView: View {
                         HStack(spacing: 6) {
                             Image(systemName: "trash")
                                 .font(.system(size: 14, weight: .medium))
-                            Text("删除")
+                            Text(L10n.t("delete", locale: loc))
                                 .font(.system(size: 14, weight: .medium))
                         }
                         .foregroundStyle(validSelectedIds.isEmpty ? Color.nuwaLabelTertiary : .red)
@@ -260,7 +263,7 @@ struct SessionDrawerView: View {
                             if let balance = settings.deepSeekBalanceText {
                                 Text(balance)
                                     .font(.system(size: 12, weight: .medium))
-                                    .foregroundStyle(Color.nuwaBrandText)
+                                    .foregroundStyle(settings.isBalanceLow ? .red : Color.nuwaBrandText)
                                     .lineLimit(1)
                                     .onTapGesture { openURL(topUpURL) }
                             }
@@ -289,13 +292,13 @@ struct SessionDrawerView: View {
                 exitSelectMode()
             }
         }
-        .alert("重命名", isPresented: Binding(
+        .alert(L10n.t("rename", locale: loc), isPresented: Binding(
             get: { renamingSession != nil },
             set: { if !$0 { renamingSession = nil } }
         )) {
-            TextField("会话标题", text: $renameDraft)
-            Button("取消", role: .cancel) { renamingSession = nil }
-            Button("确定") {
+            TextField(L10n.t("untitledChat", locale: loc), text: $renameDraft)
+            Button(L10n.t("cancel", locale: loc), role: .cancel) { renamingSession = nil }
+            Button(L10n.t("confirm", locale: loc)) {
                 if let target = renamingSession {
                     chatStore.renameSession(target.id, title: renameDraft)
                 }
@@ -306,8 +309,8 @@ struct SessionDrawerView: View {
             get: { deletingSession != nil },
             set: { if !$0 { deletingSession = nil } }
         )) {
-            Button("取消", role: .cancel) { deletingSession = nil }
-            Button("删除", role: .destructive) {
+            Button(L10n.t("cancel", locale: loc), role: .cancel) { deletingSession = nil }
+            Button(L10n.t("delete", locale: loc), role: .destructive) {
                 if let target = deletingSession {
                     chatStore.deleteSession(target.id)
                 }
@@ -317,8 +320,8 @@ struct SessionDrawerView: View {
             Text("删除后，该对话将不可恢复。确认删除吗？")
         }
         .alert("删除选中的 \(validSelectedIds.count) 个对话", isPresented: $showBatchDeleteConfirm) {
-            Button("取消", role: .cancel) {}
-            Button("删除", role: .destructive) {
+            Button(L10n.t("cancel", locale: loc), role: .cancel) {}
+            Button(L10n.t("delete", locale: loc), role: .destructive) {
                 chatStore.deleteSessions(validSelectedIds)
                 exitSelectMode()
             }
@@ -343,7 +346,7 @@ struct SessionDrawerView: View {
                     .foregroundStyle(Color.nuwaBrandText)
             }
 
-            Text(session.title.isEmpty ? "新对话" : session.title)
+            Text(session.title.isEmpty ? L10n.t("untitledChat", locale: loc) : session.title)
                 .font(.system(size: 14, weight: isActive ? .medium : .regular))
                 .foregroundStyle(Color.nuwaLabelPrimary)
                 .lineLimit(1)
@@ -376,23 +379,23 @@ struct SessionDrawerView: View {
                 Button {
                     enterSelectMode(initialId: session.id)
                 } label: {
-                    Label("多选", systemImage: "checkmark.circle")
+                    Label(L10n.t("multiSelect", locale: loc), systemImage: "checkmark.circle")
                 }
                 Button {
                     chatStore.togglePin(session.id)
                 } label: {
-                    Label(session.isPinned ? "取消置顶" : "置顶", systemImage: session.isPinned ? "pin.slash" : "pin")
+                    Label(L10n.t(session.isPinned ? "unpin" : "pin", locale: loc), systemImage: session.isPinned ? "pin.slash" : "pin")
                 }
                 Button {
                     renameDraft = session.title
                     renamingSession = session
                 } label: {
-                    Label("重命名", systemImage: "pencil")
+                    Label(L10n.t("rename", locale: loc), systemImage: "pencil")
                 }
                 Button(role: .destructive) {
                     deletingSession = session
                 } label: {
-                    Label("删除", systemImage: "trash")
+                    Label(L10n.t("delete", locale: loc), systemImage: "trash")
                 }
             }
         }

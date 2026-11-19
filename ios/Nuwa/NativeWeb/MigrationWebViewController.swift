@@ -1,15 +1,20 @@
 import UIKit
 import WebKit
 
-/// DeepSeek 官方历史一键迁移页，对齐 Android 端 MigrationWebViewActivity。
-/// 内嵌 WKWebView 打开 chat.deepseek.com，登录后自动点击「设置 → 数据管理 → 导出 → 下载」，
-/// 拦截 blob / HTTP 下载落盘为 pending_migration.zip，并把路径写入待导入标记。
+/// DeepSeek 官方历史一键迁移页，对齐 Android 端 MigrationWebViewActivity (v0.1.31)。
+/// 支持：
+/// - clearSession：清理 deepseek.com Cookies / LocalStorage / IndexedDB 切换账号
+/// - forceReExport：强制先点击「导出数据」重新生成最新导出包再下载
+/// - 顶部「换号」「自动导出」「关闭」操作栏
+/// - 拦截 blob / HTTP 下载落盘为 pending_migration.zip，并持久化待导入标记
 final class MigrationWebViewController: UIViewController, WKNavigationDelegate, WKScriptMessageHandler, WKDownloadDelegate {
     static let prefsName = "dsapp_migration"
     static let keyPendingPath = "pending_path"
     static let keyPendingName = "pending_name"
     private static let targetUrl = "https://chat.deepseek.com/"
 
+    var clearSessionOnStart = false
+    var forceReExport = false
     var onResult: ((_ filePath: String?, _ fileName: String?) -> Void)?
 
     private var webView: WKWebView?
@@ -17,6 +22,7 @@ final class MigrationWebViewController: UIViewController, WKNavigationDelegate, 
     private var loginPollTimer: Timer?
     private var completed = false
     private var autoExportTriggered = false
+    private var pendingStorageClear = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -30,15 +36,23 @@ final class MigrationWebViewController: UIViewController, WKNavigationDelegate, 
         guideLabel = UILabel()
         guideLabel.text = "请先登录 DeepSeek 账号，登录成功后将自动辅助导出"
         guideLabel.textColor = .white
-        guideLabel.font = .systemFont(ofSize: 12.5)
+        guideLabel.font = .systemFont(ofSize: 12)
         guideLabel.lineBreakMode = .byTruncatingTail
         guideLabel.translatesAutoresizingMaskIntoConstraints = false
         banner.addSubview(guideLabel)
 
+        let switchButton = UIButton(type: .system)
+        switchButton.setTitle("换号", for: .normal)
+        switchButton.setTitleColor(.white, for: .normal)
+        switchButton.titleLabel?.font = .systemFont(ofSize: 12.5, weight: .medium)
+        switchButton.translatesAutoresizingMaskIntoConstraints = false
+        switchButton.addTarget(self, action: #selector(switchAccountTapped), for: .touchUpInside)
+        banner.addSubview(switchButton)
+
         let autoButton = UIButton(type: .system)
         autoButton.setTitle("自动导出", for: .normal)
         autoButton.setTitleColor(.white, for: .normal)
-        autoButton.titleLabel?.font = .systemFont(ofSize: 12.5)
+        autoButton.titleLabel?.font = .systemFont(ofSize: 12.5, weight: .medium)
         autoButton.translatesAutoresizingMaskIntoConstraints = false
         autoButton.addTarget(self, action: #selector(autoExportTapped), for: .touchUpInside)
         banner.addSubview(autoButton)
@@ -46,14 +60,13 @@ final class MigrationWebViewController: UIViewController, WKNavigationDelegate, 
         let closeButton = UIButton(type: .system)
         closeButton.setTitle("关闭", for: .normal)
         closeButton.setTitleColor(.white, for: .normal)
-        closeButton.titleLabel?.font = .systemFont(ofSize: 12.5)
+        closeButton.titleLabel?.font = .systemFont(ofSize: 12.5, weight: .medium)
         closeButton.translatesAutoresizingMaskIntoConstraints = false
         closeButton.addTarget(self, action: #selector(closeTapped), for: .touchUpInside)
         banner.addSubview(closeButton)
 
         let config = WKWebViewConfiguration()
         config.userContentController.add(self, name: "iOSMigrationBridge")
-        // blob: 下载点击兜底拦截（decidePolicyFor 也会拦截，此处更早接管拿到文件名）
         let clickHook = WKUserScript(
             source: MigrationWebViewController.blobClickHookJs,
             injectionTime: .atDocumentStart,
@@ -72,17 +85,23 @@ final class MigrationWebViewController: UIViewController, WKNavigationDelegate, 
         view.addSubview(wv)
         webView = wv
 
+        switchButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        autoButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        closeButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+
         NSLayoutConstraint.activate([
             banner.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             banner.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             banner.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             banner.heightAnchor.constraint(equalToConstant: 44),
-            guideLabel.leadingAnchor.constraint(equalTo: banner.leadingAnchor, constant: 12),
+            guideLabel.leadingAnchor.constraint(equalTo: banner.leadingAnchor, constant: 10),
             guideLabel.centerYAnchor.constraint(equalTo: banner.centerYAnchor),
-            guideLabel.trailingAnchor.constraint(lessThanOrEqualTo: autoButton.leadingAnchor, constant: -8),
-            autoButton.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -4),
+            guideLabel.trailingAnchor.constraint(lessThanOrEqualTo: switchButton.leadingAnchor, constant: -6),
+            switchButton.trailingAnchor.constraint(equalTo: autoButton.leadingAnchor, constant: -8),
+            switchButton.centerYAnchor.constraint(equalTo: banner.centerYAnchor),
+            autoButton.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -8),
             autoButton.centerYAnchor.constraint(equalTo: banner.centerYAnchor),
-            closeButton.trailingAnchor.constraint(equalTo: banner.trailingAnchor, constant: -8),
+            closeButton.trailingAnchor.constraint(equalTo: banner.trailingAnchor, constant: -10),
             closeButton.centerYAnchor.constraint(equalTo: banner.centerYAnchor),
             wv.topAnchor.constraint(equalTo: banner.bottomAnchor),
             wv.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -90,9 +109,12 @@ final class MigrationWebViewController: UIViewController, WKNavigationDelegate, 
             wv.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
 
-        if let url = URL(string: Self.targetUrl) {
+        if clearSessionOnStart {
+            clearDeepSeekSessionAndReload()
+        } else if let url = URL(string: Self.targetUrl) {
             wv.load(URLRequest(url: url))
         }
+
         loginPollTimer = Timer.scheduledTimer(withTimeInterval: 1.2, repeats: true) { [weak self] _ in
             self?.checkLoginState()
         }
@@ -102,15 +124,43 @@ final class MigrationWebViewController: UIViewController, WKNavigationDelegate, 
         finish(filePath: nil, fileName: nil)
     }
 
+    @objc private func switchAccountTapped() {
+        clearDeepSeekSessionAndReload()
+    }
+
     @objc private func autoExportTapped() {
         guideLabel.text = "正在尝试自动点击导出，请稍候..."
         runAutoExportScript(manualTrigger: true)
     }
 
+    private func clearDeepSeekSessionAndReload() {
+        autoExportTriggered = false
+        pendingStorageClear = true
+        guideLabel.text = "正在清除当前登录态，请稍候..."
+
+        let dataTypes = WKWebsiteDataStore.allWebsiteDataTypes()
+        let store = WKWebsiteDataStore.default()
+        store.fetchDataRecords(ofTypes: dataTypes) { [weak self] records in
+            let deepSeekRecords = records.filter { $0.displayName.lowercased().contains("deepseek") }
+            store.removeData(ofTypes: dataTypes, for: deepSeekRecords) {
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.pendingStorageClear = false
+                    self.guideLabel.text = "已清除登录态，请登录目标 DeepSeek 账号"
+                    if let url = URL(string: Self.targetUrl) {
+                        var req = URLRequest(url: url)
+                        req.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+                        self.webView?.load(req)
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: - 登录态检测（对齐 Android checkLoginState）
 
     private func checkLoginState() {
-        guard webView != nil, !autoExportTriggered, !completed else { return }
+        guard webView != nil, !autoExportTriggered, !completed, !pendingStorageClear else { return }
         let js = """
         (function(){
             if (location.hostname !== 'chat.deepseek.com') return;
@@ -126,18 +176,20 @@ final class MigrationWebViewController: UIViewController, WKNavigationDelegate, 
         webView?.evaluateJavaScript(js, completionHandler: nil)
     }
 
-    // MARK: - 自动导出脚本（对齐 Android runAutoExportScript）
+    // MARK: - 自动导出脚本（对齐 Android runAutoExportScript + forceReExport）
 
     private func runAutoExportScript(manualTrigger: Bool) {
         guard webView != nil, !completed else { return }
         let resetJs = manualTrigger
             ? "if (window.__dsappAutoExportTimer) { clearInterval(window.__dsappAutoExportTimer); window.__dsappAutoExportTimer = null; } window.__dsappAutoExportRunning = false;"
             : ""
+        let forceFlag = forceReExport ? "true" : "false"
         let js = """
         (function(){
         \(resetJs)
         if (window.__dsappAutoExportRunning) return;
         window.__dsappAutoExportRunning = true;
+        var forceReExport = \(forceFlag);
         var bridge = function(payload) {
             try { window.webkit.messageHandlers.iOSMigrationBridge.postMessage(payload); } catch (e) {}
         };
@@ -205,13 +257,14 @@ final class MigrationWebViewController: UIViewController, WKNavigationDelegate, 
         };
         var ticks = 0;
         var exportClicked = false;
+        var exportClickedTick = 0;
         var lastSection = '';
         var lastAction = '';
         var lastActionTick = -10;
         var timer = setInterval(function() {
             try {
                 ticks++;
-                var maxTicks = exportClicked ? 260 : 30;
+                var maxTicks = exportClicked ? 260 : 35;
                 if (ticks > maxTicks) {
                     clearInterval(timer);
                     window.__dsappAutoExportTimer = null;
@@ -225,18 +278,32 @@ final class MigrationWebViewController: UIViewController, WKNavigationDelegate, 
                     return;
                 }
                 if (lastSection === 'data' || findVisibleByText([/导出所有历史对话|Export all/i], true)) {
-                    var dlBtn = findVisibleByText([/^(下载|Download)$/i], true);
-                    if (dlBtn && triggerClick(dlBtn)) {
-                        bridge({event:'onStep', msg:'Clicked Download'});
-                        clearInterval(timer);
-                        window.__dsappAutoExportTimer = null;
-                        window.__dsappAutoExportRunning = false;
-                        return;
+                    if (!exportClicked && forceReExport) {
+                        var freshExpBtn = findVisibleByText([/^(重新导出|导出数据|导出|Export Data|Export)$/i], true);
+                        if (freshExpBtn && triggerClick(freshExpBtn)) {
+                            exportClicked = true;
+                            exportClickedTick = ticks;
+                            bridge({event:'onStep', msg:'Clicked Fresh Export'});
+                            bridge({event:'onWaitingExport'});
+                            return;
+                        }
+                    }
+                    var canDownloadNow = !forceReExport || (exportClicked && ticks - exportClickedTick >= 3);
+                    if (canDownloadNow) {
+                        var dlBtn = findVisibleByText([/^(下载|Download)$/i], true);
+                        if (dlBtn && triggerClick(dlBtn)) {
+                            bridge({event:'onStep', msg:'Clicked Download'});
+                            clearInterval(timer);
+                            window.__dsappAutoExportTimer = null;
+                            window.__dsappAutoExportRunning = false;
+                            return;
+                        }
                     }
                     if (!exportClicked) {
                         var expBtn = findVisibleByText([/^(导出数据|导出|Export Data|Export)$/i], true);
                         if (expBtn && triggerClick(expBtn)) {
                             exportClicked = true;
+                            exportClickedTick = ticks;
                             bridge({event:'onStep', msg:'Clicked Export'});
                             bridge({event:'onWaitingExport'});
                             return;
@@ -286,7 +353,6 @@ final class MigrationWebViewController: UIViewController, WKNavigationDelegate, 
 
     // MARK: - blob 下载接管
 
-    /// document 起始注入：拦截 a[download] 的 blob 点击，直接 fetch 转 base64 回传。
     private static let blobClickHookJs = """
     (function(){
         if (window.__dsappBlobHookInstalled) return;
@@ -318,7 +384,6 @@ final class MigrationWebViewController: UIViewController, WKNavigationDelegate, 
     })();
     """
 
-    /// decidePolicyFor 兜底：WKWebView 对 blob: 导航也可能走到这里。
     private func fetchBlobUrl(_ urlString: String, suggestedName: String) {
         guard let encoded = urlString.addingPercentEncoding(withAllowedCharacters: .alphanumerics) else { return }
         let js = """
@@ -383,12 +448,12 @@ final class MigrationWebViewController: UIViewController, WKNavigationDelegate, 
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        if !autoExportTriggered {
+        if !autoExportTriggered && !pendingStorageClear {
             checkLoginState()
         }
     }
 
-    // MARK: - WKDownloadDelegate（HTTP/HTTPS 附件落盘）
+    // MARK: - WKDownloadDelegate
 
     func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String) async -> URL? {
         let dest = FileManager.default.temporaryDirectory.appendingPathComponent("pending_migration.zip")
@@ -397,7 +462,6 @@ final class MigrationWebViewController: UIViewController, WKNavigationDelegate, 
     }
 
     func downloadDidFinish(_ download: WKDownload) {
-        // WKDownload 不暴露目标 URL；decideDestinationUsing 里返回固定路径。
         let dest = FileManager.default.temporaryDirectory.appendingPathComponent("pending_migration.zip")
         finishWithFile(dest, fileName: "deepseek_data.zip")
     }
@@ -454,7 +518,7 @@ final class MigrationWebViewController: UIViewController, WKNavigationDelegate, 
         }
     }
 
-    // MARK: - 收尾（对齐 Android finishWithFile：持久化待导入标记）
+    // MARK: - 收尾
 
     private func finishWithFile(_ file: URL, fileName: String) {
         if completed { return }

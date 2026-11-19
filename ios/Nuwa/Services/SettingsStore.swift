@@ -43,14 +43,19 @@ final class SettingsStore: ObservableObject {
         static let apiBaseUrl = "nuwa.apiBaseUrl"
         static let apiModel = "nuwa.apiModel"
         static let migrationPromptHandled = "nuwa.migrationPromptHandled"
+        static let oneClickMigrationUsed = "nuwa.oneClickMigrationUsed"
         static let thinkingEnabled = "nuwa.thinkingEnabled"
         static let searchEnabled = "nuwa.searchEnabled"
         static let ttsMuted = "nuwa.ttsMuted"
         static let ttsVoice = "nuwa.ttsVoice"
+        static let speechEngine = "nuwa.speechEngine"
+        static let icloudAutoBackup = "nuwa.icloudAutoBackup"
+        static let location = "nuwa.location"
         static let locale = "nuwa.locale"
         static let themePreference = "nuwa.themePreference"
         static let chatFontSize = "nuwa.chatFontSize"
         static let systemPrompt = "nuwa.systemPrompt"
+        static let cachedBalance = "nuwa.cachedBalance"
     }
 
     static let fontSizeOptions: [Double] = [12, 14, 16, 18, 20, 22]
@@ -87,6 +92,10 @@ final class SettingsStore: ObservableObject {
         didSet { UserDefaults.standard.set(migrationPromptHandled, forKey: Keys.migrationPromptHandled) }
     }
 
+    @Published var hasUsedOneClickMigration: Bool {
+        didSet { UserDefaults.standard.set(hasUsedOneClickMigration, forKey: Keys.oneClickMigrationUsed) }
+    }
+
     @Published var showMigrationPrompt: Bool = false
 
     @Published var thinkingEnabled: Bool {
@@ -105,6 +114,24 @@ final class SettingsStore: ObservableObject {
         didSet { UserDefaults.standard.set(ttsVoice.rawValue, forKey: Keys.ttsVoice) }
     }
 
+    @Published var speechEngine: SpeechEngineOption {
+        didSet { UserDefaults.standard.set(speechEngine.rawValue, forKey: Keys.speechEngine) }
+    }
+
+    @Published var icloudAutoBackup: Bool {
+        didSet { UserDefaults.standard.set(icloudAutoBackup, forKey: Keys.icloudAutoBackup) }
+    }
+
+    @Published var location: UserLocation? {
+        didSet {
+            if let location, let data = try? JSONEncoder().encode(location) {
+                UserDefaults.standard.set(data, forKey: Keys.location)
+            } else {
+                UserDefaults.standard.removeObject(forKey: Keys.location)
+            }
+        }
+    }
+
     @Published var locale: AppLocale {
         didSet { UserDefaults.standard.set(locale.rawValue, forKey: Keys.locale) }
     }
@@ -121,8 +148,10 @@ final class SettingsStore: ObservableObject {
         didSet { UserDefaults.standard.set(systemPrompt, forKey: Keys.systemPrompt) }
     }
 
-    @Published var deepSeekBalanceText: String?
+    @Published var accountBalance: AccountBalance?
     @Published var isLoadingBalance = false
+
+    private var lastBalanceRefreshAt: Date?
 
     init() {
         let defaults = UserDefaults.standard
@@ -133,24 +162,45 @@ final class SettingsStore: ObservableObject {
         dshAccountLabel = defaults.string(forKey: Keys.dshAccountLabel) ?? ""
         authMode = AuthMode(rawValue: defaults.string(forKey: Keys.authMode) ?? "")
             ?? (!loadedToken.isEmpty ? .deepseekAccount : .apiKey)
-        apiProtocol = ApiProtocol(rawValue: defaults.string(forKey: Keys.apiProtocol) ?? "") ?? .openai
+        // Default to DeepSeek Anthropic protocol + deepseek-flash matching Android v0.1.31
+        apiProtocol = ApiProtocol(rawValue: defaults.string(forKey: Keys.apiProtocol) ?? "") ?? .anthropic
         apiBaseUrl = defaults.string(forKey: Keys.apiBaseUrl) ?? "https://api.deepseek.com"
-        apiModel = defaults.string(forKey: Keys.apiModel) ?? "deepseek-chat"
+        apiModel = defaults.string(forKey: Keys.apiModel) ?? "deepseek-flash"
         migrationPromptHandled = defaults.bool(forKey: Keys.migrationPromptHandled)
+        hasUsedOneClickMigration = defaults.bool(forKey: Keys.oneClickMigrationUsed)
         thinkingEnabled = defaults.object(forKey: Keys.thinkingEnabled) as? Bool ?? false
         searchEnabled = defaults.object(forKey: Keys.searchEnabled) as? Bool ?? false
-        ttsMuted = defaults.object(forKey: Keys.ttsMuted) as? Bool ?? false
+        ttsMuted = defaults.object(forKey: Keys.ttsMuted) as? Bool ?? true
         ttsVoice = TtsVoiceOption(rawValue: defaults.string(forKey: Keys.ttsVoice) ?? "") ?? .stella
+        speechEngine = SpeechEngineOption(rawValue: defaults.string(forKey: Keys.speechEngine) ?? "") ?? .auto
+        icloudAutoBackup = defaults.bool(forKey: Keys.icloudAutoBackup)
+        if let locData = defaults.data(forKey: Keys.location),
+           let decodedLoc = try? JSONDecoder().decode(UserLocation.self, from: locData) {
+            location = decodedLoc
+        } else {
+            location = nil
+        }
         locale = AppLocale(rawValue: defaults.string(forKey: Keys.locale) ?? "") ?? .zhCN
         themePreference = ThemePreference(rawValue: defaults.string(forKey: Keys.themePreference) ?? "") ?? .system
         let storedSize = defaults.double(forKey: Keys.chatFontSize)
         chatFontSize = storedSize >= 12 && storedSize <= 22 ? storedSize : 16
         systemPrompt = defaults.string(forKey: Keys.systemPrompt) ?? ""
 
-        // Show migration prompt automatically on entry if authenticated and not yet handled
+        if let balData = defaults.data(forKey: Keys.cachedBalance),
+           let cached = try? JSONDecoder().decode(AccountBalance.self, from: balData) {
+            accountBalance = cached
+        }
+
         if hasActiveCredential && !migrationPromptHandled {
             showMigrationPrompt = true
         }
+    }
+
+    var deepSeekBalanceText: String? { accountBalance?.formatted }
+
+    var isBalanceLow: Bool {
+        guard let bal = accountBalance else { return false }
+        return !bal.isAvailable || (Double(bal.totalBalance) ?? 0) <= 0
     }
 
     var isUsingDeepSeekAccount: Bool {
@@ -178,7 +228,7 @@ final class SettingsStore: ObservableObject {
     }
 
     var effectiveProtocol: ApiProtocol {
-        isUsingDeepSeekAccount ? .openai : apiProtocol
+        isUsingDeepSeekAccount ? .anthropic : apiProtocol
     }
 
     var isDeepSeekOfficial: Bool {
@@ -187,13 +237,13 @@ final class SettingsStore: ObservableObject {
 
     var effectiveModel: String {
         if isUsingDeepSeekAccount {
-            return thinkingEnabled ? "deepseek-reasoner" : "deepseek-chat"
+            return "deepseek-flash"
         }
         let trimmed = apiModel.trimmingCharacters(in: .whitespacesAndNewlines)
-        if thinkingEnabled && isDeepSeekOfficial && (trimmed.isEmpty || trimmed == "deepseek-chat") {
+        if effectiveProtocol == .openai && thinkingEnabled && isDeepSeekOfficial && (trimmed.isEmpty || trimmed == "deepseek-chat") {
             return "deepseek-reasoner"
         }
-        return trimmed.isEmpty ? "deepseek-chat" : trimmed
+        return trimmed.isEmpty ? (effectiveProtocol == .anthropic ? "deepseek-flash" : "deepseek-chat") : trimmed
     }
 
     var profileDisplayName: String {
@@ -208,7 +258,7 @@ final class SettingsStore: ObservableObject {
         if !migrationPromptHandled {
             showMigrationPrompt = true
         }
-        Task { await refreshBalance() }
+        Task { await refreshBalance(force: true) }
     }
 
     func signInDeepSeekAccount(token: String, label: String?) {
@@ -224,7 +274,8 @@ final class SettingsStore: ObservableObject {
         if !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             authMode = .apiKey
         }
-        deepSeekBalanceText = nil
+        accountBalance = nil
+        UserDefaults.standard.removeObject(forKey: Keys.cachedBalance)
     }
 
     func signOutAll() {
@@ -232,7 +283,8 @@ final class SettingsStore: ObservableObject {
         dshAccountLabel = ""
         apiKey = ""
         authMode = .apiKey
-        deepSeekBalanceText = nil
+        accountBalance = nil
+        UserDefaults.standard.removeObject(forKey: Keys.cachedBalance)
     }
 
     func dismissMigrationPrompt() {
@@ -247,20 +299,33 @@ final class SettingsStore: ObservableObject {
         authMode = .apiKey
     }
 
-    func refreshBalance() async {
-        guard isDeepSeekOfficial, hasActiveCredential else {
-            deepSeekBalanceText = nil
+    func refreshBalance(force: Bool = false) async {
+        guard hasActiveCredential else {
+            accountBalance = nil
+            return
+        }
+        if !force, let last = lastBalanceRefreshAt, Date().timeIntervalSince(last) < 15 {
             return
         }
         isLoadingBalance = true
         defer { isLoadingBalance = false }
-        do {
-            deepSeekBalanceText = try await AIClient.fetchDeepSeekBalance(
-                baseUrl: effectiveBaseUrl,
-                apiKey: activeSecret
-            )
-        } catch {
-            deepSeekBalanceText = nil
+        lastBalanceRefreshAt = Date()
+        let result = await AIClient.fetchBalance(
+            secret: activeSecret,
+            useAccount: isUsingDeepSeekAccount,
+            baseUrl: effectiveBaseUrl,
+            locale: locale
+        )
+        accountBalance = result
+        if let result, let data = try? JSONEncoder().encode(result) {
+            UserDefaults.standard.set(data, forKey: Keys.cachedBalance)
+        }
+    }
+
+    func schedulePostReplyBalanceRefresh() {
+        Task {
+            try? await Task.sleep(for: .milliseconds(2500))
+            await refreshBalance(force: true)
         }
     }
 }

@@ -8,7 +8,8 @@ private enum OnboardingStep {
 }
 
 /// Exact 1:1 recreation of chat-demo/src/components/onboarding/OnboardingScreen.tsx
-/// upgraded with native iOS 26 Liquid Glass pills and native DeepSeek OAuth sheet.
+/// including live API Key verification (`verifyApiKey`), DeepSeek Anthropic defaults (`deepseek-flash`),
+/// native DeepSeek OAuth PKCE login (`PlatformAuthViewController`), and Liquid Glass controls.
 struct OnboardingScreenView: View {
     @ObservedObject var settings: SettingsStore
     @ObservedObject var chatStore: ChatStore
@@ -16,6 +17,7 @@ struct OnboardingScreenView: View {
 
     @State private var step: OnboardingStep = .home
     @State private var keyDraft = ""
+    @State private var verifying = false
     @State private var errorText: String?
     @State private var showDeepSeekAuth = false
 
@@ -27,7 +29,6 @@ struct OnboardingScreenView: View {
             Color.nuwaBgBase.ignoresSafeArea()
 
             VStack(spacing: 0) {
-                // Top bar: Back (on sub-views) + Help
                 HStack {
                     if step == .home {
                         Spacer().frame(width: 60)
@@ -71,7 +72,6 @@ struct OnboardingScreenView: View {
 
                 Spacer()
 
-                // Center hero: Nuwa Logo + Title
                 VStack(spacing: 16) {
                     Image("NuwaLogo")
                         .resizable()
@@ -87,7 +87,6 @@ struct OnboardingScreenView: View {
 
                 Spacer()
 
-                // Bottom action group
                 VStack(spacing: 12) {
                     if step == .home {
                         Button {
@@ -103,10 +102,12 @@ struct OnboardingScreenView: View {
                         .buttonStyle(.plain)
 
                         Button {
-                            settings.apiProtocol = .openai
+                            // Exact match to OnboardingScreen.tsx lines 37-42
+                            settings.apiProtocol = .anthropic
                             settings.apiBaseUrl = "https://api.deepseek.com"
-                            settings.apiModel = "deepseek-chat"
+                            settings.apiModel = "deepseek-flash"
                             keyDraft = settings.apiKey
+                            errorText = nil
                             withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
                                 step = .deepseekKey
                             }
@@ -122,6 +123,7 @@ struct OnboardingScreenView: View {
 
                         Button {
                             keyDraft = settings.apiKey
+                            errorText = nil
                             withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
                                 step = .thirdParty
                             }
@@ -179,22 +181,27 @@ struct OnboardingScreenView: View {
                             }
 
                             Button {
-                                submitApiKey()
+                                Task { await verifyAndContinue() }
                             } label: {
-                                Text("验证并继续")
-                                    .font(.system(size: 16, weight: .semibold))
-                                    .foregroundStyle(.white)
-                                    .frame(maxWidth: .infinity)
-                                    .frame(height: 50)
-                                    .background(
-                                        keyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                            ? Color.nuwaBrand.opacity(0.4)
-                                            : Color.nuwaBrand,
-                                        in: Capsule()
-                                    )
+                                HStack(spacing: 8) {
+                                    if verifying {
+                                        ProgressView().tint(.white).controlSize(.small)
+                                    }
+                                    Text(verifying ? "正在验证..." : "验证并继续")
+                                        .font(.system(size: 16, weight: .semibold))
+                                }
+                                .foregroundStyle(.white)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 50)
+                                .background(
+                                    (verifying || keyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                        ? Color.nuwaBrand.opacity(0.4)
+                                        : Color.nuwaBrand,
+                                    in: Capsule()
+                                )
                             }
                             .buttonStyle(.plain)
-                            .disabled(keyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            .disabled(verifying || keyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
                             if step == .deepseekKey {
                                 Button {
@@ -256,15 +263,27 @@ struct OnboardingScreenView: View {
         }
     }
 
-    private func submitApiKey() {
+    private func verifyAndContinue() async {
         let trimmed = keyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             errorText = "请输入 API Key"
             return
         }
-        settings.apiKey = trimmed
-        settings.authMode = .apiKey
-        settings.completeAuthentication()
+        verifying = true
+        errorText = nil
+        defer { verifying = false }
+        do {
+            try await AIClient.verifyApiKey(
+                apiKey: trimmed,
+                apiProtocol: settings.apiProtocol,
+                baseUrl: settings.apiBaseUrl
+            )
+            settings.apiKey = trimmed
+            settings.authMode = .apiKey
+            settings.completeAuthentication()
+        } catch {
+            errorText = "校验失败：\(error.localizedDescription)"
+        }
     }
 }
 

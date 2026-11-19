@@ -16,7 +16,12 @@ enum DeepSeekZipError: LocalizedError {
 }
 
 /// Pure Foundation + Apple Compression ZIP reader for DeepSeek export archives (`deepseek_data-*.zip`).
-/// Supports both Nuwa/DeepSeek v2 (`chat_sessions/<id>.json`) and legacy `conversations.json`.
+/// 1:1 port of chat-demo/src/services/chat/history/importArchive.ts + toLocal.ts:
+/// - Preserves full branching trees (rootMessageId / parentId / selectedChildId / current_message_id)
+/// - Parses all fragments: REQUEST, FILE, THINK (with elapsed_secs), RESPONSE, TEMPLATE_RESPONSE,
+///   TOOL_SEARCH, TOOL_OPEN, TOOL_FIND, READ_LINK
+/// - Extracts embedded images from `chat_sessions/<id>_files/...` into AttachmentStore with MIME detection
+/// - Supports legacy `conversations.json` archives as fallback
 enum DeepSeekZipImporter {
     struct ZipEntry {
         let path: String
@@ -28,13 +33,18 @@ enum DeepSeekZipImporter {
 
     static func parseZipData(_ data: Data) throws -> [ChatSession] {
         let entries = try readCentralDirectory(from: data)
+        var entriesByNFCPath: [String: ZipEntry] = [:]
+        for entry in entries {
+            entriesByNFCPath[entry.path.precomposedStringWithCanonicalMapping] = entry
+        }
+
         var sessions: [ChatSession] = []
 
         for entry in entries {
             let lower = entry.path.lowercased()
-            if lower.hasPrefix("chat_sessions/") && lower.hasSuffix(".json") {
+            if lower.hasPrefix("chat_sessions/") && lower.hasSuffix(".json") && !lower.contains("_files/") {
                 if let entryData = try? extractEntry(entry, from: data),
-                   let session = parseV2SessionFile(entryData) {
+                   let session = parseV2SessionFile(entryData, zipData: data, entriesByPath: entriesByNFCPath) {
                     sessions.append(session)
                 }
             } else if lower == "conversations.json" || lower.hasSuffix("/conversations.json") {
@@ -56,7 +66,6 @@ enum DeepSeekZipImporter {
         let count = data.count
         guard count >= 22 else { throw DeepSeekZipError.invalidArchive }
 
-        // Locate End of Central Directory (0x06054b50)
         let searchLimit = max(0, count - 65557)
         var eocdOffset = -1
         for i in stride(from: count - 22, through: searchLimit, by: -1) {
@@ -124,7 +133,7 @@ enum DeepSeekZipImporter {
 
     private static func inflateRawDeflate(_ compressed: Data, expectedSize: Int) throws -> Data {
         var capacity = max(expectedSize + 1024, compressed.count * 4)
-        for _ in 0..<4 {
+        for _ in 0..<5 {
             var output = Data(count: capacity)
             let decodedSize = output.withUnsafeMutableBytes { dstPtr in
                 compressed.withUnsafeBytes { srcPtr -> Int in
@@ -161,7 +170,7 @@ enum DeepSeekZipImporter {
             | (UInt32(data[offset + 3]) << 24)
     }
 
-    // MARK: - DeepSeek Session Parsers
+    // MARK: - V2 DeepSeek Session Parser (Full Branching Tree + All Fragments + Images)
 
     private static let isoFormatterWithFraction: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
@@ -182,71 +191,362 @@ enum DeepSeekZipImporter {
             ?? Date()
     }
 
-    private static func parseV2SessionFile(_ data: Data) -> ChatSession? {
+    private static func isWebUrl(_ value: String?) -> Bool {
+        guard let value, let url = URL(string: value), let scheme = url.scheme?.lowercased() else {
+            return false
+        }
+        return scheme == "http" || scheme == "https"
+    }
+
+    private static func detectImageMime(_ data: Data) -> String {
+        guard data.count >= 12 else { return "" }
+        let b = [UInt8](data.prefix(12))
+        if b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF { return "image/jpeg" }
+        if b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47 { return "image/png" }
+        let ascii = String(bytes: b, encoding: .ascii) ?? ""
+        if ascii.hasPrefix("GIF87a") || ascii.hasPrefix("GIF89a") { return "image/gif" }
+        if ascii.hasPrefix("RIFF") && ascii.dropFirst(8).hasPrefix("WEBP") { return "image/webp" }
+        if b[0] == 0x42 && b[1] == 0x4D { return "image/bmp" }
+        if (b[0] == 0x49 && b[1] == 0x49 && b[2] == 0x2A && b[3] == 0x00)
+            || (b[0] == 0x4D && b[1] == 0x4D && b[2] == 0x00 && b[3] == 0x2A) {
+            return "image/tiff"
+        }
+        return ""
+    }
+
+    private static func saveExtractedImage(
+        fileId: String,
+        fileName: String,
+        exportPath: String,
+        zipData: Data,
+        entriesByPath: [String: ZipEntry]
+    ) -> (localFileName: String, mimeType: String)? {
+        let normalizedPath = exportPath.precomposedStringWithCanonicalMapping
+        guard let entry = entriesByPath[normalizedPath],
+              let imgData = try? extractEntry(entry, from: zipData),
+              !imgData.isEmpty
+        else { return nil }
+
+        let mime = detectImageMime(imgData)
+        let ext: String
+        switch mime {
+        case "image/png": ext = "png"
+        case "image/gif": ext = "gif"
+        case "image/webp": ext = "webp"
+        case "image/jpeg": ext = "jpg"
+        default:
+            let origExt = AttachmentStore.fileExtension(of: fileName)
+            ext = origExt.isEmpty ? "jpg" : origExt
+        }
+        let localName = "\(fileId).\(ext)"
+        let dest = AttachmentStore.filesDirectory.appendingPathComponent(localName)
+        if !FileManager.default.fileExists(atPath: dest.path) {
+            try? imgData.write(to: dest, options: [.atomic])
+        }
+        return (localName, mime.isEmpty ? AttachmentStore.inferMimeType(fileName: fileName, isImage: true) : mime)
+    }
+
+    private static func parseV2SessionFile(
+        _ data: Data,
+        zipData: Data,
+        entriesByPath: [String: ZipEntry]
+    ) -> ChatSession? {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let rawMessages = obj["messages"] as? [[String: Any]]
         else { return nil }
 
-        let title = (obj["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = (obj["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let createdAt = parseDate(obj["inserted_at"] as? String)
         let updatedAt = parseDate(obj["updated_at"] as? String)
         let externalId = obj["id"] as? String
+        let isPinned = (obj["pinned"] as? Bool) ?? false
 
-        // Build active path from current_message_id back to root if available
-        let byId = Dictionary(uniqueKeysWithValues: rawMessages.compactMap { msg -> (Int, [String: Any])? in
-            guard let id = msg["id"] as? Int else { return nil }
-            return (id, msg)
-        })
+        // Sort ascending by numeric id so parent_id always appears before child (1:1 toLocal.ts buildTree)
+        let sortedRaw = rawMessages.sorted { ($0["id"] as? Int ?? 0) < ($1["id"] as? Int ?? 0) }
+        var uuidByNumId: [Int: UUID] = [:]
+        var indexByNumId: [Int: Int] = [:]
+        var messages: [ChatMessage] = []
 
-        var ordered: [[String: Any]] = []
-        if let currentId = obj["current_message_id"] as? Int, byId[currentId] != nil {
-            var cursor: Int? = currentId
-            var visited = Set<Int>()
-            while let id = cursor, let msg = byId[id], !visited.contains(id) {
-                visited.insert(id)
-                ordered.append(msg)
-                cursor = msg["parent_id"] as? Int
+        for raw in sortedRaw {
+            guard let numId = raw["id"] as? Int else { continue }
+            let localId = UUID()
+            uuidByNumId[numId] = localId
+            let parentNum = raw["parent_id"] as? Int
+            let parentUUID = parentNum.flatMap { uuidByNumId[$0] }
+            let insertedAt = parseDate(raw["inserted_at"] as? String)
+            let roleStr = (raw["role"] as? String ?? "").uppercased()
+            let fragments = raw["fragments"] as? [[String: Any]] ?? []
+
+            let built: ChatMessage
+            if roleStr == "USER" {
+                var contentParts: [String] = []
+                var files: [FileAttachment] = []
+                for frag in fragments {
+                    let type = (frag["type"] as? String ?? "").uppercased()
+                    if type == "REQUEST", let text = frag["content"] as? String, !text.isEmpty {
+                        contentParts.append(text)
+                    } else if type == "FILE", let rawFiles = frag["files"] as? [[String: Any]] {
+                        for rf in rawFiles {
+                            let fid = (rf["id"] as? String) ?? UUID().uuidString
+                            let fname = (rf["file_name"] as? String) ?? "file"
+                            let fsize = (rf["file_size"] as? Int) ?? 0
+                            let isImg = (rf["is_image"] as? Bool) ?? AttachmentStore.isImageName(fname)
+                            var localName: String? = nil
+                            var mime = ""
+                            if isImg, let exportPath = rf["export_path"] as? String, !exportPath.isEmpty {
+                                if let saved = saveExtractedImage(
+                                    fileId: fid,
+                                    fileName: fname,
+                                    exportPath: exportPath,
+                                    zipData: zipData,
+                                    entriesByPath: entriesByPath
+                                ) {
+                                    localName = saved.localFileName
+                                    mime = saved.mimeType
+                                }
+                            }
+                            files.append(
+                                FileAttachment(
+                                    id: fid,
+                                    serverId: nil,
+                                    name: fname,
+                                    size: fsize,
+                                    isImage: isImg,
+                                    mimeType: mime,
+                                    localFileName: localName
+                                )
+                            )
+                        }
+                    }
+                }
+                built = ChatMessage(
+                    id: localId,
+                    parentId: parentUUID,
+                    role: .user,
+                    content: contentParts.joined(separator: "\n"),
+                    files: files,
+                    status: .done,
+                    createdAt: insertedAt
+                )
+            } else {
+                let rawStatus = (raw["status"] as? String ?? "FINISHED").uppercased()
+                let refused = rawStatus == "CONTENT_FILTER"
+                let status: ReplyStatus
+                switch rawStatus {
+                case "FAILED", "CONTEXT_LENGTH_EXCEEDED", "TIMEOUT": status = .error
+                case "INCOMPLETE", "WIP": status = .stopped
+                default: status = .done
+                }
+
+                let hasDeepSearch = fragments.contains {
+                    let t = ($0["type"] as? String ?? "").uppercased()
+                    return t == "TOOL_OPEN" || t == "TOOL_FIND"
+                }
+                let searchKind = hasDeepSearch ? "deep_search" : "search"
+
+                var blocks: [ReplyBlock] = []
+                var textParts: [String] = []
+                var thinkParts: [String] = []
+                var elapsedTotal: Double?
+
+                for (fIdx, frag) in fragments.enumerated() {
+                    let type = (frag["type"] as? String ?? "").uppercased()
+                    let toolId = "history-\(numId)-\(fIdx)"
+                    switch type {
+                    case "RESPONSE", "TEMPLATE_RESPONSE":
+                        let text = frag["content"] as? String ?? ""
+                        let isTemplate = type == "TEMPLATE_RESPONSE"
+                        if !text.isEmpty && (!refused || isTemplate) {
+                            textParts.append(text)
+                            blocks.append(.text(id: UUID(), text: text, citations: [], isTemplate: isTemplate))
+                        }
+
+                    case "THINK":
+                        let text = frag["content"] as? String ?? ""
+                        if !text.isEmpty && !refused {
+                            let secs = frag["elapsed_secs"] as? Double
+                            if let secs { elapsedTotal = secs }
+                            thinkParts.append(text)
+                            blocks.append(.thinking(id: UUID(), text: text, signature: nil, startedAt: nil, endedAt: nil, elapsedSeconds: secs))
+                        }
+
+                    case "TOOL_SEARCH":
+                        let queries = frag["queries"] as? [String] ?? []
+                        let fragStatus = (frag["status"] as? String ?? "FINISHED").uppercased()
+                        blocks.append(
+                            .serverToolUse(
+                                id: UUID(),
+                                info: ServerToolUseInfo(
+                                    id: toolId,
+                                    name: "deepseek_web_search",
+                                    kind: searchKind,
+                                    action: "search",
+                                    queries: queries,
+                                    url: nil,
+                                    pattern: nil
+                                )
+                            )
+                        )
+                        if fragStatus != "WIP" {
+                            if fragStatus == "FAILED" {
+                                blocks.append(.webSearchResult(id: UUID(), toolUseId: toolId, kind: searchKind, items: [], errorCode: "unavailable"))
+                            } else {
+                                let rawResults = frag["results"] as? [[String: Any]] ?? []
+                                let items: [WebSearchResultItem] = rawResults.compactMap { r in
+                                    guard let url = r["url"] as? String, isWebUrl(url),
+                                          let title = r["title"] as? String
+                                    else { return nil }
+                                    return WebSearchResultItem(
+                                        url: url,
+                                        title: title,
+                                        snippet: r["snippet"] as? String,
+                                        siteName: r["site_name"] as? String,
+                                        siteIcon: (r["site_icon"] as? String).flatMap { isWebUrl($0) ? $0 : nil },
+                                        pageAge: r["published_at"] as? String
+                                    )
+                                }
+                                blocks.append(.webSearchResult(id: UUID(), toolUseId: toolId, kind: searchKind, items: items, errorCode: nil))
+                            }
+                        }
+
+                    case "TOOL_OPEN":
+                        guard let url = frag["url"] as? String, isWebUrl(url) else { break }
+                        let fragStatus = (frag["status"] as? String ?? "FINISHED").uppercased()
+                        blocks.append(
+                            .serverToolUse(
+                                id: UUID(),
+                                info: ServerToolUseInfo(
+                                    id: toolId,
+                                    name: "deepseek_web_search",
+                                    kind: "deep_search",
+                                    action: "open_page",
+                                    queries: [],
+                                    url: url,
+                                    pattern: nil
+                                )
+                            )
+                        )
+                        if fragStatus != "WIP" {
+                            let info = fragStatus == "FINISHED"
+                                ? WebFetchResultInfo(url: url, title: frag["title"] as? String, publishedAt: frag["published_at"] as? String, errorCode: nil)
+                                : WebFetchResultInfo(url: nil, title: nil, publishedAt: nil, errorCode: "unavailable")
+                            blocks.append(.webFetchResult(id: UUID(), toolUseId: toolId, kind: "deep_search", result: info, signature: nil))
+                        }
+
+                    case "TOOL_FIND":
+                        let pattern = frag["pattern"] as? String ?? ""
+                        let fragStatus = (frag["status"] as? String ?? "FINISHED").uppercased()
+                        blocks.append(
+                            .serverToolUse(
+                                id: UUID(),
+                                info: ServerToolUseInfo(
+                                    id: toolId,
+                                    name: "deepseek_web_search",
+                                    kind: "deep_search",
+                                    action: "find_in_page",
+                                    queries: [],
+                                    url: "",
+                                    pattern: pattern
+                                )
+                            )
+                        )
+                        if fragStatus != "WIP" {
+                            let info = fragStatus == "FINISHED"
+                                ? WebFetchResultInfo(url: "", title: nil, publishedAt: nil, errorCode: nil)
+                                : WebFetchResultInfo(url: nil, title: nil, publishedAt: nil, errorCode: "unavailable")
+                            blocks.append(.webFetchResult(id: UUID(), toolUseId: toolId, kind: "deep_search", result: info, signature: nil))
+                        }
+
+                    case "READ_LINK":
+                        let rawResults = frag["results"] as? [[String: Any]] ?? []
+                        for (rIdx, r) in rawResults.enumerated() {
+                            let url = (r["url"] as? String).flatMap { isWebUrl($0) ? $0 : nil } ?? ""
+                            let sig = (r["signature"] as? String) ?? ""
+                            if url.isEmpty && sig.trimmingCharacters(in: .whitespaces).isEmpty { continue }
+                            let subId = "\(toolId)-\(rIdx)"
+                            blocks.append(
+                                .serverToolUse(
+                                    id: UUID(),
+                                    info: ServerToolUseInfo(
+                                        id: subId,
+                                        name: "deepseek_read_url",
+                                        kind: "read_link",
+                                        action: "read_link",
+                                        queries: [],
+                                        url: url,
+                                        pattern: nil
+                                    )
+                                )
+                            )
+                            blocks.append(
+                                .webFetchResult(
+                                    id: UUID(),
+                                    toolUseId: subId,
+                                    kind: "read_link",
+                                    result: WebFetchResultInfo(url: url, title: r["title"] as? String, publishedAt: nil, errorCode: nil),
+                                    signature: sig.isEmpty ? nil : sig
+                                )
+                            )
+                        }
+
+                    default:
+                        break
+                    }
+                }
+
+                built = ChatMessage(
+                    id: localId,
+                    parentId: parentUUID,
+                    role: .assistant,
+                    content: textParts.joined(separator: "\n"),
+                    reasoning: thinkParts.joined(separator: "\n"),
+                    thinkingSeconds: elapsedTotal,
+                    blocks: blocks,
+                    status: status,
+                    stopReason: refused ? "refusal" : nil,
+                    thinkingEnabled: (raw["thinking_enabled"] as? Bool) ?? false,
+                    searchEnabled: (raw["search_enabled"] as? Bool) ?? false,
+                    prefixEnabled: false,
+                    createdAt: insertedAt
+                )
             }
-            ordered.reverse()
-        } else {
-            ordered = rawMessages.sorted { ($0["id"] as? Int ?? 0) < ($1["id"] as? Int ?? 0) }
+
+            if let pNum = parentNum, let pIdx = indexByNumId[pNum] {
+                messages[pIdx].selectedChildId = localId
+            }
+            indexByNumId[numId] = messages.count
+            messages.append(built)
         }
 
-        let messages: [ChatMessage] = ordered.compactMap { msg in
-            let roleStr = (msg["role"] as? String ?? "").uppercased()
-            let role: MessageRole = roleStr == "USER" ? .user : .assistant
-            let insertedAt = parseDate(msg["inserted_at"] as? String)
-            let fragments = msg["fragments"] as? [[String: Any]] ?? []
-
-            var contentParts: [String] = []
-            var thinkingParts: [String] = []
-            for frag in fragments {
-                let type = (frag["type"] as? String ?? "").uppercased()
-                let text = frag["content"] as? String ?? ""
-                if type == "THINK" {
-                    if !text.isEmpty { thinkingParts.append(text) }
-                } else if type == "REQUEST" || type == "RESPONSE" {
-                    if !text.isEmpty { contentParts.append(text) }
+        // Select the active path from current_message_id back to root (1:1 toLocal.ts)
+        var rootId = messages.first(where: { $0.parentId == nil })?.id ?? messages.first?.id
+        if let currentNum = obj["current_message_id"] as? Int, let curIdx = indexByNumId[currentNum] {
+            messages[curIdx].selectedChildId = nil
+            var cursorIdx = curIdx
+            var visited = Set<UUID>()
+            while !visited.contains(messages[cursorIdx].id) {
+                let currentMsg = messages[cursorIdx]
+                visited.insert(currentMsg.id)
+                if let pUUID = currentMsg.parentId,
+                   let pIdx = messages.firstIndex(where: { $0.id == pUUID }) {
+                    messages[pIdx].selectedChildId = currentMsg.id
+                    cursorIdx = pIdx
+                } else {
+                    rootId = currentMsg.id
+                    break
                 }
             }
-            let content = contentParts.joined(separator: "\n")
-            let reasoning = thinkingParts.joined(separator: "\n")
-            guard !content.isEmpty || !reasoning.isEmpty else { return nil }
-            return ChatMessage(
-                role: role,
-                content: content,
-                reasoning: reasoning,
-                createdAt: insertedAt
-            )
         }
 
         let sessionId = externalId.flatMap(UUID.init(uuidString:)) ?? stableUUID(for: externalId ?? UUID().uuidString)
         return ChatSession(
             id: sessionId,
-            title: (title?.isEmpty == false) ? title! : "新对话",
+            title: title,
+            rootMessageId: rootId,
             messages: messages,
             createdAt: createdAt,
-            updatedAt: updatedAt
+            updatedAt: updatedAt,
+            isPinned: isPinned
         )
     }
 
@@ -255,7 +555,7 @@ enum DeepSeekZipImporter {
             return []
         }
         return list.compactMap { conv in
-            let title = (conv["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let title = (conv["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let createdAt = parseDate(conv["inserted_at"] as? String)
             let updatedAt = parseDate(conv["updated_at"] as? String)
             let externalId = conv["id"] as? String
@@ -281,11 +581,21 @@ enum DeepSeekZipImporter {
                     let text = contentParts.joined(separator: "\n")
                     let think = thinkParts.joined(separator: "\n")
                     if !text.isEmpty || !think.isEmpty {
+                        var blocks: [ReplyBlock] = []
+                        if !isUser {
+                            if !think.isEmpty {
+                                blocks.append(.thinking(id: UUID(), text: think, signature: nil, startedAt: nil, endedAt: nil, elapsedSeconds: nil))
+                            }
+                            if !text.isEmpty {
+                                blocks.append(.text(id: UUID(), text: text, citations: [], isTemplate: false))
+                            }
+                        }
                         ordered.append(
                             ChatMessage(
                                 role: isUser ? .user : .assistant,
                                 content: text,
                                 reasoning: think,
+                                blocks: blocks,
                                 createdAt: parseDate(message["inserted_at"] as? String)
                             )
                         )
@@ -299,13 +609,15 @@ enum DeepSeekZipImporter {
             }
 
             let sessionId = externalId.flatMap(UUID.init(uuidString:)) ?? stableUUID(for: externalId ?? UUID().uuidString)
-            return ChatSession(
+            var session = ChatSession(
                 id: sessionId,
-                title: (title?.isEmpty == false) ? title! : "新对话",
+                title: title,
                 messages: ordered,
                 createdAt: createdAt,
                 updatedAt: updatedAt
             )
+            session.ensureTreeNormalized()
+            return session
         }
     }
 

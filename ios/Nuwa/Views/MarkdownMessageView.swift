@@ -1,45 +1,159 @@
 import SwiftUI
 import UIKit
 
+// MARK: - Rich Markdown Parser (Headings, Lists, Blockquotes, Tables, Math, Code, Rules)
+
 private enum MarkdownBlock: Identifiable {
-    case text(id: Int, content: String)
+    case heading(id: Int, level: Int, text: String)
+    case paragraph(id: Int, text: String)
+    case listItem(id: Int, marker: String, text: String)
+    case blockquote(id: Int, text: String)
     case code(id: Int, language: String, code: String)
+    case math(id: Int, formula: String)
+    case table(id: Int, headers: [String], rows: [[String]])
+    case divider(id: Int)
 
     var id: Int {
         switch self {
-        case .text(let id, _), .code(let id, _, _): return id
+        case .heading(let id, _, _),
+             .paragraph(let id, _),
+             .listItem(let id, _, _),
+             .blockquote(let id, _),
+             .code(let id, _, _),
+             .math(let id, _),
+             .table(let id, _, _),
+             .divider(let id):
+            return id
         }
     }
 }
 
 struct MarkdownMessageView: View {
     let text: String
+    let citations: [TextCitation]
     let fontSize: Double
     let onCopyCode: (String) -> Void
 
+    @Environment(\.openURL) private var openURL
+
+    init(text: String, citations: [TextCitation] = [], fontSize: Double, onCopyCode: @escaping (String) -> Void) {
+        self.text = text
+        self.citations = citations
+        self.fontSize = fontSize
+        self.onCopyCode = onCopyCode
+    }
+
     private var blocks: [MarkdownBlock] {
-        Self.parseBlocks(text)
+        Self.parseBlocks(Self.cleanCitationTags(text))
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             ForEach(blocks) { block in
                 switch block {
-                case .text(_, let content):
-                    markdownText(content)
+                case .heading(_, let level, let content):
+                    let size: CGFloat = level == 1 ? fontSize + 6 : (level == 2 ? fontSize + 4 : (level == 3 ? fontSize + 2 : fontSize))
+                    markdownInline(content)
+                        .font(.system(size: size, weight: level <= 3 ? .bold : .semibold))
+                        .foregroundStyle(Color.nuwaLabelPrimary)
+                        .padding(.top, 4)
+                        .textSelection(.enabled)
+
+                case .paragraph(_, let content):
+                    markdownInline(content)
                         .font(.system(size: fontSize))
-                        .foregroundStyle(.primary)
+                        .foregroundStyle(Color.nuwaLabelPrimary)
+                        .lineSpacing(4)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
+
+                case .listItem(_, let marker, let content):
+                    HStack(alignment: .top, spacing: 8) {
+                        Text(marker)
+                            .font(.system(size: fontSize, weight: .semibold))
+                            .foregroundStyle(Color.nuwaLabelSecondary)
+                            .frame(minWidth: 16, alignment: .trailing)
+                        markdownInline(content)
+                            .font(.system(size: fontSize))
+                            .foregroundStyle(Color.nuwaLabelPrimary)
+                            .lineSpacing(4)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                case .blockquote(_, let content):
+                    HStack(alignment: .top, spacing: 10) {
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(Color.nuwaBrand.opacity(0.6))
+                            .frame(width: 3)
+                        markdownInline(content)
+                            .font(.system(size: fontSize - 0.5))
+                            .foregroundStyle(Color.nuwaLabelSecondary)
+                            .lineSpacing(4)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.vertical, 4)
+
                 case .code(_, let language, let code):
                     CodeBlockView(language: language, code: code, onCopy: onCopyCode)
+
+                case .math(_, let formula):
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        Text(formula)
+                            .font(.system(size: max(13, fontSize - 1), design: .serif).italic())
+                            .foregroundStyle(Color.nuwaLabelPrimary)
+                            .textSelection(.enabled)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .background(Color(.secondarySystemBackground).opacity(0.75), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                case .table(_, let headers, let rows):
+                    MarkdownTableView(headers: headers, rows: rows, fontSize: max(13, fontSize - 1))
+
+                case .divider:
+                    Divider()
+                        .padding(.vertical, 4)
                 }
+            }
+
+            if !citations.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(Array(citations.prefix(8).enumerated()), id: \.offset) { idx, cite in
+                            Button {
+                                if let url = URL(string: cite.url) {
+                                    openURL(url)
+                                }
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Text("\(idx + 1)")
+                                        .font(.system(size: 10, weight: .bold))
+                                        .foregroundStyle(.white)
+                                        .frame(width: 16, height: 16)
+                                        .background(Color.nuwaBrand, in: Circle())
+                                    Text(cite.title ?? URL(string: cite.url)?.host ?? "来源")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(Color.nuwaLabelSecondary)
+                                        .lineLimit(1)
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .nuwaGlass(in: Capsule(), interactive: true)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                .padding(.top, 2)
             }
         }
     }
 
     @ViewBuilder
-    private func markdownText(_ raw: String) -> some View {
+    private func markdownInline(_ raw: String) -> some View {
         let options = AttributedString.MarkdownParsingOptions(
             interpretedSyntax: .inlineOnlyPreservingWhitespace
         )
@@ -50,51 +164,239 @@ struct MarkdownMessageView: View {
         }
     }
 
+    private static func cleanCitationTags(_ input: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: "\\[citation:(\\d+)\\]") else {
+            return input
+        }
+        let range = NSRange(input.startIndex..., in: input)
+        return regex.stringByReplacingMatches(in: input, range: range, withTemplate: " [$1]")
+    }
+
     private static func parseBlocks(_ input: String) -> [MarkdownBlock] {
         var result: [MarkdownBlock] = []
         let lines = input.components(separatedBy: "\n")
-        var currentText: [String] = []
-        var currentCode: [String] = []
-        var inCodeBlock = false
-        var codeLang = ""
+        var idx = 0
         var nextId = 0
+        var paraBuf: [String] = []
 
-        func flushText() {
-            let joined = currentText.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        func flushParagraph() {
+            let joined = paraBuf.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
             if !joined.isEmpty {
-                result.append(.text(id: nextId, content: joined))
+                result.append(.paragraph(id: nextId, text: joined))
                 nextId += 1
             }
-            currentText.removeAll()
+            paraBuf.removeAll()
         }
 
-        for line in lines {
+        while idx < lines.count {
+            let line = lines[idx]
             let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            // Fenced code block ```
             if trimmed.hasPrefix("```") {
-                if inCodeBlock {
-                    result.append(.code(id: nextId, language: codeLang, code: currentCode.joined(separator: "\n")))
-                    nextId += 1
-                    currentCode.removeAll()
-                    codeLang = ""
-                    inCodeBlock = false
-                } else {
-                    flushText()
-                    codeLang = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
-                    inCodeBlock = true
+                flushParagraph()
+                let lang = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                var codeLines: [String] = []
+                idx += 1
+                while idx < lines.count {
+                    if lines[idx].trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                        idx += 1
+                        break
+                    }
+                    codeLines.append(lines[idx])
+                    idx += 1
                 }
-            } else if inCodeBlock {
-                currentCode.append(line)
-            } else {
-                currentText.append(line)
+                result.append(.code(id: nextId, language: lang, code: codeLines.joined(separator: "\n")))
+                nextId += 1
+                continue
             }
+
+            // Display math block $$...$$ or \[...\]
+            if trimmed == "$$" || trimmed == "\\[" {
+                flushParagraph()
+                let closer = trimmed == "$$" ? "$$" : "\\]"
+                var mathLines: [String] = []
+                idx += 1
+                while idx < lines.count {
+                    if lines[idx].trimmingCharacters(in: .whitespaces) == closer {
+                        idx += 1
+                        break
+                    }
+                    mathLines.append(lines[idx])
+                    idx += 1
+                }
+                result.append(.math(id: nextId, formula: mathLines.joined(separator: "\n")))
+                nextId += 1
+                continue
+            }
+            if trimmed.hasPrefix("$$") && trimmed.hasSuffix("$$") && trimmed.count > 4 {
+                flushParagraph()
+                let inner = String(trimmed.dropFirst(2).dropLast(2)).trimmingCharacters(in: .whitespaces)
+                result.append(.math(id: nextId, formula: inner))
+                nextId += 1
+                idx += 1
+                continue
+            }
+
+            // Markdown table detection (header row + separator row)
+            if trimmed.contains("|") && idx + 1 < lines.count && isTableSeparator(lines[idx + 1]) {
+                flushParagraph()
+                let headers = splitTableRow(trimmed)
+                idx += 2
+                var rows: [[String]] = []
+                while idx < lines.count {
+                    let rowLine = lines[idx].trimmingCharacters(in: .whitespaces)
+                    if rowLine.isEmpty || !rowLine.contains("|") { break }
+                    rows.append(splitTableRow(rowLine))
+                    idx += 1
+                }
+                result.append(.table(id: nextId, headers: headers, rows: rows))
+                nextId += 1
+                continue
+            }
+
+            // Empty line breaks paragraph
+            if trimmed.isEmpty {
+                flushParagraph()
+                idx += 1
+                continue
+            }
+
+            // Horizontal rule
+            if trimmed == "---" || trimmed == "***" || trimmed == "___" {
+                flushParagraph()
+                result.append(.divider(id: nextId))
+                nextId += 1
+                idx += 1
+                continue
+            }
+
+            // Heading (# .. ####)
+            if trimmed.hasPrefix("#") {
+                let hashes = trimmed.prefix { $0 == "#" }
+                let level = hashes.count
+                if (1...4).contains(level), trimmed.dropFirst(level).hasPrefix(" ") {
+                    flushParagraph()
+                    let content = String(trimmed.dropFirst(level + 1)).trimmingCharacters(in: .whitespaces)
+                    result.append(.heading(id: nextId, level: level, text: content))
+                    nextId += 1
+                    idx += 1
+                    continue
+                }
+            }
+
+            // Blockquote
+            if trimmed.hasPrefix("> ") || trimmed == ">" {
+                flushParagraph()
+                var quoteLines: [String] = []
+                while idx < lines.count {
+                    let t = lines[idx].trimmingCharacters(in: .whitespaces)
+                    if t.hasPrefix("> ") {
+                        quoteLines.append(String(t.dropFirst(2)))
+                        idx += 1
+                    } else if t == ">" {
+                        quoteLines.append("")
+                        idx += 1
+                    } else {
+                        break
+                    }
+                }
+                result.append(.blockquote(id: nextId, text: quoteLines.joined(separator: "\n")))
+                nextId += 1
+                continue
+            }
+
+            // Unordered list
+            if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("• ") {
+                flushParagraph()
+                let content = String(trimmed.dropFirst(2))
+                result.append(.listItem(id: nextId, marker: "•", text: content))
+                nextId += 1
+                idx += 1
+                continue
+            }
+
+            // Ordered list (e.g. "1. item")
+            if let dotIdx = trimmed.firstIndex(of: "."),
+               trimmed[..<dotIdx].allSatisfy(\.isNumber),
+               !trimmed[..<dotIdx].isEmpty,
+               trimmed.index(after: dotIdx) < trimmed.endIndex,
+               trimmed[trimmed.index(after: dotIdx)] == " " {
+                flushParagraph()
+                let marker = String(trimmed[...dotIdx])
+                let afterSpace = trimmed.index(dotIdx, offsetBy: 2)
+                let content = String(trimmed[afterSpace...])
+                result.append(.listItem(id: nextId, marker: marker, text: content))
+                nextId += 1
+                idx += 1
+                continue
+            }
+
+            paraBuf.append(line)
+            idx += 1
         }
 
-        if inCodeBlock {
-            result.append(.code(id: nextId, language: codeLang, code: currentCode.joined(separator: "\n")))
-        } else {
-            flushText()
-        }
+        flushParagraph()
         return result
+    }
+
+    private static func isTableSeparator(_ line: String) -> Bool {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        guard t.contains("-") && t.contains("|") else { return false }
+        let allowed = CharacterSet(charactersIn: "|-: ")
+        return t.unicodeScalars.allSatisfy { allowed.contains($0) }
+    }
+
+    private static func splitTableRow(_ line: String) -> [String] {
+        var s = line.trimmingCharacters(in: .whitespaces)
+        if s.hasPrefix("|") { s.removeFirst() }
+        if s.hasSuffix("|") { s.removeLast() }
+        return s.components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+}
+
+private struct MarkdownTableView: View {
+    let headers: [String]
+    let rows: [[String]]
+    let fontSize: Double
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 0) {
+                    ForEach(Array(headers.enumerated()), id: \.offset) { _, h in
+                        Text(h)
+                            .font(.system(size: fontSize, weight: .semibold))
+                            .foregroundStyle(Color.nuwaLabelPrimary)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .frame(minWidth: 90, alignment: .leading)
+                    }
+                }
+                .background(Color.primary.opacity(0.05))
+
+                ForEach(Array(rows.enumerated()), id: \.offset) { rIdx, row in
+                    Divider()
+                    HStack(spacing: 0) {
+                        ForEach(0..<max(headers.count, row.count), id: \.self) { cIdx in
+                            let val = cIdx < row.count ? row[cIdx] : ""
+                            Text(val)
+                                .font(.system(size: fontSize))
+                                .foregroundStyle(Color.nuwaLabelPrimary)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 7)
+                                .frame(minWidth: 90, alignment: .leading)
+                        }
+                    }
+                    .background(rIdx % 2 == 1 ? Color.primary.opacity(0.02) : Color.clear)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.75)
+            )
+        }
     }
 }
 
@@ -110,7 +412,7 @@ private struct CodeBlockView: View {
             HStack {
                 Text(language.isEmpty ? "code" : language.lowercased())
                     .font(.caption.monospaced().weight(.medium))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.nuwaLabelSecondary)
                 Spacer()
                 Button {
                     UIPasteboard.general.string = code
@@ -122,7 +424,7 @@ private struct CodeBlockView: View {
                 } label: {
                     Label(copied ? "已复制" : "复制", systemImage: copied ? "checkmark" : "doc.on.doc")
                         .font(.caption)
-                        .foregroundStyle(copied ? .green : .secondary)
+                        .foregroundStyle(copied ? .green : Color.nuwaLabelSecondary)
                 }
                 .buttonStyle(.plain)
             }
@@ -133,6 +435,7 @@ private struct CodeBlockView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(code)
                     .font(.system(size: 13, design: .monospaced))
+                    .foregroundStyle(Color.nuwaLabelPrimary)
                     .textSelection(.enabled)
                     .padding(12)
             }
@@ -146,6 +449,8 @@ private struct CodeBlockView: View {
     }
 }
 
+// MARK: - DeepSeek Thinking Accordion & Search Results Sheet & Branch Switcher
+
 struct ReasoningDisclosureView: View {
     let reasoning: String
     let seconds: Double?
@@ -156,12 +461,12 @@ struct ReasoningDisclosureView: View {
     private var headerTitle: String {
         if isStreaming {
             if let seconds {
-                return String(format: "正在深度思考 (%.1fs)...", seconds)
+                return String(format: "正在深度思考 (%.0f 秒)...", seconds)
             }
-            return "正在深度思考..."
+            return "正在思考..."
         }
         if let seconds {
-            return String(format: "已深度思考 (用时 %.1f 秒)", seconds)
+            return String(format: "已思考（用时 %.0f 秒）", max(1, seconds))
         }
         return "思考过程"
     }
@@ -174,15 +479,15 @@ struct ReasoningDisclosureView: View {
                 }
             } label: {
                 HStack(spacing: 6) {
-                    Image(systemName: "brain.head.profile")
+                    Image(systemName: "atom")
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(Color.nuwaBrand)
+                        .foregroundStyle(Color.nuwaBrandText)
                     Text(headerTitle)
                         .font(.caption.weight(.medium))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.nuwaLabelSecondary)
                     Image(systemName: expanded ? "chevron.up" : "chevron.down")
                         .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(Color.nuwaLabelTertiary)
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
@@ -193,13 +498,296 @@ struct ReasoningDisclosureView: View {
             if expanded {
                 Text(reasoning)
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.nuwaLabelSecondary)
+                    .lineSpacing(3)
                     .textSelection(.enabled)
                     .padding(12)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color(.secondarySystemBackground).opacity(0.65))
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
+        }
+    }
+}
+
+struct SearchSummaryPillView: View {
+    let results: [WebSearchResultItem]
+    let isSearching: Bool
+    let onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: 6) {
+                if isSearching {
+                    ProgressView()
+                        .controlSize(.mini)
+                    Text("正在搜索网页...")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(Color.nuwaLabelSecondary)
+                } else {
+                    Image(systemName: "globe")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.nuwaBrandText)
+                    Text("已阅读 \(results.count) 个网页")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(Color.nuwaLabelSecondary)
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(Color.nuwaLabelTertiary)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .nuwaGlass(in: Capsule(), interactive: !isSearching)
+        }
+        .buttonStyle(.plain)
+        .disabled(results.isEmpty)
+    }
+}
+
+struct SearchPanelSheet: View {
+    let results: [WebSearchResultItem]
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(Array(results.enumerated()), id: \.element.id) { idx, item in
+                    Button {
+                        if let url = URL(string: item.url) {
+                            openURL(url)
+                        }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(spacing: 6) {
+                                Text("\(idx + 1)")
+                                    .font(.caption2.weight(.bold))
+                                    .foregroundStyle(.white)
+                                    .frame(width: 18, height: 18)
+                                    .background(Color.nuwaBrand, in: Circle())
+                                Text(item.siteName ?? URL(string: item.url)?.host ?? "")
+                                    .font(.caption)
+                                    .foregroundStyle(Color.nuwaLabelTertiary)
+                                    .lineLimit(1)
+                                Spacer()
+                                if let age = item.pageAge, !age.isEmpty {
+                                    Text(age)
+                                        .font(.caption2)
+                                        .foregroundStyle(Color.nuwaLabelTertiary)
+                                }
+                            }
+                            Text(item.title)
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(Color.nuwaLabelPrimary)
+                                .lineLimit(2)
+                            if let snippet = item.snippet, !snippet.isEmpty {
+                                Text(snippet)
+                                    .font(.caption)
+                                    .foregroundStyle(Color.nuwaLabelSecondary)
+                                    .lineLimit(3)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .listStyle(.insetGrouped)
+            .navigationTitle("搜索结果 (\(results.count))")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("关闭") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+    }
+}
+
+struct BranchSwitcherView: View {
+    let versionInfo: MessageVersionInfo
+    let onSelect: (UUID) -> Void
+
+    var body: some View {
+        if versionInfo.count > 1 {
+            HStack(spacing: 4) {
+                Button {
+                    if versionInfo.index > 0 {
+                        onSelect(versionInfo.ids[versionInfo.index - 1])
+                    }
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(versionInfo.index > 0 ? Color.nuwaLabelSecondary : Color.nuwaLabelTertiary.opacity(0.4))
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.plain)
+                .disabled(versionInfo.index == 0)
+
+                Text("\(versionInfo.index + 1)/\(versionInfo.count)")
+                    .font(.system(size: 12, weight: .medium).monospacedDigit())
+                    .foregroundStyle(Color.nuwaLabelSecondary)
+
+                Button {
+                    if versionInfo.index + 1 < versionInfo.count {
+                        onSelect(versionInfo.ids[versionInfo.index + 1])
+                    }
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(versionInfo.index + 1 < versionInfo.count ? Color.nuwaLabelSecondary : Color.nuwaLabelTertiary.opacity(0.4))
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.plain)
+                .disabled(versionInfo.index + 1 >= versionInfo.count)
+            }
+            .padding(.horizontal, 6)
+            .frame(height: 28)
+            .nuwaGlass(in: Capsule(), interactive: true)
+        }
+    }
+}
+
+/// Displays read_link / open_page / find_in_page tool activity pills matching ReplyArea.tsx.
+struct ReplyToolsStatusView: View {
+    let blocks: [ReplyBlock]
+    let isStreaming: Bool
+    @Environment(\.openURL) private var openURL
+
+    private struct FetchedPage: Identifiable {
+        let id: String
+        let url: String
+        let title: String
+        let failed: Bool
+    }
+
+    private var activeReadingLink: String? {
+        guard isStreaming else { return nil }
+        var finishedIds = Set<String>()
+        for b in blocks {
+            if case .webFetchResult(_, let tid, _, _, _) = b { finishedIds.insert(tid) }
+        }
+        for b in blocks.reversed() {
+            if case .serverToolUse(_, let info) = b,
+               (info.action == "read_link" || info.action == "open_page"),
+               !finishedIds.contains(info.id) {
+                return info.url
+            }
+        }
+        return nil
+    }
+
+    private var fetchedPages: [FetchedPage] {
+        var seen = Set<String>()
+        var pages: [FetchedPage] = []
+        for b in blocks {
+            if case .webFetchResult(_, let tid, _, let info, _) = b {
+                let url = info.url ?? ""
+                if url.isEmpty || seen.contains(url) { continue }
+                seen.insert(url)
+                let label = (info.title?.isEmpty == false) ? info.title! : (URL(string: url)?.host ?? url)
+                pages.append(FetchedPage(id: tid, url: url, title: label, failed: info.errorCode != nil))
+            }
+        }
+        return pages
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let readingUrl = activeReadingLink {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.mini)
+                    Text("正在浏览网页")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(Color.nuwaLabelSecondary)
+                    if let host = URL(string: readingUrl)?.host {
+                        Text(host)
+                            .font(.caption)
+                            .foregroundStyle(Color.nuwaLabelTertiary)
+                            .lineLimit(1)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .nuwaGlass(in: Capsule(), interactive: false)
+            }
+
+            if !fetchedPages.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(fetchedPages.prefix(5)) { page in
+                            Button {
+                                if !page.failed, let url = URL(string: page.url) {
+                                    openURL(url)
+                                }
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: page.failed ? "exclamationmark.circle" : "link")
+                                        .font(.caption2.weight(.semibold))
+                                        .foregroundStyle(page.failed ? .orange : Color.nuwaBrandText)
+                                    Text(page.title)
+                                        .font(.caption)
+                                        .foregroundStyle(Color.nuwaLabelSecondary)
+                                        .lineLimit(1)
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .nuwaGlass(in: Capsule(), interactive: !page.failed)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(page.failed)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Full-screen pinch-to-zoom image preview overlay for message/draft image attachments.
+struct ImageLightboxOverlay: View {
+    let image: UIImage
+    let onDismiss: () -> Void
+
+    @State private var scale: CGFloat = 1.0
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Color.black.opacity(0.92)
+                .ignoresSafeArea()
+                .onTapGesture { onDismiss() }
+
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFit()
+                .scaleEffect(scale)
+                .gesture(
+                    MagnificationGesture()
+                        .onChanged { value in
+                            scale = max(1.0, min(4.0, value))
+                        }
+                        .onEnded { _ in
+                            withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                                if scale < 1.05 { scale = 1.0 }
+                            }
+                        }
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(16)
+
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 40, height: 40)
+                    .nuwaGlass(in: Circle(), interactive: true)
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 16)
+            .padding(.trailing, 18)
         }
     }
 }

@@ -15,12 +15,24 @@ struct DeepSeekAuthSheet: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: UINavigationController, context: Context) {}
 }
 
+struct MigrationLaunchOptions: Identifiable, Equatable {
+    let id = UUID()
+    let clearSession: Bool
+    let forceReExport: Bool
+
+    static let standard = MigrationLaunchOptions(clearSession: false, forceReExport: false)
+}
+
 /// SwiftUI wrapper around MigrationWebViewController for One-Click DeepSeek history migration.
 struct DeepSeekMigrationSheet: UIViewControllerRepresentable {
+    var clearSession: Bool = false
+    var forceReExport: Bool = false
     let onResult: (_ filePath: String?, _ fileName: String?) -> Void
 
     func makeUIViewController(context: Context) -> UINavigationController {
         let migVC = MigrationWebViewController()
+        migVC.clearSessionOnStart = clearSession
+        migVC.forceReExport = forceReExport
         migVC.onResult = onResult
         let nav = UINavigationController(rootViewController: migVC)
         return nav

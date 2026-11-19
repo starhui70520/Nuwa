@@ -1,0 +1,224 @@
+import SwiftUI
+import UIKit
+
+/// 1:1 port of chat-demo/src/components/settings/FeedbackReportPage.tsx
+struct FeedbackReportView: View {
+    @ObservedObject var settings: SettingsStore
+    @ObservedObject private var logStore = AppLogStore.shared
+
+    @State private var issueType = AppLogStore.issueTypeOptions[0]
+    @State private var descriptionText = ""
+    @State private var contactText = ""
+    @State private var includeLogs = true
+    @State private var showLogPreview = false
+    @State private var submitting = false
+    @State private var submitError: String?
+    @State private var reportCode: String?
+    @State private var copied = false
+
+    let cardBg: Color
+    let fieldBg: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if let reportCode {
+                VStack(spacing: 14) {
+                    Text("日志上报成功")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(Color.nuwaLabelPrimary)
+
+                    Text("请将下方记录码发给开发者，我们会根据记录码快速定位并修复您遇到的问题。")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.nuwaLabelSecondary)
+                        .multilineTextAlignment(.center)
+
+                    Text(reportCode)
+                        .font(.system(size: 22, weight: .bold, design: .monospaced))
+                        .foregroundStyle(Color.nuwaLabelPrimary)
+                        .textSelection(.enabled)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 14)
+                        .frame(maxWidth: .infinity)
+                        .background(fieldBg, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                    HStack(spacing: 10) {
+                        Button {
+                            UIPasteboard.general.string = reportCode
+                            copied = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { copied = false }
+                        } label: {
+                            Text(copied ? "已复制记录码" : "复制记录码")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 18)
+                                .padding(.vertical, 10)
+                                .background(Color.nuwaBrand, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+
+                        Button {
+                            self.reportCode = nil
+                            descriptionText = ""
+                            submitError = nil
+                        } label: {
+                            Text("继续提交")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(Color.nuwaLabelPrimary)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 10)
+                                .nuwaGlass(in: Capsule(), interactive: true)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(20)
+                .background(cardBg, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            } else {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("遇到的问题")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Color.nuwaLabelSecondary)
+
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), spacing: 8)], alignment: .leading, spacing: 8) {
+                        ForEach(AppLogStore.issueTypeOptions, id: \.self) { opt in
+                            let selected = issueType == opt
+                            Button {
+                                issueType = opt
+                            } label: {
+                                Text(opt)
+                                    .font(.system(size: 12, weight: selected ? .semibold : .regular))
+                                    .foregroundStyle(selected ? Color.nuwaBrandText : Color.nuwaLabelPrimary)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 7)
+                                    .frame(maxWidth: .infinity)
+                                    .nuwaGlass(in: Capsule(), tint: selected ? .nuwaBrand : nil, interactive: true)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("详细描述")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(Color.nuwaLabelSecondary)
+                        TextField("请描述复现步骤或异常现象...", text: $descriptionText, axis: .vertical)
+                            .lineLimit(3...6)
+                            .font(.system(size: 14))
+                            .padding(12)
+                            .background(fieldBg, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("联系方式（可选）")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(Color.nuwaLabelSecondary)
+                        TextField("邮箱 / 微信 / GitHub ID", text: $contactText)
+                            .font(.system(size: 14))
+                            .padding(.horizontal, 12)
+                            .frame(height: 42)
+                            .background(fieldBg, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+
+                    Toggle(isOn: $includeLogs) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("附带最近运行日志（\(logStore.logs.count) 条）")
+                                .font(.system(size: 14))
+                                .foregroundStyle(Color.nuwaLabelPrimary)
+                            Text("已自动脱敏 API Key 与令牌")
+                                .font(.system(size: 12))
+                                .foregroundStyle(Color.nuwaLabelTertiary)
+                        }
+                    }
+                    .tint(Color.nuwaBrand)
+
+                    if includeLogs && !logStore.logs.isEmpty {
+                        Button {
+                            withAnimation { showLogPreview.toggle() }
+                        } label: {
+                            HStack {
+                                Text(showLogPreview ? "收起日志预览" : "查看即将上传的日志")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(Color.nuwaBrandText)
+                                Spacer()
+                                Image(systemName: showLogPreview ? "chevron.up" : "chevron.down")
+                                    .font(.caption2)
+                                    .foregroundStyle(Color.nuwaBrandText)
+                            }
+                        }
+                        .buttonStyle(.plain)
+
+                        if showLogPreview {
+                            VStack(alignment: .leading, spacing: 4) {
+                                ForEach(logStore.logs.suffix(15)) { entry in
+                                    Text("[\(entry.level.rawValue.uppercased())] \(entry.source): \(entry.message)")
+                                        .font(.system(size: 11, design: .monospaced))
+                                        .foregroundStyle(Color.nuwaLabelSecondary)
+                                        .lineLimit(2)
+                                }
+                            }
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(fieldBg, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
+                    }
+
+                    if let submitError {
+                        Text(submitError)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                    }
+
+                    Button {
+                        Task { await submit() }
+                    } label: {
+                        HStack {
+                            if submitting {
+                                ProgressView().tint(.white).controlSize(.small)
+                            }
+                            Text(submitting ? "正在上报..." : "提交反馈并生成记录码")
+                                .font(.system(size: 15, weight: .semibold))
+                        }
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 46)
+                        .background(
+                            (submitting || descriptionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                ? Color.nuwaBrand.opacity(0.4)
+                                : Color.nuwaBrand,
+                            in: Capsule()
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(submitting || descriptionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                .padding(16)
+                .background(cardBg, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+        }
+        .padding(.top, 8)
+    }
+
+    private func submit() async {
+        let trimmed = descriptionText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            submitError = "请简要描述您遇到的问题"
+            return
+        }
+        submitting = true
+        submitError = nil
+        defer { submitting = false }
+        do {
+            let result = try await logStore.submitReport(
+                issueType: issueType,
+                description: trimmed,
+                contact: contactText,
+                includeLogs: includeLogs,
+                settings: settings
+            )
+            reportCode = result.code
+            copied = false
+        } catch {
+            submitError = error.localizedDescription
+        }
+    }
+}

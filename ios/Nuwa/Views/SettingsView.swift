@@ -5,11 +5,13 @@ private enum SettingsSubpage {
     case root
     case account
     case data
+    case location
     case changelog
+    case feedback
 }
 
-private struct BackupDocument: FileDocument {
-    static var readableContentTypes: [UTType] { [.json] }
+private struct ZipBackupDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.zip] }
     var data: Data
 
     init(data: Data) { self.data = data }
@@ -21,15 +23,17 @@ private struct BackupDocument: FileDocument {
     }
 }
 
-private struct ReleaseHistoryEntry: Identifiable, Decodable {
+private struct ReleaseHistoryEntry: Identifiable {
     let id: String
     let version: String
     let changelog: String
     let createdAt: String
 }
 
-/// Exact 1:1 recreation of chat-demo/src/components/settings/SettingsDialog.tsx
-/// with native iOS 26 Liquid Glass header buttons & controls.
+/// Complete 1:1 recreation of chat-demo/src/components/settings/SettingsDialog.tsx
+/// (Account / Balance / Data + Share Link Import + DeepSeek ZIP Export + iCloud Auto Backup /
+///  Language / Appearance / Font Size / Location / Voice & Engine / Version & App Store Check /
+///  Release Notes / Feedback & Log Reporting / Docs / Sign Out).
 struct SettingsView: View {
     @ObservedObject var settings: SettingsStore
     @ObservedObject var chatStore: ChatStore
@@ -39,11 +43,20 @@ struct SettingsView: View {
 
     @State private var page: SettingsSubpage = .root
     @State private var showApiKey = false
+    @State private var apiKeyDraft = ""
+    @State private var verifyingKey = false
+    @State private var keyVerifyError: String?
+
     @State private var showDeepSeekAuth = false
-    @State private var showMigrationWeb = false
+    @State private var migrationOptions: MigrationLaunchOptions?
+    @State private var showMigrationChooser = false
+    @State private var showShareLinkAlert = false
+    @State private var shareLinkDraft = ""
+    @State private var importingShareLink = false
+
     @State private var isExporting = false
     @State private var isImporting = false
-    @State private var exportDocument: BackupDocument?
+    @State private var exportDocument: ZipBackupDocument?
     @State private var showDeleteAllConfirm = false
     @State private var showSignOutConfirm = false
 
@@ -72,11 +85,14 @@ struct SettingsView: View {
     }
 
     private var pageTitle: String {
+        let loc = settings.locale
         switch page {
-        case .root: "设置"
-        case .account: "账号管理"
-        case .data: "数据管理"
-        case .changelog: "更新日志"
+        case .root: return L10n.t("settings", locale: loc)
+        case .account: return L10n.t("accountManage", locale: loc)
+        case .data: return L10n.t("dataManage", locale: loc)
+        case .location: return L10n.t("location", locale: loc)
+        case .changelog: return L10n.t("releaseNotes", locale: loc)
+        case .feedback: return L10n.t("feedbackReport", locale: loc)
         }
     }
 
@@ -85,15 +101,13 @@ struct SettingsView: View {
             sheetBg.ignoresSafeArea()
 
             VStack(spacing: 0) {
-                // Sheet header matching SettingsDialog.tsx (Back + Title + Close Liquid Glass circles)
+                // Header matching SettingsDialog.tsx
                 HStack {
                     if page == .root {
                         Color.clear.frame(width: 36, height: 36)
                     } else {
                         Button {
-                            withAnimation(.easeInOut(duration: 0.2)) {
-                                page = .root
-                            }
+                            withAnimation(.easeInOut(duration: 0.2)) { page = .root }
                         } label: {
                             Image(systemName: "chevron.left")
                                 .font(.system(size: 15, weight: .semibold))
@@ -127,14 +141,12 @@ struct SettingsView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
                         switch page {
-                        case .root:
-                            rootPage
-                        case .account:
-                            accountPage
-                        case .data:
-                            dataPage
-                        case .changelog:
-                            changelogPage
+                        case .root: rootPage
+                        case .account: accountPage
+                        case .data: dataPage
+                        case .location: locationPage
+                        case .changelog: changelogPage
+                        case .feedback: FeedbackReportView(settings: settings, cardBg: cardBg, fieldBg: sheetBg)
                         }
                     }
                     .padding(.horizontal, 16)
@@ -144,6 +156,7 @@ struct SettingsView: View {
             }
         }
         .task {
+            apiKeyDraft = settings.apiKey
             await settings.refreshBalance()
         }
         .sheet(isPresented: $showDeepSeekAuth) {
@@ -158,24 +171,38 @@ struct SettingsView: View {
             }
             .ignoresSafeArea()
         }
-        .sheet(isPresented: $showMigrationWeb) {
-            DeepSeekMigrationSheet { filePath, _ in
-                showMigrationWeb = false
+        .sheet(item: $migrationOptions) { opts in
+            DeepSeekMigrationSheet(clearSession: opts.clearSession, forceReExport: opts.forceReExport) { filePath, _ in
+                migrationOptions = nil
                 if let filePath {
                     chatStore.importFromFilePath(filePath)
                 }
             }
             .ignoresSafeArea()
         }
+        .confirmationDialog("选择迁移方式", isPresented: $showMigrationChooser, titleVisibility: .visible) {
+            Button("重新导出并更新（当前账号）") {
+                launchMigration(clearSession: false, forceReExport: true)
+            }
+            Button("直接下载上次导出（当前账号）") {
+                launchMigration(clearSession: false, forceReExport: false)
+            }
+            Button("切换其他账号（清除登录态）") {
+                launchMigration(clearSession: true, forceReExport: false)
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("检测到本地已有会话记录，请选择继续当前账号导出或切换账号。")
+        }
         .fileExporter(
             isPresented: $isExporting,
             document: exportDocument,
-            contentType: .json,
-            defaultFilename: "nuwa-backup-\(Int(Date().timeIntervalSince1970))"
+            contentType: .zip,
+            defaultFilename: DeepSeekZipExporter.defaultFileName()
         ) { result in
             switch result {
             case .success:
-                chatStore.showToast("备份已导出")
+                chatStore.showToast("已导出历史对话 ZIP")
             case .failure(let error):
                 chatStore.showToast("导出失败：\(error.localizedDescription)")
             }
@@ -201,6 +228,17 @@ struct SettingsView: View {
                 chatStore.showToast("选择文件失败：\(error.localizedDescription)")
             }
         }
+        .alert("通过 DeepSeek 分享链接导入", isPresented: $showShareLinkAlert) {
+            TextField("粘贴 chat.deepseek.com/share/... 链接或分享 ID", text: $shareLinkDraft)
+            Button("取消", role: .cancel) { shareLinkDraft = "" }
+            Button("导入") {
+                let raw = shareLinkDraft
+                shareLinkDraft = ""
+                Task { await runShareLinkImport(raw) }
+            }
+        } message: {
+            Text("支持直接粘贴官方 DeepSeek App 或网页版复制的完整分享文案。")
+        }
         .alert("删除后，所有对话都将被清空且无法找回", isPresented: $showDeleteAllConfirm) {
             Button("取消", role: .cancel) {}
             Button("删除", role: .destructive) {
@@ -208,7 +246,7 @@ struct SettingsView: View {
                 chatStore.showToast("删除成功")
             }
         } message: {
-            Text("本地保存的会话记录将被全部清空，不会影响您的 API Key 和设置。")
+            Text("本地保存的附件及未发送的草稿也将被删除，不会清除您的 API Key。")
         }
         .alert("退出登录", isPresented: $showSignOutConfirm) {
             Button("取消", role: .cancel) {}
@@ -217,7 +255,7 @@ struct SettingsView: View {
                 dismiss()
             }
         } message: {
-            Text("将清除本地保存的 DeepSeek 账号与 API Key 凭据，历史对话会保留在设备上。")
+            Text("将清除本地保存的 DeepSeek 账号与 API Key 凭据，历史对话仍保留在设备上。")
         }
         .alert("版本检查", isPresented: $updateAlertPresented) {
             if let url = updateResult?.storeUrl, updateResult?.hasUpdate == true {
@@ -242,37 +280,41 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var rootPage: some View {
-        groupTitle("账户")
+        let loc = settings.locale
+        groupTitle(L10n.t("groupAccount", locale: loc))
         groupCard {
             navRow(
                 icon: "person",
-                label: "账号管理",
+                label: L10n.t("accountManage", locale: loc),
                 value: settings.profileDisplayName
             ) {
+                apiKeyDraft = settings.apiKey
+                keyVerifyError = nil
                 withAnimation(.easeInOut(duration: 0.2)) { page = .account }
             }
             rowDivider
             navRow(
                 icon: "creditcard",
-                label: "API 余额",
-                value: settings.deepSeekBalanceText ?? "前往充值",
-                valueAccent: settings.deepSeekBalanceText != nil
+                label: L10n.t("apiBalance", locale: loc),
+                value: settings.deepSeekBalanceText ?? L10n.t("topUp", locale: loc),
+                valueAccent: settings.deepSeekBalanceText != nil,
+                valueDanger: settings.isBalanceLow
             ) {
                 openURL(topUpURL)
             }
             rowDivider
             navRow(
                 icon: "externaldrive",
-                label: "数据管理",
+                label: L10n.t("dataManage", locale: loc),
                 value: "\(chatStore.sessions.count) 条对话"
             ) {
                 withAnimation(.easeInOut(duration: 0.2)) { page = .data }
             }
         }
 
-        groupTitle("应用")
+        groupTitle(L10n.t("groupApp", locale: loc))
         groupCard {
-            pickerRow(icon: "globe", label: "语言") {
+            pickerRow(icon: "globe", label: L10n.t("language", locale: loc)) {
                 Picker("语言", selection: $settings.locale) {
                     ForEach(AppLocale.allCases) { item in
                         Text(item.displayName).tag(item)
@@ -282,7 +324,7 @@ struct SettingsView: View {
                 .pickerStyle(.menu)
             }
             rowDivider
-            pickerRow(icon: "sun.max", label: "外观") {
+            pickerRow(icon: "sun.max", label: L10n.t("appearance", locale: loc)) {
                 Picker("外观", selection: $settings.themePreference) {
                     ForEach(ThemePreference.allCases) { item in
                         Text(item.displayName).tag(item)
@@ -292,7 +334,7 @@ struct SettingsView: View {
                 .pickerStyle(.menu)
             }
             rowDivider
-            pickerRow(icon: "textformat.size", label: "字体大小") {
+            pickerRow(icon: "textformat.size", label: L10n.t("fontSize", locale: loc)) {
                 Picker("字体大小", selection: $settings.chatFontSize) {
                     ForEach(SettingsStore.fontSizeOptions, id: \.self) { size in
                         Text(size == 16 ? "16px（默认）" : "\(Int(size))px").tag(size)
@@ -301,11 +343,19 @@ struct SettingsView: View {
                 .labelsHidden()
                 .pickerStyle(.menu)
             }
+            rowDivider
+            navRow(
+                icon: "sparkles",
+                label: L10n.t("location", locale: loc),
+                value: LocationCatalog.displayName(for: settings.location, locale: loc)
+            ) {
+                withAnimation(.easeInOut(duration: 0.2)) { page = .location }
+            }
         }
 
-        groupTitle("语音")
+        groupTitle(L10n.t("groupVoice", locale: loc))
         groupCard {
-            pickerRow(icon: "speaker.wave.2", label: "朗读音色") {
+            pickerRow(icon: "speaker.wave.2", label: L10n.t("ttsVoice", locale: loc)) {
                 Picker("朗读音色", selection: $settings.ttsVoice) {
                     ForEach(TtsVoiceOption.allCases) { v in
                         Text(v.displayName).tag(v)
@@ -315,36 +365,30 @@ struct SettingsView: View {
                 .pickerStyle(.menu)
             }
             rowDivider
-            HStack(spacing: 12) {
-                Image(systemName: "waveform")
-                    .font(.system(size: 16))
-                    .foregroundStyle(Color.nuwaLabelSecondary)
-                    .frame(width: 22)
-                Text("语音引擎")
-                    .font(.system(size: 15))
-                    .foregroundStyle(Color.nuwaLabelPrimary)
-                Spacer()
-                Text("设备原生")
-                    .font(.system(size: 14))
-                    .foregroundStyle(Color.nuwaLabelTertiary)
+            pickerRow(icon: "waveform", label: L10n.t("speechEngine", locale: loc)) {
+                Picker("语音引擎", selection: $settings.speechEngine) {
+                    ForEach(SpeechEngineOption.allCases) { eng in
+                        Text(eng.displayName).tag(eng)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
             }
-            .padding(.horizontal, 16)
-            .frame(minHeight: 50)
         }
-        Text("语音输入与回答朗读由 iOS 系统原生语音服务处理")
+        Text("自动模式在配置 API Key 时优先云端朗读，否则无缝使用 iOS 原生语音服务")
             .font(.system(size: 12))
             .foregroundStyle(Color.nuwaLabelTertiary)
             .padding(.horizontal, 12)
             .padding(.top, 6)
 
-        groupTitle("关于")
+        groupTitle(L10n.t("groupAbout", locale: loc))
         groupCard {
             HStack(spacing: 12) {
                 Image(systemName: "info.circle")
                     .font(.system(size: 16))
                     .foregroundStyle(Color.nuwaLabelSecondary)
                     .frame(width: 22)
-                Text("当前版本")
+                Text(L10n.t("version", locale: loc))
                     .font(.system(size: 15))
                     .foregroundStyle(Color.nuwaLabelPrimary)
                 Spacer()
@@ -357,7 +401,7 @@ struct SettingsView: View {
             rowDivider
             navRow(
                 icon: "arrow.down.circle",
-                label: isCheckingUpdate ? "检查中..." : "检查更新",
+                label: isCheckingUpdate ? L10n.t("checkingUpdate", locale: loc) : L10n.t("checkUpdate", locale: loc),
                 value: nil
             ) {
                 if !isCheckingUpdate {
@@ -367,7 +411,7 @@ struct SettingsView: View {
             rowDivider
             navRow(
                 icon: "doc.text",
-                label: "更新日志",
+                label: L10n.t("releaseNotes", locale: loc),
                 value: nil
             ) {
                 withAnimation(.easeInOut(duration: 0.2)) { page = .changelog }
@@ -375,15 +419,22 @@ struct SettingsView: View {
             }
             rowDivider
             navRow(
+                icon: "exclamationmark.bubble",
+                label: L10n.t("feedbackReport", locale: loc),
+                value: nil
+            ) {
+                withAnimation(.easeInOut(duration: 0.2)) { page = .feedback }
+            }
+            rowDivider
+            navRow(
                 icon: "book",
-                label: "API 文档与帮助",
+                label: L10n.t("docs", locale: loc),
                 value: nil
             ) {
                 openURL(docsURL)
             }
         }
 
-        // Standalone Sign Out card (matching signOutCard in SettingsDialog.tsx)
         groupCard {
             Button {
                 showSignOutConfirm = true
@@ -393,7 +444,7 @@ struct SettingsView: View {
                         .font(.system(size: 16))
                         .foregroundStyle(.red)
                         .frame(width: 22)
-                    Text("退出登录")
+                    Text(L10n.t("signOut", locale: loc))
                         .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(.red)
                     Spacer()
@@ -407,7 +458,7 @@ struct SettingsView: View {
         .padding(.top, 16)
     }
 
-    // MARK: - Subpage 1: 账号管理
+    // MARK: - Subpage: 账号管理
 
     @ViewBuilder
     private var accountPage: some View {
@@ -445,7 +496,7 @@ struct SettingsView: View {
                             if !settings.isUsingDeepSeekAccount {
                                 Button("切换使用") {
                                     settings.authMode = .deepseekAccount
-                                    Task { await settings.refreshBalance() }
+                                    Task { await settings.refreshBalance(force: true) }
                                 }
                                 .font(.system(size: 13, weight: .medium))
                                 .foregroundStyle(Color.nuwaBrandText)
@@ -475,17 +526,18 @@ struct SettingsView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
                         ForEach(ProviderPreset.presets) { preset in
+                            let selected = settings.apiBaseUrl == preset.baseUrl && settings.apiProtocol == preset.apiProtocol
                             Button {
                                 settings.applyPreset(preset)
                             } label: {
                                 Text(preset.name)
                                     .font(.system(size: 12, weight: .medium))
-                                    .foregroundStyle(settings.apiBaseUrl == preset.baseUrl ? Color.nuwaBrandText : Color.nuwaLabelPrimary)
+                                    .foregroundStyle(selected ? Color.nuwaBrandText : Color.nuwaLabelPrimary)
                                     .padding(.horizontal, 10)
                                     .padding(.vertical, 6)
                                     .nuwaGlass(
                                         in: Capsule(),
-                                        tint: settings.apiBaseUrl == preset.baseUrl ? .nuwaBrand : nil,
+                                        tint: selected ? .nuwaBrand : nil,
                                         interactive: true
                                     )
                             }
@@ -508,8 +560,8 @@ struct SettingsView: View {
                     .pickerStyle(.menu)
                 }
 
-                labeledInput("API 地址 (Base URL)", placeholder: "https://api.deepseek.com", text: $settings.apiBaseUrl, secure: false)
-                labeledInput("模型名称", placeholder: "deepseek-chat", text: $settings.apiModel, secure: false)
+                labeledInput("API 地址 (Base URL)", placeholder: "https://api.deepseek.com", text: $settings.apiBaseUrl)
+                labeledInput("模型名称", placeholder: "deepseek-flash", text: $settings.apiModel)
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text("API Key")
@@ -518,19 +570,14 @@ struct SettingsView: View {
                     HStack {
                         Group {
                             if showApiKey {
-                                TextField("sk-...", text: $settings.apiKey)
+                                TextField("sk-...", text: $apiKeyDraft)
                             } else {
-                                SecureField("sk-...", text: $settings.apiKey)
+                                SecureField("sk-...", text: $apiKeyDraft)
                             }
                         }
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .font(.system(size: 14))
-                        .onChange(of: settings.apiKey) { _, newValue in
-                            if !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                settings.authMode = .apiKey
-                            }
-                        }
 
                         Button {
                             showApiKey.toggle()
@@ -544,12 +591,41 @@ struct SettingsView: View {
                     .frame(height: 42)
                     .background(sheetBg, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
+
+                if let keyVerifyError {
+                    Text(keyVerifyError)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
+
+                Button {
+                    Task { await verifyAndSaveApiKey() }
+                } label: {
+                    HStack(spacing: 8) {
+                        if verifyingKey {
+                            ProgressView().tint(.white).controlSize(.small)
+                        }
+                        Text(verifyingKey ? "正在验证..." : "验证并保存 API Key")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 42)
+                    .background(
+                        (verifyingKey || apiKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            ? Color.nuwaBrand.opacity(0.4)
+                            : Color.nuwaBrand,
+                        in: Capsule()
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(verifyingKey || apiKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             .padding(16)
         }
     }
 
-    // MARK: - Subpage 2: 数据管理
+    // MARK: - Subpage: 数据管理
 
     @ViewBuilder
     private var dataPage: some View {
@@ -560,12 +636,26 @@ struct SettingsView: View {
                 buttonTitle: "一键导入",
                 primary: true
             ) {
-                showMigrationWeb = true
+                if settings.hasUsedOneClickMigration || !chatStore.sessions.isEmpty {
+                    showMigrationChooser = true
+                } else {
+                    launchMigration(clearSession: false, forceReExport: false)
+                }
+            }
+            rowDivider
+            actionCell(
+                title: "通过分享链接导入",
+                subtitle: "粘贴官方 DeepSeek 分享链接或分享 ID，将对话保存到本机",
+                buttonTitle: importingShareLink ? "导入中..." : "链接导入"
+            ) {
+                if !importingShareLink {
+                    showShareLinkAlert = true
+                }
             }
             rowDivider
             actionCell(
                 title: "导入历史对话",
-                subtitle: "支持 DeepSeek 导出的 ZIP 文件或 Nuwa JSON 备份，增量合并",
+                subtitle: "支持 DeepSeek 官方导出 ZIP 或 Nuwa JSON，按 ID 增量合并",
                 buttonTitle: "导入"
             ) {
                 isImporting = true
@@ -573,14 +663,40 @@ struct SettingsView: View {
             rowDivider
             actionCell(
                 title: "导出所有历史对话",
-                subtitle: "包含全部本地会话记录，可备份到 iCloud Drive 或本机（不含 API Key）",
+                subtitle: "导出标准 DeepSeek 格式 ZIP，可备份到 iCloud Drive 或导入其他端",
                 buttonTitle: "备份到 iCloud"
             ) {
-                if let data = try? chatStore.exportBackupData() {
-                    exportDocument = BackupDocument(data: data)
+                if let data = try? chatStore.exportDeepSeekZipData() {
+                    exportDocument = ZipBackupDocument(data: data)
                     isExporting = true
                 }
             }
+            rowDivider
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("自动备份到 iCloud")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(Color.nuwaLabelPrimary)
+                    Text("开启后每次进入应用自动将最新 ZIP 快照写入 iCloud Drive")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.nuwaLabelTertiary)
+                }
+                Spacer(minLength: 8)
+                Toggle("", isOn: Binding(
+                    get: { settings.icloudAutoBackup },
+                    set: { next in
+                        if next && !DeepSeekZipExporter.isIcloudAvailable() {
+                            chatStore.showToast("iCloud 暂不可用：请在系统设置登录 iCloud 并开启 iCloud 云盘")
+                        }
+                        settings.icloudAutoBackup = next
+                        if next { chatStore.maybeAutoBackupToIcloud(settings: settings) }
+                    }
+                ))
+                .labelsHidden()
+                .tint(Color.nuwaBrand)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
         }
         .padding(.top, 8)
 
@@ -597,7 +713,100 @@ struct SettingsView: View {
         .padding(.top, 12)
     }
 
-    // MARK: - Subpage 3: 更新日志
+    // MARK: - Subpage: 位置信息
+
+    @ViewBuilder
+    private var locationPage: some View {
+        groupTitle("国家或地区")
+        groupCard {
+            VStack(spacing: 0) {
+                HStack {
+                    Text("国家 / 地区")
+                        .font(.system(size: 15))
+                        .foregroundStyle(Color.nuwaLabelPrimary)
+                    Spacer()
+                    Picker("国家/地区", selection: Binding(
+                        get: { settings.location?.region ?? "" },
+                        set: { code in
+                            if code.isEmpty {
+                                settings.location = nil
+                            } else if code == "CN" {
+                                settings.location = UserLocation(region: "CN", province: "北京市", city: "北京市")
+                            } else {
+                                settings.location = UserLocation(region: code, province: nil, city: nil)
+                            }
+                        }
+                    )) {
+                        Text("不设置").tag("")
+                        ForEach(LocationCatalog.regions, id: \.code) { r in
+                            Text(settings.locale == .zhCN ? r.zh : r.en).tag(r.code)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                }
+                .padding(.horizontal, 16)
+                .frame(minHeight: 50)
+
+                if settings.location?.region == "CN" {
+                    rowDivider
+                    HStack {
+                        Text("省份 / 直辖市")
+                            .font(.system(size: 15))
+                            .foregroundStyle(Color.nuwaLabelPrimary)
+                        Spacer()
+                        Picker("省份", selection: Binding(
+                            get: { settings.location?.province ?? "北京市" },
+                            set: { prov in
+                                let firstCity = LocationCatalog.chinaProvinces.first(where: { $0.name == prov })?.cities.first
+                                settings.location = UserLocation(region: "CN", province: prov, city: firstCity)
+                            }
+                        )) {
+                            ForEach(LocationCatalog.chinaProvinces) { p in
+                                Text(p.name).tag(p.name)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                    }
+                    .padding(.horizontal, 16)
+                    .frame(minHeight: 50)
+
+                    if let prov = LocationCatalog.chinaProvinces.first(where: { $0.name == settings.location?.province }),
+                       prov.cities.count > 1 {
+                        rowDivider
+                        HStack {
+                            Text("城市")
+                                .font(.system(size: 15))
+                                .foregroundStyle(Color.nuwaLabelPrimary)
+                            Spacer()
+                            Picker("城市", selection: Binding(
+                                get: { settings.location?.city ?? prov.cities[0] },
+                                set: { city in
+                                    settings.location = UserLocation(region: "CN", province: prov.name, city: city)
+                                }
+                            )) {
+                                ForEach(prov.cities, id: \.self) { c in
+                                    Text(c).tag(c)
+                                }
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.menu)
+                        }
+                        .padding(.horizontal, 16)
+                        .frame(minHeight: 50)
+                    }
+                }
+            }
+        }
+        Text("位置信息仅在联网搜索与本地上下文提醒时随本轮请求发送，用于提供更准确的本地天气与资讯。")
+            .font(.system(size: 12))
+            .foregroundStyle(Color.nuwaLabelTertiary)
+            .padding(.horizontal, 12)
+            .padding(.top, 8)
+    }
+
+    // MARK: - Subpage: 更新日志
 
     @ViewBuilder
     private var changelogPage: some View {
@@ -649,7 +858,7 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Reusable Setting Components
+    // MARK: - Helpers
 
     private func groupTitle(_ text: String) -> some View {
         Text(text)
@@ -661,10 +870,8 @@ struct SettingsView: View {
     }
 
     private func groupCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        VStack(spacing: 0) {
-            content()
-        }
-        .background(cardBg, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        VStack(spacing: 0) { content() }
+            .background(cardBg, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
     private var rowDivider: some View {
@@ -679,6 +886,7 @@ struct SettingsView: View {
         label: String,
         value: String?,
         valueAccent: Bool = false,
+        valueDanger: Bool = false,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
@@ -694,7 +902,7 @@ struct SettingsView: View {
                 if let value {
                     Text(value)
                         .font(.system(size: 14, weight: valueAccent ? .medium : .regular))
-                        .foregroundStyle(valueAccent ? Color.nuwaBrandText : Color.nuwaLabelTertiary)
+                        .foregroundStyle(valueDanger ? .red : (valueAccent ? Color.nuwaBrandText : Color.nuwaLabelTertiary))
                         .lineLimit(1)
                 }
                 Image(systemName: "chevron.right")
@@ -708,11 +916,7 @@ struct SettingsView: View {
         .buttonStyle(.plain)
     }
 
-    private func pickerRow<Control: View>(
-        icon: String,
-        label: String,
-        @ViewBuilder control: () -> Control
-    ) -> some View {
+    private func pickerRow<Control: View>(icon: String, label: String, @ViewBuilder control: () -> Control) -> some View {
         HStack(spacing: 12) {
             Image(systemName: icon)
                 .font(.system(size: 16))
@@ -766,7 +970,7 @@ struct SettingsView: View {
         .padding(.vertical, 12)
     }
 
-    private func labeledInput(_ label: String, placeholder: String, text: Binding<String>, secure: Bool) -> some View {
+    private func labeledInput(_ label: String, placeholder: String, text: Binding<String>) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(label)
                 .font(.system(size: 13, weight: .medium))
@@ -778,6 +982,44 @@ struct SettingsView: View {
                 .padding(.horizontal, 12)
                 .frame(height: 42)
                 .background(sheetBg, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+    }
+
+    private func launchMigration(clearSession: Bool, forceReExport: Bool) {
+        settings.hasUsedOneClickMigration = true
+        migrationOptions = MigrationLaunchOptions(clearSession: clearSession, forceReExport: forceReExport)
+    }
+
+    private func verifyAndSaveApiKey() async {
+        let trimmed = apiKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        verifyingKey = true
+        keyVerifyError = nil
+        defer { verifyingKey = false }
+        do {
+            try await AIClient.verifyApiKey(
+                apiKey: trimmed,
+                apiProtocol: settings.apiProtocol,
+                baseUrl: settings.apiBaseUrl
+            )
+            settings.apiKey = trimmed
+            settings.authMode = .apiKey
+            await settings.refreshBalance(force: true)
+            chatStore.showToast("API Key 验证通过并已保存")
+        } catch {
+            keyVerifyError = "校验失败：\(error.localizedDescription)"
+        }
+    }
+
+    private func runShareLinkImport(_ raw: String) async {
+        importingShareLink = true
+        defer { importingShareLink = false }
+        do {
+            let session = try await chatStore.importFromShareLink(raw)
+            chatStore.showToast("已导入「\(session.title)」")
+            dismiss()
+        } catch {
+            chatStore.showToast(error.localizedDescription)
         }
     }
 
