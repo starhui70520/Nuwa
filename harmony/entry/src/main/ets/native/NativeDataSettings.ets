@@ -7,6 +7,7 @@ export struct NativeDataSettings {
   onImport: () => void = () => {};
   onExport: () => void = () => {};
   onDeleteAll: () => void = () => {};
+  onShareImport: () => void = () => {};
   onMigration: () => void = () => {};
 
   @Builder
@@ -64,6 +65,14 @@ export struct NativeDataSettings {
           'primary',
           !this.busy,
           this.onMigration,
+        )
+        this.settingRow(
+          '通过分享链接导入',
+          '粘贴 DeepSeek 分享链接（如 chat.deepseek.com/share/...）直接导入并继续对话',
+          '导入链接',
+          'outlined',
+          !this.busy,
+          this.onShareImport,
         )
         this.settingRow(
           '导入历史对话',

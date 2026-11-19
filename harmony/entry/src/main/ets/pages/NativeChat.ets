@@ -20,6 +20,9 @@ import {
 } from '../native/NativeConversation';
 import { NativeMarkdown } from '../native/NativeMarkdown';
 import { NativeSettings, NativeSettingsController, NATIVE_CHAT_FONT_SIZES } from '../native/NativeSettings';
+import { fetchNativeProviderBalance } from '../native/NativeProviderBalance';
+import { checkNativeUpdate, fetchNativeReleaseHistory, getNativeCurrentVersion, NativeReleaseHistoryItem } from '../native/NativeUpdates';
+import { importNativeShareLink, nativeShareTemplate } from '../native/NativeShareImport';
 import { openNuwaPrivacyPolicy } from '../native/PrivacyPolicy';
 import { HarmonySpeechRecognition } from '../speech/HarmonySpeechRecognition';
 import { HarmonyTextToSpeech } from '../speech/HarmonyTextToSpeech';
@@ -79,6 +82,14 @@ struct NativeChat {
   @State private settingsVerifying: boolean = false;
   @State private settingsError: string = '';
   @State private backupBusy: boolean = false;
+  @State private shareImportVisible: boolean = false;
+  @State private appVersion: string = '';
+  @State private checkingUpdate: boolean = false;
+  @State private releaseNotes: NativeReleaseHistoryItem[] = [];
+  @State private notesLoading: boolean = false;
+  @State private notesError: boolean = false;
+  @State private shareInput: string = '';
+  @State private shareImportError: string = '';
   private deletingSessions: boolean = false;
   @State private renamingId: string = '';
   @State private editId: string = '';
@@ -98,6 +109,9 @@ struct NativeChat {
   private readonly accountController = new NativeDeepSeekAccountController();
   private readonly authBrowser = new webview.WebviewController();
   private authAttempt: number = 0;
+  private balanceRequest: number = 0;
+  private balanceFetchedAt: number = 0;
+  private balanceBinding: string = '';
   private migrationInProgress: boolean = false;
   private readonly scroller = new Scroller();
   private readonly drafts: Map<string, NativeDraft> = new Map();
@@ -131,10 +145,14 @@ struct NativeChat {
   aboutToAppear(): void {
     this.getUIContext().setKeyboardAvoidMode(KeyboardAvoidMode.RESIZE);
     void this.load();
+    void getNativeCurrentVersion().then((version: string) => { this.appVersion = version; }).catch(() => {});
   }
 
   onPageShow(): void {
     this.visible = true;
+    if (this.loaded) {
+      void this.refreshBalance();
+    }
     if (this.migrationInProgress) {
       this.migrationInProgress = false;
       void this.storage.loadConversations(this.host()).then((history: NativeConversationState) => {
@@ -167,6 +185,8 @@ struct NativeChat {
       this.imagePreview = '';
     } else if (this.authorizing) {
       this.cancelAuthorization();
+    } else if (this.shareImportVisible) {
+      this.closeShareImport();
     } else if (this.settingsVisible) {
       if (this.settingsSection === 'root') {
         this.settingsVisible = false;
@@ -267,12 +287,21 @@ struct NativeChat {
 
   private async refreshBalance(): Promise<void> {
     const token = this.accountToken();
-    if (!token) {
+    const key = this.settings.apiKey;
+    const binding = this.settings.attachmentBinding;
+    if (binding !== this.balanceBinding || (!token && !key)) {
       this.balance = null;
+      this.balanceFetchedAt = 0;
+      this.balanceBinding = binding;
+    }
+    if ((!token && !key) || Date.now() - this.balanceFetchedAt < 15000) {
       return;
     }
-    const balance = await this.accountController.fetchBalance(token, 'zh_CN');
-    if (this.accountToken() === token) {
+    this.balanceFetchedAt = Date.now();
+    const request = ++this.balanceRequest;
+    const balance = token ? await this.accountController.fetchBalance(token, 'zh_CN') :
+      await fetchNativeProviderBalance(this.settings.baseUrl, key, 'zh_CN');
+    if (this.settings.attachmentBinding === binding && request === this.balanceRequest && balance) {
       this.balance = balance;
     }
   }
@@ -691,7 +720,19 @@ struct NativeChat {
   private async prepareMessages(context: common.UIAbilityContext, session: NativeConversation, config: NativeChatConfig,
     reply: NativeReply): Promise<NativeChatMessage[]> {
     const messages: NativeChatMessage[] = [];
-    for (const message of visibleMessages(session)) {
+    const path = visibleMessages(session);
+    const prompt = path[path.length - 2];
+    for (let index = 0; index < path.length - 1; index++) {
+      const message = path[index];
+      const previous = path[index - 1];
+      const next = path[index + 1];
+      if (message.role === 'user' && message.id !== prompt?.id && !this.usableContextReply(next)) {
+        continue;
+      }
+      if (message.role === 'assistant' && (!this.usableContextReply(message) || previous?.role !== 'user' ||
+        messages[messages.length - 1]?.role !== 'user')) {
+        continue;
+      }
       const files: NativeChatFileRef[] = [];
       if (config.accountToken || config.protocol === 'anthropic') {
         const attachments = message.files?.slice() ?? [];
@@ -734,6 +775,11 @@ struct NativeChat {
       }
     }
     return messages;
+  }
+
+  private usableContextReply(message: NativeConversationMessage | undefined): boolean {
+    return !!message && message.role === 'assistant' && !!message.content &&
+      (message.status === 'done' || message.status === 'stopped');
   }
 
   private startReply(session: NativeConversation, parentId: string | null,
@@ -826,8 +872,8 @@ struct NativeChat {
         }
       }
       this.replies = this.replies.filter((item: NativeReply): boolean => item.sessionId !== reply.sessionId);
-      if (!error && config.accountToken && config.accountToken === this.accountToken()) {
-        void this.refreshBalance();
+      if (!error && reply.attachmentBinding === this.settings.attachmentBinding) {
+        setTimeout(() => { void this.refreshBalance(); }, 2500);
       }
     }
   }
@@ -1256,6 +1302,9 @@ struct NativeChat {
         }
       } else {
         this.replyContent(message.id, message.content, message.reasoning, false)
+        if (this.shareTemplate(message)) {
+          NativeMarkdown({ content: this.shareTemplate(message), fontScale: this.settings.chatFontSize / 16 })
+        }
         if (message.status === 'error') {
           Text('回复失败，请重试').fontSize(14).fontColor($r('app.color.native_chat_error'))
         } else if (message.status === 'stopped') {
@@ -1337,11 +1386,154 @@ struct NativeChat {
     }
   }
 
+  private openShareImport(): void {
+    if (this.backupBusy) {
+      return;
+    }
+    this.shareInput = '';
+    this.shareImportError = '';
+    this.settingsVisible = false;
+    this.shareImportVisible = true;
+  }
+
+  private closeShareImport(): void {
+    if (!this.backupBusy) {
+      this.shareImportVisible = false;
+      this.openSettings('data');
+    }
+  }
+
+  private async acceptShareImport(): Promise<void> {
+    if (!this.shareInput.trim() || this.backupBusy) {
+      return;
+    }
+    if (this.replies.length > 0) {
+      this.shareImportError = '请在回复结束后导入';
+      return;
+    }
+    this.backupBusy = true;
+    this.shareImportError = '';
+    try {
+      const imported = await importNativeShareLink(this.shareInput);
+      const context = this.host();
+      const next = upsertConversation(this.history, imported, true);
+      await this.storage.saveConversations(context, next);
+      this.drafts.set(this.history.activeId ?? '', { text: this.draft, files: this.draftFiles });
+      this.history = next;
+      this.restoreDraft(imported.id);
+      this.shareImportVisible = false;
+      this.shareInput = '';
+      this.scrollToLatest();
+      this.toast('已导入 1 个对话');
+    } catch (error) {
+      this.shareImportError = (error as Error).message || '该分享链接无法导入';
+    } finally {
+      this.backupBusy = false;
+    }
+  }
+
+  @Builder
+  private shareImportDialog() {
+    Column({ space: 14 }) {
+      Text('通过 DeepSeek 分享链接导入').fontSize(18).fontWeight(FontWeight.Medium).width('100%')
+        .fontColor($r('app.color.native_chat_primary'))
+      TextArea({ text: this.shareInput, placeholder: '粘贴分享链接或包含链接的完整分享文案，例如：https://chat.deepseek.com/share/...' })
+        .height(96).width('100%').fontSize(14).enabled(!this.backupBusy).maxLength(4096).borderRadius(14)
+        .backgroundColor($r('app.color.native_chat_field')).fontColor($r('app.color.native_chat_primary'))
+        .onChange((text: string) => { this.shareInput = text; this.shareImportError = ''; })
+      if (this.shareImportError) {
+        Text(this.shareImportError).width('100%').fontColor($r('app.color.native_chat_error')).fontSize(13)
+      }
+      Row({ space: 8 }) {
+        Button('取消', { buttonStyle: ButtonStyleMode.TEXTUAL }).enabled(!this.backupBusy)
+          .onClick(() => { this.closeShareImport(); })
+        Button(this.backupBusy ? '导入中…' : '确认导入').enabled(!this.backupBusy && !!this.shareInput.trim())
+          .backgroundColor($r('app.color.native_chat_blue')).onClick(() => { void this.acceptShareImport(); })
+      }
+      .width('100%').justifyContent(FlexAlign.End)
+    }
+    .width('86%').constraintSize({ maxWidth: 440 }).padding(20).borderRadius(22)
+    .backgroundColor($r('app.color.native_chat_surface')).backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+  }
+
+  private shareTemplate(message: NativeConversationMessage): string {
+    const session = this.session();
+    return session ? nativeShareTemplate(session, message.id) : '';
+  }
+
+  private async checkUpdate(): Promise<void> {
+    if (this.checkingUpdate) {
+      return;
+    }
+    this.checkingUpdate = true;
+    try {
+      const update = await checkNativeUpdate();
+      if (!update.hasUpdate) {
+        this.toast('当前已是最新版本');
+        return;
+      }
+      const result = await this.getUIContext().getPromptAction().showDialog({
+        title: `发现新版本 v${update.latestVersion}`,
+        message: `当前版本：v${update.currentVersion}\n\n${update.notes || '包含体验优化与问题修复。'}`,
+        buttons: [{ text: '暂不更新', color: '#61666B' }, { text: '前往下载', color: '#3964FE' }],
+      });
+      if (result.index === 1) {
+        await this.openLink(update.appGalleryUrl ?? update.downloadUrl ?? update.releaseUrl);
+      }
+    } catch {
+      this.toast('检查更新失败，请稍后重试');
+    } finally {
+      this.checkingUpdate = false;
+    }
+  }
+
+  private async loadReleaseNotes(): Promise<void> {
+    if (this.notesLoading) {
+      return;
+    }
+    this.notesLoading = true;
+    this.notesError = false;
+    try {
+      this.releaseNotes = await fetchNativeReleaseHistory();
+    } catch {
+      this.notesError = true;
+    } finally {
+      this.notesLoading = false;
+    }
+  }
+
+  @Builder
+  private releaseNotesPage() {
+    if (this.notesLoading) {
+      LoadingProgress().width(26).height(26).color($r('app.color.native_chat_blue'))
+    } else if (this.notesError) {
+      Text('加载更新日志失败，请稍后重试').width('100%').fontColor($r('app.color.native_chat_secondary'))
+      Button('重试', { buttonStyle: ButtonStyleMode.TEXTUAL }).onClick(() => { void this.loadReleaseNotes(); })
+    } else if (!this.releaseNotes.length) {
+      Text('暂无历史版本记录').width('100%').fontColor($r('app.color.native_chat_secondary'))
+    } else {
+      ForEach(this.releaseNotes, (release: NativeReleaseHistoryItem) => {
+        Column({ space: 10 }) {
+          Row() {
+            Text(`v${release.version}`).fontSize(16).fontWeight(FontWeight.Medium)
+              .fontColor($r('app.color.native_chat_primary')).layoutWeight(1)
+            Text(release.createdAt.slice(0, 10)).fontSize(12).fontColor($r('app.color.native_chat_secondary'))
+          }
+          .width('100%')
+          Text(release.changelog || '包含体验优化与问题修复。').width('100%').fontSize(14).lineHeight(22)
+            .fontColor($r('app.color.native_chat_secondary')).copyOption(CopyOptions.LocalDevice)
+        }
+        .width('100%').padding(16).borderRadius(16).backgroundColor($r('app.color.native_chat_surface'))
+      }, (release: NativeReleaseHistoryItem): string => release.id)
+    }
+  }
+
   private settingsTitle(): string {
     switch (this.settingsSection) {
       case 'account': return '账号管理';
       case 'key': return '更换 API Key';
       case 'data': return '数据管理';
+      case 'notes': return '更新日志';
       default: return '设置';
     }
   }
@@ -1427,9 +1619,17 @@ struct NativeChat {
       .fontColor($r('app.color.native_chat_secondary')).padding({ left: 9 })
     this.settingsLabel('关于')
     Column() {
+      Row() {
+        Text('当前版本').layoutWeight(1).fontSize(15).fontColor($r('app.color.native_chat_primary'))
+        Text(this.appVersion).fontSize(13).fontColor($r('app.color.native_chat_secondary'))
+      }
+      .width('100%').height(48).padding({ left: 15, right: 12 })
+      Divider().color($r('app.color.native_chat_stroke')).margin({ left: 14 })
+      this.settingsRow(this.checkingUpdate ? '检查中...' : '检查更新', '', () => { void this.checkUpdate(); })
+      Divider().color($r('app.color.native_chat_stroke')).margin({ left: 14 })
       this.settingsRow('隐私政策', '', () => { void openNuwaPrivacyPolicy(this.host()).catch(() => { this.toast('无法打开隐私政策'); }); })
       Divider().color($r('app.color.native_chat_stroke')).margin({ left: 14 })
-      this.settingsRow('更新日志', '', () => { void this.openLink('https://github.com/starhui70520/Nuwa/releases'); })
+      this.settingsRow('更新日志', '', () => { this.settingsSection = 'notes'; void this.loadReleaseNotes(); })
     }
     .width('100%').borderRadius(16).clip(true).backgroundColor($r('app.color.native_chat_surface'))
   }
@@ -1512,11 +1712,14 @@ struct NativeChat {
             NativeDataSettings({
               busy: this.backupBusy, sessionCount: this.history.sessions.length,
               onMigration: () => { void this.openHistoryMigration(); },
+              onShareImport: () => { this.openShareImport(); },
               onImport: () => { void this.importChatHistory(); },
               onExport: () => { void this.exportChatHistory(); },
               onDeleteAll: () => { void this.deleteSessions(this.history.sessions.map<string>(
                 (session: NativeConversation): string => session.id), true); },
             })
+          } else if (this.settingsSection === 'notes') {
+            this.releaseNotesPage()
           } else {
             this.settingsRoot()
           }
@@ -1792,6 +1995,14 @@ struct NativeChat {
         }
         .width('100%').height('100%')
       }
+      if (this.shareImportVisible) {
+        Stack({ alignContent: Alignment.Center }) {
+          Column().width('100%').height('100%').backgroundColor('#66000000')
+            .onClick(() => { this.closeShareImport(); })
+          this.shareImportDialog()
+        }
+        .width('100%').height('100%')
+      }
       if (this.renamingId) {
         Stack({ alignContent: Alignment.Center }) {
           Column().width('100%').height('100%').backgroundColor('#66000000').onClick(() => { this.renamingId = ''; })
@@ -1809,7 +2020,7 @@ struct NativeChat {
       PanGesture({ direction: PanDirection.Horizontal, distance: 14 })
         .onActionStart((event: GestureEvent) => { this.touchStart = event.fingerList[0]?.globalX ?? this.viewportWidth; })
         .onActionUpdate((event: GestureEvent) => {
-          if (this.authenticated() && !this.settingsVisible && !this.renamingId && !this.authorizing && !this.imagePreview &&
+          if (this.authenticated() && !this.settingsVisible && !this.renamingId && !this.authorizing && !this.imagePreview && !this.shareImportVisible &&
             (this.drawerOpen || this.touchStart < 160)) {
             this.drawerDrag = event.offsetX;
           }
