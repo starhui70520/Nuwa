@@ -11,6 +11,13 @@ export interface NativeChatConfig {
   baseUrl: string;
   apiKey: string;
   model: string;
+  /** Omitted protocol preserves the original OpenAI-compatible transport. */
+  protocol?: 'openai' | 'anthropic';
+  /** OAuth token for the official DeepSeek App account endpoint; never used as an API key. */
+  accountToken?: string;
+  system?: string;
+  thinking?: boolean;
+  search?: boolean;
 }
 
 interface ChatRequestBody {
@@ -37,6 +44,85 @@ interface ChatChunk {
   choices?: ChatChoice[];
   error?: ChatError;
   message?: string;
+}
+
+interface AnthropicEventDelta {
+  type?: string;
+  text?: string;
+  thinking?: string;
+}
+
+interface AnthropicEventError {
+  message?: string;
+}
+
+interface AnthropicDeltaEvent {
+  type?: string;
+  delta?: AnthropicEventDelta;
+  error?: AnthropicEventError;
+  message?: string;
+}
+
+interface AnthropicThinking {
+  type: 'enabled' | 'disabled';
+}
+
+interface AnthropicSafetyCheck {
+  level: 'high';
+}
+
+interface AnthropicTool {
+  type: 'deepseek_read_url' | 'deepseek_web_search';
+  name: 'deepseek_read_url' | 'deepseek_web_search';
+}
+
+interface AnthropicRequestBody {
+  model: string;
+  system: string;
+  messages: NativeChatMessage[];
+  stream: boolean;
+  thinking: AnthropicThinking;
+  safety_check: AnthropicSafetyCheck;
+  tools: AnthropicTool[];
+}
+
+const DEEPSEEK_ACCOUNT_ORIGIN: string = 'https://api.deepseek.com';
+const DEFAULT_DEEPSEEK_SYSTEM: string = '该助手为DeepSeek，由深度求索公司创造。';
+
+function redactCredentials(message: string, apiKey: string, accountToken: string): string {
+  let safeMessage = message;
+  if (apiKey) {
+    safeMessage = safeMessage.split(apiKey).join('••••');
+  }
+  if (accountToken) {
+    safeMessage = safeMessage.split(accountToken).join('••••');
+  }
+  return safeMessage.slice(0, 240);
+}
+
+function resolveAnthropicEndpoint(baseUrl: string): string {
+  let endpoint: url.URL;
+  try {
+    endpoint = url.URL.parseURL(baseUrl.trim());
+  } catch {
+    throw new Error('请输入有效的服务器地址');
+  }
+  if ((endpoint.protocol !== 'https:' && endpoint.protocol !== 'http:') ||
+    !endpoint.hostname || endpoint.username || endpoint.password || endpoint.hash) {
+    throw new Error('请输入不含账号、密码或片段的 HTTP 或 HTTPS 地址');
+  }
+  if (endpoint.protocol !== 'https:') {
+    throw new Error('Anthropic 兼容服务地址必须使用 HTTPS');
+  }
+  let path = endpoint.pathname.replace(/\/+$/, '');
+  if (path.endsWith('/anthropic/v1/messages')) {
+    endpoint.pathname = path;
+  } else if (path.endsWith('/v1')) {
+    endpoint.pathname = `${path.slice(0, -3)}/anthropic/v1/messages`;
+  } else {
+    endpoint.pathname = `${path.replace(/\/anthropic\/v1$/, '')}/anthropic/v1/messages`;
+  }
+  return endpoint.href;
 }
 
 function resolveChatEndpoint(baseUrl: string, authenticated: boolean): string {
@@ -71,9 +157,12 @@ class ChatStream {
   private done: boolean = false;
   private hasReply: boolean = false;
   private readonly onDelta: (content: string, reasoning: string) => void;
+  private readonly protocol: 'openai' | 'anthropic';
 
-  constructor(onDelta: (content: string, reasoning: string) => void) {
+  constructor(onDelta: (content: string, reasoning: string) => void,
+    protocol: 'openai' | 'anthropic' = 'openai') {
     this.onDelta = onDelta;
+    this.protocol = protocol;
   }
 
   push(bytes: ArrayBuffer): void {
@@ -136,6 +225,10 @@ class ChatStream {
       this.done = true;
       return;
     }
+    if (this.protocol === 'anthropic') {
+      this.dispatchAnthropic(data, eventName);
+      return;
+    }
     let chunk: ChatChunk;
     try {
       chunk = JSON.parse(data) as ChatChunk;
@@ -161,6 +254,30 @@ class ChatStream {
       this.onDelta(content, reasoning);
     }
   }
+
+  private dispatchAnthropic(data: string, eventName: string): void {
+    let event: AnthropicDeltaEvent;
+    try {
+      event = JSON.parse(data) as AnthropicDeltaEvent;
+    } catch {
+      if (eventName === 'error') throw new Error('服务端报告了流式错误');
+      return;
+    }
+    if (event.type === 'error' || eventName === 'error') {
+      throw new Error(event.error?.message ?? event.message ?? '服务端报告了流式错误');
+    }
+    if (event.type === 'message_stop') {
+      this.done = true;
+      return;
+    }
+    const delta = event.delta;
+    const content = delta?.type === 'text_delta' && typeof delta.text === 'string' ? delta.text : '';
+    const reasoning = delta?.type === 'thinking_delta' && typeof delta.thinking === 'string' ? delta.thinking : '';
+    if (content || reasoning) {
+      this.hasReply = true;
+      this.onDelta(content, reasoning);
+    }
+  }
 }
 
 export class NativeChatClient {
@@ -174,22 +291,53 @@ export class NativeChatClient {
     onDelta: (content: string, reasoning: string) => void): Promise<void> {
     this.cancel();
     const apiKey = config.apiKey.trim();
-    const endpoint = resolveChatEndpoint(config.baseUrl, !!apiKey);
-    const model = config.model.trim();
+    const accountToken = config.accountToken?.trim() ?? '';
+    const protocol = accountToken ? 'anthropic' : (config.protocol ?? 'openai');
+    const endpoint = accountToken
+      ? `${DEEPSEEK_ACCOUNT_ORIGIN}/anthropic/v1/messages`
+      : protocol === 'anthropic'
+        ? resolveAnthropicEndpoint(config.baseUrl)
+      : resolveChatEndpoint(config.baseUrl, !!apiKey);
+    const model = (accountToken ? 'deepseek-flash' : config.model).trim();
     if (!model) {
       throw new Error('请输入模型名称');
     }
     if (/[\r\n]/.test(apiKey)) {
       throw new Error('API 密钥中不能包含换行');
     }
+    if (accountToken.includes('\n') || accountToken.includes('\r')) {
+      throw new Error('账号令牌中不能包含换行');
+    }
     const headers: Record<string, string> = {
       'content-type': 'application/json',
       'accept': 'text/event-stream',
     };
-    if (apiKey) {
-      headers['authorization'] = `Bearer ${apiKey}`;
+    if (accountToken) {
+      headers['x-dsh-auth-token'] = accountToken;
+    } else if (apiKey) {
+      if (protocol === 'anthropic') headers['x-api-key'] = apiKey;
+      else headers['authorization'] = `Bearer ${apiKey}`;
     }
-    const body: ChatRequestBody = { model, messages, stream: true };
+    let body: ChatRequestBody | AnthropicRequestBody;
+    if (protocol === 'anthropic') {
+      const tools: AnthropicTool[] = [
+        { type: 'deepseek_read_url', name: 'deepseek_read_url' },
+      ];
+      if (config.search) {
+        tools.push({ type: 'deepseek_web_search', name: 'deepseek_web_search' });
+      }
+      body = {
+        model: model,
+        system: config.system ?? DEFAULT_DEEPSEEK_SYSTEM,
+        messages: messages,
+        stream: true,
+        thinking: { type: config.thinking ? 'enabled' : 'disabled' },
+        safety_check: { level: 'high' },
+        tools: tools,
+      } as AnthropicRequestBody;
+    } else {
+      body = { model: model, messages: messages, stream: true } as ChatRequestBody;
+    }
     const options: http.HttpRequestOptions = {
       method: http.RequestMethod.POST,
       header: headers,
@@ -220,7 +368,7 @@ export class NativeChatClient {
         if (this.settleRequest === settle) {
           onDelta(content, reasoning);
         }
-      });
+      }, protocol);
       this.settleRequest = settle;
       try {
         request.on('dataReceive', (bytes: ArrayBuffer): void => {
@@ -231,8 +379,7 @@ export class NativeChatClient {
             stream.push(bytes);
           } catch (error) {
             const message = error instanceof Error ? error.message : '无法读取模型回复';
-            const safeMessage = apiKey ? message.split(apiKey).join('••••') : message;
-            settle(new Error(safeMessage.slice(0, 240)));
+            settle(new Error(redactCredentials(message, apiKey, accountToken)));
           }
         });
         request.requestInStream(endpoint, options).then((status: number): void => {
@@ -248,8 +395,7 @@ export class NativeChatClient {
             settle();
           } catch (error) {
             const message = error instanceof Error ? error.message : '无法读取模型回复';
-            const safeMessage = apiKey ? message.split(apiKey).join('••••') : message;
-            settle(new Error(safeMessage.slice(0, 240)));
+            settle(new Error(redactCredentials(message, apiKey, accountToken)));
           }
         }, (error: BusinessError): void => {
           settle(new Error(`无法连接模型服务 (${error.code})`));

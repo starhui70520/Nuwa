@@ -3,6 +3,70 @@
     {
       "name": "start_window_background",
       "value": "#FFFFFF"
+    },
+    {
+      "name": "native_chat_bg",
+      "value": "#FFFFFF"
+    },
+    {
+      "name": "native_chat_sidebar",
+      "value": "#F9FAFB"
+    },
+    {
+      "name": "native_chat_surface",
+      "value": "#FFFFFF"
+    },
+    {
+      "name": "native_chat_primary",
+      "value": "#0F1115"
+    },
+    {
+      "name": "native_chat_secondary",
+      "value": "#61666B"
+    },
+    {
+      "name": "native_chat_caption",
+      "value": "#ADB2B8"
+    },
+    {
+      "name": "native_chat_bubble",
+      "value": "#EDF3FE"
+    },
+    {
+      "name": "native_chat_blue",
+      "value": "#3964FE"
+    },
+    {
+      "name": "native_chat_blue_text",
+      "value": "#3964FE"
+    },
+    {
+      "name": "native_chat_selected",
+      "value": "#1A3964FE"
+    },
+    {
+      "name": "native_chat_active_session",
+      "value": "#E4EDFD"
+    },
+    {
+      "name": "native_chat_field",
+      "value": "#F1F3F5"
+    },
+    {
+      "name": "native_chat_stroke",
+      "value": "#14000000"
+    },
+    {
+      "name": "native_chat_glass_stroke",
+      "value": "#99FFFFFF"
+    },
+    {
+      "name": "native_chat_glass",
+      "value": "#8CFFFFFF"
+    },
+    {
+      "name": "native_chat_error",
+      "value": "#EC1313"
     }
   ]
 }
