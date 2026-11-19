@@ -1,5 +1,4 @@
 import { common } from '@kit.AbilityKit';
-import { privacyManager } from '@kit.AppGalleryKit';
 import { webview } from '@kit.ArkWeb';
 import { url, util } from '@kit.ArkTS';
 import { deviceInfo } from '@kit.BasicServicesKit';
@@ -9,10 +8,9 @@ import { http } from '@kit.NetworkKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { HarmonySpeechRecognition } from '../speech/HarmonySpeechRecognition';
 import { HarmonyTextToSpeech } from '../speech/HarmonyTextToSpeech';
+import { openNuwaPrivacyPolicy } from '../native/PrivacyPolicy';
 
 const PLATFORM_ORIGIN = 'https://platform.deepseek.com';
-const HOSTED_PRIVACY_POLICY_URL =
-  'https://agreement-drcn.hispace.dbankcloud.cn/index.html?lang=zh&agreementId=2086009982511225600';
 const CLIENT_VERSION = '0.2.2';
 const APP_WEB_URL = 'resource://rawfile/web/index.html';
 const APP_BRIDGE_PERMISSION =
@@ -311,25 +309,10 @@ struct Index {
   }
 
   private async openPrivacyPolicy(): Promise<void> {
-    let policyUrl = HOSTED_PRIVACY_POLICY_URL;
-    try {
-      const policy = privacyManager.getAppPrivacyMgmtInfo().privacyInfo.find(
-        (link) => link.type === privacyManager.AppPrivacyLinkType.PRIVACY_STATEMENT_LINK
-      );
-      if (policy?.url) {
-        const managedUrl = url.URL.parseURL(policy.url);
-        if (managedUrl.protocol === 'https:') {
-          policyUrl = managedUrl.href;
-        }
-      }
-    } catch {
-      // Sideloaded builds can lack AppGallery privacy metadata.
-    }
-
     const uiContext = this.getUIContext();
     try {
       const context = uiContext.getHostContext() as common.UIAbilityContext;
-      await context.openLink(policyUrl, { appLinkingOnly: false });
+      await openNuwaPrivacyPolicy(context);
     } catch {
       uiContext.getPromptAction().showToast({ message: $r('app.string.privacy_policy_unavailable') });
     }
