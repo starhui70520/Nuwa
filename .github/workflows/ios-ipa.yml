@@ -1,4 +1,4 @@
-name: Build iOS IPA (Unsigned)
+name: Build iOS IPA & TestFlight
 
 on:
   push:
@@ -9,6 +9,12 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      upload_testflight:
+        description: 'Upload signed IPA to TestFlight (requires signing secrets)'
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: write
@@ -63,6 +69,28 @@ jobs:
           echo "name=${VER}" >> "$GITHUB_OUTPUT"
           echo "build=${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
 
+      - name: Check signing configuration
+        id: signing
+        shell: bash
+        env:
+          IOS_DIST_CERT_P12_BASE64: ${{ secrets.IOS_DIST_CERT_P12_BASE64 }}
+          IOS_DIST_CERT_PASSWORD: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
+          IOS_APPSTORE_PROFILE_BASE64: ${{ secrets.IOS_APPSTORE_PROFILE_BASE64 }}
+          APPSTORE_API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          APPSTORE_API_ISSUER_ID: ${{ secrets.APPSTORE_API_ISSUER_ID }}
+          APPSTORE_API_KEY_P8_BASE64: ${{ secrets.APPSTORE_API_KEY_P8_BASE64 }}
+        run: |
+          if [ -n "$IOS_DIST_CERT_P12_BASE64" ] && [ -n "$IOS_APPSTORE_PROFILE_BASE64" ]; then
+            echo "can_sign=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "can_sign=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -n "$APPSTORE_API_KEY_ID" ] && [ -n "$APPSTORE_API_ISSUER_ID" ] && [ -n "$APPSTORE_API_KEY_P8_BASE64" ]; then
+            echo "can_upload=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "can_upload=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build unsigned iOS app
         working-directory: chat-demo
         run: |
@@ -99,16 +127,162 @@ jobs:
           cd build
           zip -qry "${GITHUB_WORKSPACE}/Nuwa-v${{ steps.version.outputs.name }}-unsigned.ipa" Payload
 
-      - name: Upload IPA Artifact
+      - name: Upload Unsigned IPA Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Nuwa-iOS-v${{ steps.version.outputs.name }}-unsigned
           path: Nuwa-*-unsigned.ipa
           if-no-files-found: error
 
-      - name: Attach IPA to GitHub Release
+      - name: Attach Unsigned IPA to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: Nuwa-*-unsigned.ipa
+
+      - name: Install Apple Distribution certificate & provisioning profile
+        if: steps.signing.outputs.can_sign == 'true'
+        id: apple_cert
+        shell: bash
+        env:
+          IOS_DIST_CERT_P12_BASE64: ${{ secrets.IOS_DIST_CERT_P12_BASE64 }}
+          IOS_DIST_CERT_PASSWORD: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
+          IOS_APPSTORE_PROFILE_BASE64: ${{ secrets.IOS_APPSTORE_PROFILE_BASE64 }}
+        run: |
+          KEYCHAIN_PATH="${RUNNER_TEMP}/app-signing.keychain-db"
+          KEYCHAIN_PASS="ci-temp-keychain-pass"
+          CERT_PATH="${RUNNER_TEMP}/dist.p12"
+          PROFILE_PATH="${RUNNER_TEMP}/appstore.mobileprovision"
+          PROFILE_PLIST="${RUNNER_TEMP}/profile.plist"
+
+          echo "$IOS_DIST_CERT_P12_BASE64" | base64 --decode > "$CERT_PATH"
+          echo "$IOS_APPSTORE_PROFILE_BASE64" | base64 --decode > "$PROFILE_PATH"
+
+          security cms -D -i "$PROFILE_PATH" > "$PROFILE_PLIST"
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c "Print :UUID" "$PROFILE_PLIST")
+          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c "Print :Name" "$PROFILE_PLIST")
+          TEAM_ID=$(/usr/libexec/PlistBuddy -c "Print :TeamIdentifier:0" "$PROFILE_PLIST")
+          APP_ID=$(/usr/libexec/PlistBuddy -c "Print :Entitlements:application-identifier" "$PROFILE_PLIST")
+          BUNDLE_ID="${APP_ID#${TEAM_ID}.}"
+
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          cp "$PROFILE_PATH" ~/Library/MobileDevice/Provisioning\ Profiles/"${PROFILE_UUID}.mobileprovision"
+
+          security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$IOS_DIST_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -k "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+          echo "profile_uuid=${PROFILE_UUID}" >> "$GITHUB_OUTPUT"
+          echo "profile_name=${PROFILE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "team_id=${TEAM_ID}" >> "$GITHUB_OUTPUT"
+          echo "bundle_id=${BUNDLE_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Archive & export signed App Store IPA
+        if: steps.signing.outputs.can_sign == 'true'
+        working-directory: chat-demo
+        shell: bash
+        run: |
+          TEAM_ID="${{ steps.apple_cert.outputs.team_id }}"
+          PROFILE_NAME="${{ steps.apple_cert.outputs.profile_name }}"
+          BUNDLE_ID="${{ steps.apple_cert.outputs.bundle_id }}"
+
+          # Patch only the App target's Release configuration for manual distribution signing
+          # so SPM targets (CapApp-SPM) are not forced to use a provisioning profile.
+          python3 - <<PYEOF
+          from pathlib import Path
+          import re
+          p = Path("ios/App/App.xcodeproj/project.pbxproj")
+          text = p.read_text(encoding="utf-8")
+          pattern = r'(504EC3181FED79650016851F /\* Release \*/ = \{[\s\S]*?buildSettings = \{[\s\S]*?)CODE_SIGN_STYLE = Automatic;'
+          replacement = (
+              r'\1CODE_SIGN_STYLE = Manual;\n'
+              f'\t\t\t\tCODE_SIGN_IDENTITY = "Apple Distribution";\n'
+              f'\t\t\t\tDEVELOPMENT_TEAM = {TEAM_ID};\n'
+              f'\t\t\t\tPROVISIONING_PROFILE_SPECIFIER = "{PROFILE_NAME}";'
+          )
+          new_text, count = re.subn(pattern, replacement, text, count=1)
+          if count != 1:
+              raise RuntimeError(f"Expected to patch 1 Release block, patched {count}")
+          p.write_text(new_text, encoding="utf-8")
+          PYEOF
+
+          if [ -d "ios/App/App.xcworkspace" ]; then
+            TARGET_ARGS="-workspace ios/App/App.xcworkspace"
+          else
+            TARGET_ARGS="-project ios/App/App.xcodeproj"
+          fi
+
+          xcodebuild \
+            ${TARGET_ARGS} \
+            -scheme App \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath build/Nuwa.xcarchive \
+            MARKETING_VERSION="${{ steps.version.outputs.name }}" \
+            CURRENT_PROJECT_VERSION="${{ steps.version.outputs.build }}" \
+            archive
+
+          cat > build/ExportOptions.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>app-store-connect</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>teamID</key>
+            <string>${TEAM_ID}</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>${BUNDLE_ID}</key>
+              <string>${PROFILE_NAME}</string>
+            </dict>
+            <key>uploadSymbols</key>
+            <true/>
+          </dict>
+          </plist>
+          EOF
+
+          xcodebuild -exportArchive \
+            -archivePath build/Nuwa.xcarchive \
+            -exportOptionsPlist build/ExportOptions.plist \
+            -exportPath build/export
+
+          IPA_FILE=$(find build/export -name "*.ipa" | head -n 1)
+          if [ -z "$IPA_FILE" ]; then
+            echo "Exported IPA not found"
+            exit 1
+          fi
+          cp "$IPA_FILE" "${GITHUB_WORKSPACE}/Nuwa-v${{ steps.version.outputs.name }}-appstore.ipa"
+
+      - name: Upload to TestFlight (App Store Connect)
+        if: |
+          steps.signing.outputs.can_sign == 'true' &&
+          steps.signing.outputs.can_upload == 'true' &&
+          (github.event_name != 'workflow_dispatch' || inputs.upload_testflight != false)
+        shell: bash
+        env:
+          APPSTORE_API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          APPSTORE_API_ISSUER_ID: ${{ secrets.APPSTORE_API_ISSUER_ID }}
+          APPSTORE_API_KEY_P8_BASE64: ${{ secrets.APPSTORE_API_KEY_P8_BASE64 }}
+        run: |
+          mkdir -p ~/.appstoreconnect/private_keys
+          echo "$APPSTORE_API_KEY_P8_BASE64" | base64 --decode > ~/.appstoreconnect/private_keys/AuthKey_${APPSTORE_API_KEY_ID}.p8
+          xcrun altool --upload-app \
+            --type ios \
+            --file "${GITHUB_WORKSPACE}/Nuwa-v${{ steps.version.outputs.name }}-appstore.ipa" \
+            --apiKey "$APPSTORE_API_KEY_ID" \
+            --apiIssuer "$APPSTORE_API_ISSUER_ID"
+
+      - name: Clean up signing keychain and keys
+        if: always()
+        shell: bash
+        run: |
+          security delete-keychain "${RUNNER_TEMP}/app-signing.keychain-db" 2>/dev/null || true
+          rm -rf ~/.appstoreconnect/private_keys
+          rm -f "${RUNNER_TEMP}/dist.p12" "${RUNNER_TEMP}/appstore.mobileprovision" "${RUNNER_TEMP}/profile.plist"

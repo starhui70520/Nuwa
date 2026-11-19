@@ -12,6 +12,14 @@ tmp/
 !.env.example
 *.jks
 *.keystore
+certs/
+*.p12
+*.p8
+*.cer
+*.key
+*.mobileprovision
+*.certSigningRequest
+*.ipa
 
 # Android & IDE artifacts
 .gradle/
