@@ -33,8 +33,7 @@ targets:
         LSRequiresIPhoneOS: true
         NSMicrophoneUsageDescription: 用于语音输入，将语音转写为文字发送给助手
         NSSpeechRecognitionUsageDescription: 用于语音输入，在设备上进行语音识别
-        UILaunchScreen:
-          UIColorName: ""
+        UILaunchStoryboardName: LaunchScreen
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft

@@ -6,6 +6,7 @@ final class ChatStore: ObservableObject {
     @Published var sessions: [ChatSession] = []
     @Published var activeSessionId: UUID?
     @Published var isGenerating = false
+    @Published var importingHistory = false
     @Published var toastMessage: String?
 
     private var activeTask: Task<Void, Never>?
@@ -20,12 +21,8 @@ final class ChatStore: ObservableObject {
 
     init() {
         load()
-        if sessions.isEmpty {
-            let fresh = ChatSession()
-            sessions = [fresh]
-            activeSessionId = fresh.id
-        } else {
-            activeSessionId = sortedSessions.first?.id
+        if let first = sortedSessions.first {
+            activeSessionId = first.id
         }
     }
 
@@ -44,16 +41,17 @@ final class ChatStore: ObservableObject {
     }
 
     @discardableResult
-    func createNewSession() -> ChatSession {
+    func createNewSession(silentIfAlreadyNew: Bool = false) -> ChatSession? {
         stopGenerating()
-        if let current = activeSession, current.messages.isEmpty {
-            return current
+        if activeSessionId == nil || (activeSession?.messages.isEmpty == true) {
+            if !silentIfAlreadyNew {
+                showToast("已在最新对话中")
+            }
+            activeSessionId = nil
+            return nil
         }
-        let session = ChatSession()
-        sessions.insert(session, at: 0)
-        activeSessionId = session.id
-        save()
-        return session
+        activeSessionId = nil
+        return nil
     }
 
     func selectSession(_ id: UUID) {
@@ -69,6 +67,19 @@ final class ChatStore: ObservableObject {
         save()
     }
 
+    func setSessionsPinned(_ ids: Set<UUID>, pinned: Bool) {
+        var changed = false
+        for idx in sessions.indices where ids.contains(sessions[idx].id) {
+            if sessions[idx].isPinned != pinned {
+                sessions[idx].isPinned = pinned
+                changed = true
+            }
+        }
+        if changed {
+            save()
+        }
+    }
+
     func renameSession(_ id: UUID, title: String) {
         let clean = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty, let idx = sessions.firstIndex(where: { $0.id == id }) else { return }
@@ -80,15 +91,25 @@ final class ChatStore: ObservableObject {
     func deleteSession(_ id: UUID) {
         if activeSessionId == id {
             stopGenerating()
+            activeSessionId = nil
         }
         sessions.removeAll { $0.id == id }
-        if sessions.isEmpty {
-            let fresh = ChatSession()
-            sessions = [fresh]
-            activeSessionId = fresh.id
-        } else if activeSessionId == id {
-            activeSessionId = sortedSessions.first?.id
+        save()
+    }
+
+    func deleteSessions(_ ids: Set<UUID>) {
+        if let active = activeSessionId, ids.contains(active) {
+            stopGenerating()
+            activeSessionId = nil
         }
+        sessions.removeAll { ids.contains($0.id) }
+        save()
+    }
+
+    func deleteAllSessions() {
+        stopGenerating()
+        sessions.removeAll()
+        activeSessionId = nil
         save()
     }
 
@@ -108,9 +129,12 @@ final class ChatStore: ObservableObject {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !isGenerating else { return }
 
-        if activeSessionId == nil {
-            createNewSession()
+        if activeSessionId == nil || !sessions.contains(where: { $0.id == activeSessionId }) {
+            let fresh = ChatSession(title: String(trimmed.prefix(24)))
+            sessions.insert(fresh, at: 0)
+            activeSessionId = fresh.id
         }
+
         guard let sessionId = activeSessionId,
               let sIdx = sessions.firstIndex(where: { $0.id == sessionId })
         else { return }
@@ -169,9 +193,9 @@ final class ChatStore: ObservableObject {
         let startTime = Date()
         var thinkingFinishedAt: Date?
 
-        let apiProtocol = settings.apiProtocol
-        let baseUrl = settings.apiBaseUrl
-        let apiKey = settings.apiKey
+        let apiProtocol = settings.effectiveProtocol
+        let baseUrl = settings.effectiveBaseUrl
+        let apiKey = settings.activeSecret
         let model = settings.effectiveModel
         let systemPrompt = settings.systemPrompt
         let thinkingEnabled = settings.thinkingEnabled
@@ -243,18 +267,51 @@ final class ChatStore: ObservableObject {
         return try encoder.encode(NuwaBackupArchive(sessions: sessions))
     }
 
-    func importBackupData(_ data: Data) throws -> Int {
+    /// Supports importing both DeepSeek official `.zip` archives and Nuwa `.json` backups.
+    func importFromFileData(_ data: Data) throws -> Int {
+        // Check ZIP magic header PK\x03\x04
+        if data.count >= 4 && data[0] == 0x50 && data[1] == 0x4B && data[2] == 0x03 && data[3] == 0x04 {
+            let parsed = try DeepSeekZipImporter.parseZipData(data)
+            return mergeSessions(parsed)
+        }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         let archive = try decoder.decode(NuwaBackupArchive.self, from: data)
-        let existingIds = Set(sessions.map(\.id))
-        let newSessions = archive.sessions.filter { !existingIds.contains($0.id) }
-        sessions.append(contentsOf: newSessions)
-        if let first = sortedSessions.first {
-            activeSessionId = first.id
+        return mergeSessions(archive.sessions)
+    }
+
+    func importFromFilePath(_ path: String) {
+        importingHistory = true
+        Task {
+            defer { importingHistory = false }
+            do {
+                let data = try Data(contentsOf: URL(fileURLWithPath: path))
+                let count = try importFromFileData(data)
+                showToast(count == 1 ? "已导入 1 个对话" : "已导入 \(count) 个对话")
+            } catch {
+                showToast("导入失败：\(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func mergeSessions(_ incoming: [ChatSession]) -> Int {
+        var existingById = Dictionary(uniqueKeysWithValues: sessions.enumerated().map { ($1.id, $0) })
+        var importedCount = 0
+        for item in incoming {
+            if let idx = existingById[item.id] {
+                if item.updatedAt > sessions[idx].updatedAt || item.messages.count > sessions[idx].messages.count {
+                    sessions[idx].title = item.title
+                    sessions[idx].messages = item.messages
+                    sessions[idx].updatedAt = max(sessions[idx].updatedAt, item.updatedAt)
+                }
+            } else {
+                existingById[item.id] = sessions.count
+                sessions.append(item)
+                importedCount += 1
+            }
         }
         save()
-        return newSessions.count
+        return importedCount
     }
 
     private func save() {

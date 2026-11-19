@@ -8,11 +8,20 @@ struct NuwaApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ChatView(
-                chatStore: chatStore,
-                settings: settings,
-                speech: speech
-            )
+            Group {
+                if settings.hasActiveCredential {
+                    ChatView(
+                        chatStore: chatStore,
+                        settings: settings,
+                        speech: speech
+                    )
+                } else {
+                    OnboardingScreenView(
+                        settings: settings,
+                        chatStore: chatStore
+                    )
+                }
+            }
             .preferredColorScheme(settings.themePreference.colorScheme)
             .tint(Color.nuwaBrand)
         }

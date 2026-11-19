@@ -28,8 +28,8 @@
 	<string>用于语音输入，将语音转写为文字发送给助手</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>用于语音输入，在设备上进行语音识别</string>
-	<key>UILaunchScreen</key>
-	<dict/>
+	<key>UILaunchStoryboardName</key>
+	<string>LaunchScreen</string>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
