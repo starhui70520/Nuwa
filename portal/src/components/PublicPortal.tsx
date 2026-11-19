@@ -71,6 +71,7 @@ export function PublicPortal({
 }: PublicPortalProps) {
   const [qrRelease, setQrRelease] = useState<ReleaseItem | null>(null);
   const [lightboxFeature, setLightboxFeature] = useState<FeatureRow | null>(null);
+  const [showAllReleases, setShowAllReleases] = useState(false);
   const detectedOS = detectClientOS();
 
   const downloadBase = (data?.downloadBaseUrl || '').replace(/\/+$/, '');
@@ -85,6 +86,18 @@ export function PublicPortal({
 
   const androidLatest = data?.latest.android ?? null;
   const androidReleases = (data?.releases ?? []).filter((r) => r.platform === 'android');
+  const dedupedReleases = Array.from(
+    androidReleases
+      .reduce((map, item) => {
+        const existing = map.get(item.version);
+        if (!existing || item.isLatest) {
+          map.set(item.version, item);
+        }
+        return map;
+      }, new Map<string, ReleaseItem>())
+      .values()
+  );
+  const visibleReleases = showAllReleases ? dedupedReleases : dedupedReleases.slice(0, 3);
 
   return (
     <div>
@@ -361,40 +374,55 @@ export function PublicPortal({
               </p>
             </div>
 
-            <div className="w-full border-b border-[#e8e8e8]">
-              {androidReleases.map((item) => (
-                <article
-                  key={item.id}
-                  className="border-t border-[#e8e8e8] py-[28px]"
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div className="flex items-center gap-2.5">
-                      <h3 className="text-[22px] font-medium text-[#18181b] m-0">
-                        v{item.version}
-                      </h3>
-                      {item.isLatest && <span className="rc-tag-dark">最新版</span>}
+            <div className="w-full">
+              <div className="border-b border-[#e8e8e8]">
+                {visibleReleases.map((item) => (
+                  <article
+                    key={item.id}
+                    className="border-t border-[#e8e8e8] py-[28px]"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="flex items-center gap-2.5">
+                        <h3 className="text-[22px] font-medium text-[#18181b] m-0">
+                          v{item.version}
+                        </h3>
+                        {item.isLatest && <span className="rc-tag-dark">最新版</span>}
+                      </div>
+                      <time className="text-[13px] text-[#686d74]">
+                        {formatDate(item.createdAt).split(' ')[0]}
+                      </time>
                     </div>
-                    <time className="text-[13px] text-[#686d74]">
-                      {formatDate(item.createdAt).split(' ')[0]}
-                    </time>
-                  </div>
 
-                  <p className="mt-3 whitespace-pre-line text-[15px] leading-[1.8] text-[#4b4f55]">
-                    {item.changelog}
-                  </p>
+                    <p className="mt-3 whitespace-pre-line text-[15px] leading-[1.8] text-[#4b4f55]">
+                      {item.changelog}
+                    </p>
 
-                  <div className="mt-5 flex items-center justify-between gap-4">
-                    <span className="text-[13px] text-[#686d74]">
-                      安装包大小：{formatBytes(item.fileSize)}
-                    </span>
+                    <div className="mt-5 flex items-center justify-between gap-4">
+                      <span className="text-[13px] text-[#686d74]">
+                        安装包大小：{formatBytes(item.fileSize)}
+                      </span>
 
-                    <a href={getDownloadHref(item.id)} className="rc-text-link">
-                      <span>下载此版本</span>
-                      <span aria-hidden="true">↓</span>
-                    </a>
-                  </div>
-                </article>
-              ))}
+                      <a href={getDownloadHref(item.id)} className="rc-text-link">
+                        <span>下载此版本</span>
+                        <span aria-hidden="true">↓</span>
+                      </a>
+                    </div>
+                  </article>
+                ))}
+              </div>
+              {dedupedReleases.length > 3 && (
+                <div className="pt-6">
+                  <button
+                    type="button"
+                    onClick={() => setShowAllReleases((v) => !v)}
+                    className="rc-pill-soft !min-h-[38px] !px-5 !text-[13px]"
+                  >
+                    {showAllReleases
+                      ? '收起历史版本'
+                      : `查看全部版本（共 ${dedupedReleases.length} 个）`}
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </section>
