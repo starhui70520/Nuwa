@@ -15,9 +15,16 @@
   min-width: 0;
   background-color: var(--dsw-alias-bg-base);
   transition:
-    transform 0.28s var(--ds-ease-in-out),
-    border-radius 0.28s var(--ds-ease-in-out),
-    box-shadow 0.28s var(--ds-ease-in-out);
+    transform 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+    border-radius 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+
+.mainDragging {
+  transition: none !important;
+  transform-origin: left center;
+  overflow: hidden;
 }
 
 .mainPushed {

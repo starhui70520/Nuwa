@@ -15,7 +15,7 @@ import {
 import { MigrationPromptModal } from '../components/onboarding/MigrationPromptModal.js'
 import { OnboardingScreen } from '../components/onboarding/OnboardingScreen.js'
 import { SearchPanel } from '../components/search/SearchPanel.js'
-import { closeSearchPanel } from '../components/search/searchPanelState.js'
+import { closeSearchPanel, useSearchPanel } from '../components/search/searchPanelState.js'
 import { SessionView } from '../components/session/SessionView.js'
 import { MobileHeader } from '../components/session/MobileHeader.js'
 import { Welcome } from '../components/session/Welcome.js'
@@ -26,9 +26,15 @@ import { Toast } from '../components/base/Toast.js'
 import { showToast } from '../components/base/toastState.js'
 import { onUploadNotice } from '../services/attachments.js'
 import { Button } from '../components/base/Button.js'
+import { handleTopModalBack } from '../components/base/Modal.js'
 import { stopReadAloud } from '../services/speech/readAloud.js'
 import { CollapsedSider } from '../components/sider/CollapsedSider.js'
-import { closeMobileSider, useMobileSider } from '../components/sider/mobileSiderState.js'
+import {
+  closeMobileSider,
+  openMobileSider,
+  setMobileSiderDrag,
+  useMobileSider,
+} from '../components/sider/mobileSiderState.js'
 import { MobileSider, Sider } from '../components/sider/Sider.js'
 import styles from './App.module.css'
 
@@ -58,8 +64,156 @@ export const App = () => {
   )
   const activeId = useChatStore((state) => state.activeId)
   const mobileSiderOpen = useMobileSider((state) => state.open)
+  const mobileSiderDrag = useMobileSider((state) => state.dragProgress)
   const [zipDragging, setZipDragging] = useState(false)
   const dragDepth = useRef(0)
+
+  // Android 返回键 / 系统侧滑返回：按层级优先关闭最上层弹窗/设置 → 收起侧边栏 → 关闭搜索面板
+  useEffect(() => {
+    const win = window as Window & { __NUWA_HANDLE_BACK__?: () => boolean }
+    win.__NUWA_HANDLE_BACK__ = () => {
+      if (handleTopModalBack()) {
+        return true
+      }
+      if (useMobileSider.getState().open) {
+        closeMobileSider()
+        return true
+      }
+      if (useSearchPanel.getState().entry !== null) {
+        closeSearchPanel()
+        return true
+      }
+      return false
+    }
+    return () => {
+      delete win.__NUWA_HANDLE_BACK__
+    }
+  }, [])
+
+  // 移动端侧边栏跟手滑动：右滑划入展开，左滑划出收起
+  useEffect(() => {
+    if (!isMobile || !authenticated) {
+      return
+    }
+    const frame = frameRef.current
+    if (!frame) {
+      return
+    }
+    const getDrawerWidth = () => Math.min(window.innerWidth * 0.82, 310)
+    const isHorizontallyScrollable = (node: EventTarget | null) => {
+      let el = node instanceof HTMLElement ? node : null
+      while (el && el !== frame) {
+        if (el.scrollWidth > el.clientWidth + 4) {
+          const overflowX = getComputedStyle(el).overflowX
+          if (overflowX === 'auto' || overflowX === 'scroll') {
+            return true
+          }
+        }
+        el = el.parentElement
+      }
+      return false
+    }
+
+    let startX = 0
+    let startY = 0
+    let startTime = 0
+    let initialOpen = false
+    let tracking = false
+    let dragging = false
+    let latestProgress = 0
+
+    const onTouchStart = (event: TouchEvent) => {
+      if (event.touches.length !== 1) {
+        tracking = false
+        return
+      }
+      // 有弹窗打开时不拦截侧边栏滑动
+      if (document.querySelector('[role="dialog"]')) {
+        tracking = false
+        return
+      }
+      const touch = event.touches[0]
+      initialOpen = useMobileSider.getState().open
+      // 关闭态：避免抢占横向滚动代码块/表格，且避开极边缘（<12px）交给系统手势；支持屏幕左侧 12~160px 或非横向滚动区右滑
+      if (!initialOpen && isHorizontallyScrollable(event.target)) {
+        tracking = false
+        return
+      }
+      startX = touch.clientX
+      startY = touch.clientY
+      startTime = Date.now()
+      tracking = true
+      dragging = false
+      latestProgress = initialOpen ? 1 : 0
+    }
+
+    const onTouchMove = (event: TouchEvent) => {
+      if (!tracking || event.touches.length !== 1) {
+        return
+      }
+      const touch = event.touches[0]
+      const dx = touch.clientX - startX
+      const dy = touch.clientY - startY
+      if (!dragging) {
+        if (Math.abs(dx) < 12 && Math.abs(dy) < 12) {
+          return
+        }
+        // 纵向滚动为主则放弃横向手势
+        if (Math.abs(dx) <= Math.abs(dy) * 1.25) {
+          tracking = false
+          return
+        }
+        // 关闭态只认向右滑，打开态只认向左滑
+        if ((!initialOpen && dx <= 0) || (initialOpen && dx >= 0)) {
+          tracking = false
+          return
+        }
+        dragging = true
+      }
+      const width = getDrawerWidth()
+      latestProgress = initialOpen
+        ? Math.max(0, Math.min(1, 1 + dx / width))
+        : Math.max(0, Math.min(1, dx / width))
+      setMobileSiderDrag(latestProgress)
+      if (event.cancelable) {
+        event.preventDefault()
+      }
+    }
+
+    const onTouchEnd = () => {
+      if (!dragging) {
+        tracking = false
+        return
+      }
+      const elapsed = Math.max(1, Date.now() - startTime)
+      const deltaProgress = latestProgress - (initialOpen ? 1 : 0)
+      const velocity = (deltaProgress * getDrawerWidth()) / elapsed
+      tracking = false
+      dragging = false
+      if (initialOpen) {
+        if (latestProgress < 0.72 || velocity < -0.4) {
+          closeMobileSider()
+        } else {
+          openMobileSider()
+        }
+      } else if (latestProgress > 0.28 || velocity > 0.4) {
+        openMobileSider()
+      } else {
+        closeMobileSider()
+      }
+    }
+
+    frame.addEventListener('touchstart', onTouchStart, { passive: true })
+    frame.addEventListener('touchmove', onTouchMove, { passive: false })
+    frame.addEventListener('touchend', onTouchEnd, { passive: true })
+    frame.addEventListener('touchcancel', onTouchEnd, { passive: true })
+    return () => {
+      frame.removeEventListener('touchstart', onTouchStart)
+      frame.removeEventListener('touchmove', onTouchMove)
+      frame.removeEventListener('touchend', onTouchEnd)
+      frame.removeEventListener('touchcancel', onTouchEnd)
+    }
+  }, [isMobile, authenticated, frameRef])
 
   usePreventPageScroll(isMobile)
 
@@ -156,7 +310,21 @@ export const App = () => {
     <>
       <div ref={frameRef} className={styles.frame}>
         {isMobile ? <MobileSider /> : siderCollapsed ? null : <Sider />}
-        <main className={clsx(styles.main, isMobile && mobileSiderOpen && styles.mainPushed)}>
+        <main
+          className={clsx(
+            styles.main,
+            isMobile && mobileSiderOpen && mobileSiderDrag === null && styles.mainPushed,
+            isMobile && mobileSiderDrag !== null && styles.mainDragging
+          )}
+          style={
+            isMobile && mobileSiderDrag !== null
+              ? {
+                  transform: `translateX(${mobileSiderDrag * Math.min(window.innerWidth * 0.82, 310)}px) scale(${1 - 0.05 * mobileSiderDrag})`,
+                  borderRadius: `${24 * mobileSiderDrag}px`,
+                }
+              : undefined
+          }
+        >
           {isMobile && mobileSiderOpen ? (
             <div className={styles.pushedShield} onClick={closeMobileSider} />
           ) : null}

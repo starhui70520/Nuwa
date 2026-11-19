@@ -1,5 +1,5 @@
 import clsx from 'clsx'
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useIsMobile } from '../../app/viewport.js'
 import { useTranslate, type TranslationKey, type TranslationMessage } from '../../i18n/index.js'
 import {
@@ -112,10 +112,137 @@ const SettingsContent = () => {
   const checkingUpdate = useAppUpdateStore((state) => state.checking)
   const checkForUpdates = useAppUpdateStore((state) => state.checkForUpdates)
   const harmonyBridge = typeof window === 'undefined' ? undefined : window.__NUWA_HARMONY__
+  const [closing, setClosing] = useState(false)
+  const closeTimerRef = useRef<number | null>(null)
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const headerRef = useRef<HTMLDivElement>(null)
+  const bodyRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     void getCurrentAppVersion().then(setAppVersion)
   }, [])
+
+  useEffect(
+    () => () => {
+      if (closeTimerRef.current !== null) {
+        window.clearTimeout(closeTimerRef.current)
+      }
+    },
+    []
+  )
+
+  const requestClose = useCallback(() => {
+    if (historyDelete.busy || closing) {
+      return
+    }
+    const dialog = dialogRef.current
+    if (dialog) {
+      dialog.classList.remove(styles.dialogDragging)
+    }
+    setClosing(true)
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null
+      closeSettings()
+    }, 240)
+  }, [historyDelete.busy, closing])
+
+  useEffect(() => {
+    if (!isMobile || closing) {
+      return
+    }
+    const dialog = dialogRef.current
+    if (!dialog) {
+      return
+    }
+    let startX = 0
+    let startY = 0
+    let startTime = 0
+    let inHeader = false
+    let canDrag = false
+    let active = false
+    let currentY = 0
+
+    const onTouchStart = (event: TouchEvent) => {
+      if (event.touches.length !== 1 || historyDelete.busy) {
+        canDrag = false
+        return
+      }
+      const touch = event.touches[0]
+      const target = event.target as Node | null
+      inHeader = Boolean(headerRef.current && target && headerRef.current.contains(target))
+      const atTop = !bodyRef.current || bodyRef.current.scrollTop <= 1
+      canDrag = inHeader || atTop
+      active = false
+      currentY = 0
+      startX = touch.clientX
+      startY = touch.clientY
+      startTime = Date.now()
+    }
+
+    const onTouchMove = (event: TouchEvent) => {
+      if (!canDrag || event.touches.length !== 1) {
+        return
+      }
+      const touch = event.touches[0]
+      const dx = touch.clientX - startX
+      const dy = touch.clientY - startY
+      if (!active) {
+        if (dy < 6) {
+          if (dy < -6) {
+            canDrag = false
+          }
+          return
+        }
+        if (!inHeader && dy <= Math.abs(dx) * 1.15) {
+          canDrag = false
+          return
+        }
+        if (!inHeader && bodyRef.current && bodyRef.current.scrollTop > 1) {
+          canDrag = false
+          return
+        }
+        active = true
+        dialog.classList.add(styles.dialogDragging)
+      }
+      currentY = Math.max(0, dy)
+      dialog.style.transform = `translateY(${currentY}px)`
+      if (event.cancelable) {
+        event.preventDefault()
+      }
+    }
+
+    const onTouchEnd = () => {
+      if (!active) {
+        canDrag = false
+        return
+      }
+      const elapsed = Math.max(1, Date.now() - startTime)
+      const velocity = currentY / elapsed
+      active = false
+      canDrag = false
+      dialog.classList.remove(styles.dialogDragging)
+      if (currentY > 96 || velocity > 0.45) {
+        // 保持当前拖拽位置进入下一帧，再平滑滑出到底部，不闪跳
+        requestAnimationFrame(() => {
+          dialog.style.transform = ''
+          requestClose()
+        })
+      } else {
+        dialog.style.transform = ''
+      }
+    }
+
+    dialog.addEventListener('touchstart', onTouchStart, { passive: true })
+    dialog.addEventListener('touchmove', onTouchMove, { passive: false })
+    dialog.addEventListener('touchend', onTouchEnd, { passive: true })
+    dialog.addEventListener('touchcancel', onTouchEnd, { passive: true })
+    return () => {
+      dialog.removeEventListener('touchstart', onTouchStart)
+      dialog.removeEventListener('touchmove', onTouchMove)
+      dialog.removeEventListener('touchend', onTouchEnd)
+      dialog.removeEventListener('touchcancel', onTouchEnd)
+    }
+  }, [isMobile, closing, historyDelete.busy, requestClose])
 
   const accountSummary = isAccount
     ? dshAccountLabel || t('dshAccountLabel')
@@ -143,43 +270,47 @@ const SettingsContent = () => {
       <Modal
         title={pageTitle}
         hideHeader
-        className={styles.dialog}
+        contentRef={dialogRef}
+        className={clsx(styles.dialog, closing && styles.dialogClosing)}
+        overlayClassName={clsx(closing && styles.overlayClosing)}
         mainClassName={styles.dialogMain}
-        onClose={() => {
-          if (!historyDelete.busy) {
-            closeSettings()
+        onClose={requestClose}
+        onBack={() => {
+          if (page !== 'root') {
+            setPage('root')
+            return
           }
+          requestClose()
         }}
       >
-        <div className={styles.sheetHeader}>
-          {page === 'root' ? (
-            <span className={styles.headerSpacer} />
-          ) : (
+        <div ref={headerRef} className={styles.sheetHeaderWrap}>
+          <div className={styles.grabber} aria-hidden="true" />
+          <div className={styles.sheetHeader}>
+            {page === 'root' ? (
+              <span className={styles.headerSpacer} />
+            ) : (
+              <button
+                type="button"
+                className={styles.headerButton}
+                aria-label={t('dshBack')}
+                onClick={() => setPage('root')}
+              >
+                <IconChevronLeftOutline18 />
+              </button>
+            )}
+            <div className={styles.sheetTitle}>{pageTitle}</div>
             <button
               type="button"
               className={styles.headerButton}
-              aria-label={t('dshBack')}
-              onClick={() => setPage('root')}
+              aria-label={t('close')}
+              onClick={requestClose}
             >
-              <IconChevronLeftOutline18 />
+              <IconCloseOutline16 />
             </button>
-          )}
-          <div className={styles.sheetTitle}>{pageTitle}</div>
-          <button
-            type="button"
-            className={styles.headerButton}
-            aria-label={t('close')}
-            onClick={() => {
-              if (!historyDelete.busy) {
-                closeSettings()
-              }
-            }}
-          >
-            <IconCloseOutline16 />
-          </button>
+          </div>
         </div>
 
-        <div className={styles.content}>
+        <div ref={bodyRef} className={styles.content}>
           {page === 'root' ? (
             <>
               <div className={styles.groupTitle}>{t('settingsGroupAccount')}</div>

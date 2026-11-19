@@ -20,6 +20,10 @@
   color: var(--dsw-alias-label-primary);
 }
 
+.grabber {
+  display: none;
+}
+
 .sheetHeader {
   display: flex;
   align-items: center;
@@ -413,6 +417,29 @@
     height: calc(100% - 48px);
     max-height: none;
     border-radius: 24px 24px 0 0;
+    will-change: transform;
+  }
+
+  .grabber {
+    display: block;
+    width: 38px;
+    height: 4px;
+    margin: 8px auto 0;
+    border-radius: 999px;
+    background-color: rgba(128, 128, 138, 0.35);
+    flex-shrink: 0;
+  }
+
+  .sheetHeaderWrap {
+    touch-action: none;
+  }
+
+  .sheetHeader {
+    padding-top: 8px;
+  }
+
+  .content {
+    overscroll-behavior-y: none;
   }
 
   .cellButton {
@@ -445,12 +472,54 @@
 
 .dialog {
   animation: settingsEnter 0.24s var(--ds-ease-in-out);
+  transition: transform 0.26s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.22s ease;
+}
+
+.dialogDragging {
+  animation: none !important;
+  transition: none !important;
+}
+
+.dialogClosing {
+  animation: none !important;
+  opacity: 0;
+  transform: translateY(20px) scale(0.98);
+  transition: transform 0.22s ease-in, opacity 0.2s ease-in;
+}
+
+.overlayClosing {
+  animation: none !important;
+  background-color: rgba(0, 0, 0, 0) !important;
+  backdrop-filter: none !important;
+  transition: background-color 0.24s ease-out;
+}
+
+@media not all and (min-width: 768px) {
+  .dialog {
+    animation: settingsSheetEnter 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+    transition: transform 0.26s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .dialogClosing {
+    opacity: 1 !important;
+    transform: translateY(100%) !important;
+    transition: transform 0.24s cubic-bezier(0.4, 0, 1, 1);
+  }
 }
 
 @keyframes settingsEnter {
   from {
     opacity: 0;
     transform: translateY(16px);
+  }
+}
+
+@keyframes settingsSheetEnter {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
   }
 }
 

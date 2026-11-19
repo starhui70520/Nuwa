@@ -279,11 +279,25 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
   )
 }
 
-/** 移动端推拉式抽屉：位于主卡片层下方 */
+/** 移动端推拉式抽屉：位于主卡片层下方，支持点击开关与手指跟手划入/划出 */
 export const MobileSider = () => {
   const open = useMobileSider((state) => state.open)
+  const dragProgress = useMobileSider((state) => state.dragProgress)
+  const dragging = dragProgress !== null
+  const style = dragging
+    ? {
+        opacity: dragProgress,
+        visibility: 'visible' as const,
+        transform: `translateX(${(dragProgress - 1) * 24}px)`,
+        transition: 'none',
+      }
+    : undefined
   return (
-    <div className={clsx(styles.drawer, open && styles.drawerOpen)} aria-hidden={!open}>
+    <div
+      className={clsx(styles.drawer, open && styles.drawerOpen)}
+      style={style}
+      aria-hidden={!open && !dragging}
+    >
       <Sider mobile />
     </div>
   )

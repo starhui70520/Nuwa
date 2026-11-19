@@ -20,6 +20,7 @@ import android.webkit.PermissionRequest;
 import android.webkit.RenderProcessGoneDetail;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
+import androidx.activity.OnBackPressedCallback;
 import androidx.core.content.ContextCompat;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
@@ -45,7 +46,29 @@ public class MainActivity extends BridgeActivity {
         enableHighRefreshRate();
         setupEdgeToEdgeAndInsets();
         configureWebView();
+        setupBackNavigation();
         InAppBrowserHelper.getInstance().init(getApplicationContext());
+    }
+
+    private void setupBackNavigation() {
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                if (getBridge() == null || getBridge().getWebView() == null) {
+                    moveTaskToBack(true);
+                    return;
+                }
+                WebView webView = getBridge().getWebView();
+                webView.evaluateJavascript(
+                    "(function(){try{return !!(window.__NUWA_HANDLE_BACK__&&window.__NUWA_HANDLE_BACK__());}catch(e){return false;}})()",
+                    value -> {
+                        if (!"true".equals(value)) {
+                            moveTaskToBack(true);
+                        }
+                    }
+                );
+            }
+        });
     }
 
     @Override
