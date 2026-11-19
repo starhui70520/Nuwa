@@ -21,7 +21,8 @@ import { NativeOAuthLoopbackServer } from '../native/NativeOAuthLoopbackServer';
 import { nativeCredentialError, NativeOnboarding, NativeOnboardingView } from '../native/NativeOnboarding';
 import { NativeAttachment, NativeAttachmentUploadError, NativeChatAttachments } from '../native/NativeChatAttachments';
 import {
-  hasNativeAttachmentDropType, NATIVE_ATTACHMENT_DROP_TYPES, NATIVE_COMPOSER_DROP_TYPES, readNativeAttachmentDrop,
+  hasNativeAttachmentDropType, hasNativeBackupDropType, NATIVE_ATTACHMENT_DROP_TYPES, NATIVE_COMPOSER_DROP_TYPES,
+  nativeBackupDropUri, readNativeAttachmentDrop,
 } from '../native/NativeAttachmentDrop';
 import {
   hydrateImportedAttachment, importedAttachmentPreview, NativeChatBackup, mergeChatBackup, nativeArchivedReplyTemplate,
@@ -77,6 +78,7 @@ interface NativeReply {
   uploadingIds: string[];
   attachmentBinding: string;
   resumeRetry?: () => void;
+  completion?: Promise<void>;
 }
 
 interface NativePreparedReplyFile {
@@ -120,7 +122,7 @@ struct NativeChat {
   @State private draft: string = '';
   @State private draftFiles: NativeDraftAttachment[] = [];
   @State private attachmentIntakeDraftId: string | null = null;
-  @State private draggingAttachments: boolean = false;
+  @State private fileDropHint: 'attachment' | 'history' | null = null;
   @State private imagePreview: string = '';
   @State private loaded: boolean = false;
   @State private status: string = '';
@@ -299,7 +301,7 @@ struct NativeChat {
   }
 
   onPageHide(): void {
-    this.draggingAttachments = false;
+    this.fileDropHint = null;
     this.sidebarSearch.cancel();
     if (this.replies.length && !this.deletingSessions) {
       void this.save();
@@ -1246,20 +1248,27 @@ struct NativeChat {
       drop?.setResult(DragResult.DRAG_FAILED);
       return;
     }
-    const config = this.requestConfig();
-    if (!config.accountToken && config.protocol !== 'anthropic') {
-      drop?.setResult(DragResult.DRAG_FAILED);
-      this.toast(this.label('当前服务不支持附件，请配置 Anthropic 接口', "Configure an Anthropic API endpoint to send attachments"));
-      return;
-    }
     const id = this.history.activeId ?? '';
     const context = this.host();
     const binding = this.settings.attachmentBinding;
     this.attachmentIntakeDraftId = id;
     try {
+      const uris = drop ? await readNativeAttachmentDrop(drop, context.abilityInfo.bundleName) : undefined;
+      const archive = uris ? nativeBackupDropUri(uris) : undefined;
+      if (archive && drop) {
+        const imported = await this.importChatHistory(false, archive);
+        drop.setResult(imported ? DragResult.DRAG_SUCCESSFUL : DragResult.DRAG_FAILED);
+        return;
+      }
+      const config = this.requestConfig();
+      if (!config.accountToken && config.protocol !== 'anthropic') {
+        drop?.setResult(DragResult.DRAG_FAILED);
+        this.toast(this.label('当前服务不支持附件，请配置 Anthropic 接口', "Configure an Anthropic API endpoint to send attachments"));
+        return;
+      }
       const existingCount = this.draftItems(id).length;
-      const items = drop ?
-        await this.attachments.importUris(context, await readNativeAttachmentDrop(drop, context.abilityInfo.bundleName), existingCount) :
+      const items = uris ?
+        await this.attachments.importUris(context, uris, existingCount) :
         await this.attachments.pick(context, existingCount);
       if (this.backupBusy || this.signingOut || !this.authenticated() ||
         this.settings.attachmentBinding !== binding || (id && !this.session(id))) {
@@ -1296,16 +1305,17 @@ struct NativeChat {
 
   private trackAttachmentDrag(event: DragEvent): void {
     if (!hasNativeAttachmentDropType(event)) {
-      this.draggingAttachments = false;
+      this.fileDropHint = null;
       return;
     }
-    this.draggingAttachments = this.canReceiveAttachmentDrop();
+    const canDrop = this.canReceiveAttachmentDrop();
+    this.fileDropHint = canDrop ? (hasNativeBackupDropType(event) ? 'history' : 'attachment') : null;
     event.dragBehavior = DragBehavior.COPY;
-    event.setResult(this.draggingAttachments ? DragResult.DROP_ENABLED : DragResult.DROP_DISABLED);
+    event.setResult(canDrop ? DragResult.DROP_ENABLED : DragResult.DROP_DISABLED);
   }
 
   private dropAttachments(event: DragEvent): void {
-    this.draggingAttachments = false;
+    this.fileDropHint = null;
     // The TextArea also receives drops directly. An intake already started by either target owns this drop.
     if (!hasNativeAttachmentDropType(event) || this.attachmentIntakeDraftId !== null) return;
     if (!this.canReceiveAttachmentDrop()) {
@@ -1540,7 +1550,7 @@ struct NativeChat {
       }, 0);
     }
     this.jumpToNewestMessages();
-    void this.receive(this.host(), config, next, reply);
+    reply.completion = this.receive(this.host(), config, next, reply);
     return true;
   }
 
@@ -1870,7 +1880,7 @@ struct NativeChat {
     this.replies = [...this.replies, reply];
     this.lastStreamSave = Date.now();
     this.jumpToNewestMessages();
-    void this.receive(this.host(), config, next, reply);
+    reply.completion = this.receive(this.host(), config, next, reply);
   }
 
   private failedUploadReply(promptId: string): NativeConversationMessage | undefined {
@@ -2437,7 +2447,7 @@ struct NativeChat {
           .allowDrop(NATIVE_COMPOSER_DROP_TYPES)
           .onDragEnter((event: DragEvent) => { this.trackAttachmentDrag(event); })
           .onDragMove((event: DragEvent) => { this.trackAttachmentDrag(event); })
-          .onDragLeave(() => { this.draggingAttachments = false; })
+          .onDragLeave(() => { this.fileDropHint = null; })
           .onDrop((event: DragEvent) => { this.dropAttachments(event); })
           .onFocus(() => { this.compactToolsOpen = false; })
           .onChange((value: string) => { this.updateDraftText(value); })
@@ -2854,27 +2864,37 @@ struct NativeChat {
     void this.saveSettings();
   }
 
-  private async importChatHistory(fromPrompt: boolean = false): Promise<void> {
-    if (this.backupBusy || this.replies.length > 0) {
-      this.toast(this.label('请在回复结束后导入', 'Import is available after the reply finishes'));
-      return;
+  private async importChatHistory(fromPrompt: boolean = false, importedUri?: string): Promise<boolean> {
+    if (this.backupBusy || this.signingOut || this.migrationInProgress) {
+      this.toast(this.label('请等待当前操作结束后再导入', 'Wait for the current operation to finish before importing'));
+      return false;
     }
     this.backupBusy = true;
     try {
       const context = this.host();
-      const sessions = await this.backup.importFromPicker(context, () => {
+      const onSelected = (): void => {
         if (fromPrompt) this.dismissMigrationPrompt();
-      });
-      if (sessions) {
-        const merged = mergeChatBackup(this.history, sessions);
-        await this.storage.saveConversations(context, merged.history);
-        this.history = merged.history;
-        const count = merged.importedCount;
-        this.toast(count ? this.label(`已导入 ${count} 个对话`, count === 1 ? 'Imported 1 chat' : `Imported ${count} chats`) :
-          this.label('没有新增对话', 'No new chats to import'));
-      }
+      };
+      const onVerified = async (): Promise<void> => {
+        this.stopVoice();
+        const active = Array.from(this.replies);
+        active.forEach((reply: NativeReply) => { this.cancelReply(reply.sessionId); });
+        await Promise.all(active.map((reply: NativeReply): Promise<void> => reply.completion ?? Promise.resolve()));
+      };
+      const sessions = importedUri ?
+        await this.backup.importFromUri(importedUri, context, onVerified) :
+        await this.backup.importFromPicker(context, onSelected, onVerified);
+      if (!sessions) return false;
+      const merged = mergeChatBackup(this.history, sessions);
+      await this.storage.saveConversations(context, merged.history);
+      this.history = merged.history;
+      const count = merged.importedCount;
+      this.toast(count ? this.label(`已导入 ${count} 个对话`, count === 1 ? 'Imported 1 chat' : `Imported ${count} chats`) :
+        this.label('没有新增对话', 'No new chats to import'));
+      return true;
     } catch (error) {
       this.toast((error as Error).message || this.label('文件导入失败', "Unable to import file"));
+      return false;
     } finally {
       this.backupBusy = false;
     }
@@ -3955,6 +3975,21 @@ struct NativeChat {
     .hitTestBehavior(HitTestMode.None)
   }
 
+  @Builder
+  private historyDragMask() {
+    Column() {
+      Text(this.label('松开鼠标即可增量导入 DeepSeek 历史对话', 'Drop to merge DeepSeek chat history'))
+        .fontSize(16).fontWeight(FontWeight.Medium).textAlign(TextAlign.Center)
+        .fontColor($r('app.color.native_chat_primary'))
+        .padding({ left: 36, right: 36, top: 24, bottom: 24 })
+        .backgroundColor($r('app.color.native_chat_surface'))
+        .border({ width: 2, style: BorderStyle.Dashed, color: $r('app.color.native_chat_blue') }).borderRadius(16)
+    }
+    .width('100%').height('100%').justifyContent(FlexAlign.Center).padding({ left: 16, right: 16 })
+    .backgroundColor('#73000000').backgroundBlurStyle(BlurStyle.COMPONENT_THIN)
+    .hitTestBehavior(HitTestMode.None)
+  }
+
   build() {
     Stack({ alignContent: Alignment.Start }) {
       if (this.drawerProgress() > 0) {
@@ -4048,15 +4083,19 @@ struct NativeChat {
         }
         .width('100%').height('100%')
       }
-      if (this.draggingAttachments && this.canReceiveAttachmentDrop()) {
-        this.attachmentDragMask()
+      if (this.fileDropHint && this.canReceiveAttachmentDrop()) {
+        if (this.fileDropHint === 'history') {
+          this.historyDragMask()
+        } else {
+          this.attachmentDragMask()
+        }
       }
     }
     .width('100%').height('100%').backgroundColor($r('app.color.native_chat_sidebar')).clip(true)
     .allowDrop(NATIVE_ATTACHMENT_DROP_TYPES)
     .onDragEnter((event: DragEvent) => { this.trackAttachmentDrag(event); })
     .onDragMove((event: DragEvent) => { this.trackAttachmentDrag(event); })
-    .onDragLeave(() => { this.draggingAttachments = false; })
+    .onDragLeave(() => { this.fileDropHint = null; })
     .onDrop((event: DragEvent) => { this.dropAttachments(event); })
     .onAreaChange((_old: Area, area: Area): void => {
       this.viewportWidth = Number(area.width);

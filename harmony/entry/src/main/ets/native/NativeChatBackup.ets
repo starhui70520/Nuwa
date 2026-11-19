@@ -745,7 +745,7 @@ export async function decodeChatBackup(bytes: Uint8Array): Promise<NativeConvers
 }
 
 async function readChatBackup(input: NativeBackupZipInput, context?: common.UIAbilityContext,
-  limit?: number): Promise<NativeConversation[]> {
+  limit?: number, onVerified?: () => Promise<void>): Promise<NativeConversation[]> {
   const sessions: PreparedSession[] = [];
   const ids = new Set<string>();
   const wantedImages = new Map<string, ArchiveImage[]>();
@@ -765,6 +765,7 @@ async function readChatBackup(input: NativeBackupZipInput, context?: common.UIAb
           throw new Error('暂不支持此备份版本，请选择第 3 版历史备份。');
         }
         manifest = true;
+        await onVerified?.();
         return;
       }
       if ((path === USER && !sessions.length && !index) || path === 'yejian_meta.json' || path.startsWith('yejian/')) {
@@ -1218,13 +1219,15 @@ export function mergeChatBackup(history: NativeConversationState, imported: Nati
 export class NativeChatBackup {
   private readonly attachments = new NativeChatAttachments();
 
-  async importFromUri(uri: string, context?: common.UIAbilityContext): Promise<NativeConversation[]> {
+  async importFromUri(uri: string, context?: common.UIAbilityContext,
+    onVerified?: () => Promise<void>): Promise<NativeConversation[]> {
     return withBackupInput<NativeConversation[]>(uri,
       (input: NativeBackupZipInput): Promise<NativeConversation[]> =>
-        readChatBackup(input, context, context ? undefined : MAX_BACKUP_BYTES));
+        readChatBackup(input, context, context ? undefined : MAX_BACKUP_BYTES, onVerified));
   }
 
-  async importFromPicker(context: common.UIAbilityContext, onFileSelected?: () => void): Promise<NativeConversation[] | null> {
+  async importFromPicker(context: common.UIAbilityContext, onFileSelected?: () => void,
+    onVerified?: () => Promise<void>): Promise<NativeConversation[] | null> {
     const options = new picker.DocumentSelectOptions();
     options.maxSelectNumber = 1;
     options.fileSuffixFilters = ['历史备份|.zip'];
@@ -1233,7 +1236,7 @@ export class NativeChatBackup {
       return null;
     }
     onFileSelected?.();
-    return this.importFromUri(selected[0], context);
+    return this.importFromUri(selected[0], context, onVerified);
   }
 
   private async writeImage(context: common.UIAbilityContext, writer: NativeBackupZipWriter, name: string,
