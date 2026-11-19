@@ -170,6 +170,7 @@ const markOneClickMigrationUsed = () => {
 
 export type OneClickMigrationOptions = {
   clearSession?: boolean
+  forceReExport?: boolean
 }
 
 /** 安卓原生内嵌浏览器迁移：打开官方页，用户登录并点导出后自动接管并导入 */

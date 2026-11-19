@@ -156,11 +156,12 @@ export const zh = {
   historyOneClickImportLabel: '一键迁移 DeepSeek 历史',
   historyOneClickImportDesc: '登录官方网页端自动触发导出并合并到本机',
   historyOneClickImportBtn: '一键导入',
-  historyMigrationAccountTitle: '选择导入账号',
+  historyMigrationAccountTitle: '选择导入方式',
   historyMigrationAccountDesc:
-    '检测到此前已使用过一键导入。如需合并其他 DeepSeek 账号的历史记录，请先切换账号。',
+    '如果当前账号在 DeepSeek 又有新对话，请选择「重新导出并更新」；如需导入其他账号记录，请选择「切换其他账号」。',
+  historyMigrationReExport: '重新导出并更新（当前账号）',
   historyMigrationSwitchAccount: '切换其他账号',
-  historyMigrationContinueAccount: '继续当前账号',
+  historyMigrationContinueAccount: '直接下载上次导出（当前账号）',
   historyImportedOne: '已导入 1 个对话',
   historyImported: '已导入 {count} 个对话',
   historyImportFailed:

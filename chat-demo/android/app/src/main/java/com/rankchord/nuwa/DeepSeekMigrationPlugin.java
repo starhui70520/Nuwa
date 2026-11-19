@@ -87,8 +87,10 @@ public class DeepSeekMigrationPlugin extends Plugin {
     @PluginMethod
     public void openExportBrowser(PluginCall call) {
         boolean clearSession = Boolean.TRUE.equals(call.getBoolean("clearSession", false));
+        boolean forceReExport = Boolean.TRUE.equals(call.getBoolean("forceReExport", false));
         Intent intent = new Intent(getContext(), MigrationWebViewActivity.class);
         intent.putExtra(MigrationWebViewActivity.EXTRA_CLEAR_SESSION, clearSession);
+        intent.putExtra(MigrationWebViewActivity.EXTRA_FORCE_RE_EXPORT, forceReExport);
         getActivity().startActivity(intent);
         call.resolve();
     }

@@ -504,3 +504,10 @@
   color: var(--dsw-alias-label-secondary);
   text-align: center;
 }
+
+.migrationChoiceActions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 16px;
+}

@@ -635,10 +635,10 @@ const OneClickMigrateSetting = ({ disabled }: { disabled: boolean }) => {
   const [choosingAccount, setChoosingAccount] = useState(false)
   const hasSessions = useChatStore((state) => state.sessions.length > 0)
 
-  const launch = (clearSession: boolean) => {
+  const launch = (options: { clearSession?: boolean; forceReExport?: boolean }) => {
     setChoosingAccount(false)
     closeSettings()
-    void triggerOneClickMigration({ clearSession }).catch(() => {})
+    void triggerOneClickMigration(options).catch(() => {})
   }
 
   return (
@@ -658,7 +658,7 @@ const OneClickMigrateSetting = ({ disabled }: { disabled: boolean }) => {
                 setChoosingAccount(true)
                 return
               }
-              launch(false)
+              launch({ clearSession: false, forceReExport: false })
             }}
           >
             {t('historyOneClickImportBtn')}
@@ -669,18 +669,28 @@ const OneClickMigrateSetting = ({ disabled }: { disabled: boolean }) => {
         <Modal
           title={t('historyMigrationAccountTitle')}
           onClose={() => setChoosingAccount(false)}
-          footer={
-            <>
-              <Button variant="outlined" onClick={() => launch(true)}>
-                {t('historyMigrationSwitchAccount')}
-              </Button>
-              <Button variant="primary" onClick={() => launch(false)}>
-                {t('historyMigrationContinueAccount')}
-              </Button>
-            </>
-          }
         >
           <p className={styles.modalText}>{t('historyMigrationAccountDesc')}</p>
+          <div className={styles.migrationChoiceActions}>
+            <Button
+              variant="primary"
+              onClick={() => launch({ clearSession: false, forceReExport: true })}
+            >
+              {t('historyMigrationReExport')}
+            </Button>
+            <Button
+              variant="outlined"
+              onClick={() => launch({ clearSession: false, forceReExport: false })}
+            >
+              {t('historyMigrationContinueAccount')}
+            </Button>
+            <Button
+              variant="outlined"
+              onClick={() => launch({ clearSession: true, forceReExport: false })}
+            >
+              {t('historyMigrationSwitchAccount')}
+            </Button>
+          </div>
         </Modal>
       ) : null}
     </>

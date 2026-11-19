@@ -164,11 +164,12 @@ export const en = {
   historyOneClickImportLabel: 'One-Click DeepSeek Migration',
   historyOneClickImportDesc: 'Sign in to official DeepSeek web to export and merge locally',
   historyOneClickImportBtn: 'One-Click Import',
-  historyMigrationAccountTitle: 'Choose Import Account',
+  historyMigrationAccountTitle: 'Choose Import Mode',
   historyMigrationAccountDesc:
-    'A previous DeepSeek account session may still be signed in. Switch accounts if you want to merge history from another DeepSeek account.',
+    'Choose "Re-export & Update" if you have new chats in DeepSeek on this account, or switch to another DeepSeek account.',
+  historyMigrationReExport: 'Re-export & Update (Current Account)',
   historyMigrationSwitchAccount: 'Switch Account',
-  historyMigrationContinueAccount: 'Continue Current Account',
+  historyMigrationContinueAccount: 'Download Previous Export (Current Account)',
   historyImportedOne: 'Imported 1 chat',
   historyImported: 'Imported {count} chats',
   historyImportFailed:

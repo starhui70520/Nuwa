@@ -43,6 +43,7 @@ public class MigrationWebViewActivity extends Activity {
     public static final String EXTRA_FILE_PATH = "filePath";
     public static final String EXTRA_FILE_NAME = "fileName";
     public static final String EXTRA_CLEAR_SESSION = "clear_session";
+    public static final String EXTRA_FORCE_RE_EXPORT = "force_re_export";
     private static final String TARGET_URL = "https://chat.deepseek.com/";
 
     private WebView webView;
@@ -52,6 +53,7 @@ public class MigrationWebViewActivity extends Activity {
     private volatile boolean completed = false;
     private volatile boolean autoExportTriggered = false;
     private volatile boolean pendingStorageClear = false;
+    private volatile boolean forceReExport = false;
 
     private final Runnable loginPollTask = new Runnable() {
         @Override
@@ -183,6 +185,7 @@ public class MigrationWebViewActivity extends Activity {
 
         setContentView(root);
         boolean clearSession = getIntent().getBooleanExtra(EXTRA_CLEAR_SESSION, false);
+        forceReExport = getIntent().getBooleanExtra(EXTRA_FORCE_RE_EXPORT, false);
         if (clearSession) {
             guideView.setText("已清除上次登录状态，请登录要导入的 DeepSeek 账号");
             clearDeepSeekSession(() -> {
@@ -202,6 +205,7 @@ public class MigrationWebViewActivity extends Activity {
             return;
         }
         autoExportTriggered = false;
+        forceReExport = false;
         mainHandler.removeCallbacks(loginPollTask);
         guideView.setText("正在切换账号，请登录新的 DeepSeek 账号");
         webView.evaluateJavascript(
@@ -323,6 +327,8 @@ public class MigrationWebViewActivity extends Activity {
             + "};"
             + "var ticks = 0;"
             + "var exportClicked = false;"
+            + "var reExportPhase = " + (forceReExport ? "'need_click'" : "'done'") + ";"
+            + "var reExportWaitTicks = 0;"
             + "var lastSection = '';"
             + "var lastAction = '';"
             + "var lastActionTick = -10;"
@@ -337,12 +343,36 @@ public class MigrationWebViewActivity extends Activity {
             + "      window.AndroidMigrationBridge.onAutoExportTimeout();"
             + "      return;"
             + "    }"
-            + "    var confirmBtn = findVisibleByText([/^(确认导出|确认|确定|Confirm)$/i], true);"
+            + "    var confirmBtn = findVisibleByText([/^(确认重新导出|确认导出|确认|确定|Confirm)$/i], true);"
             + "    if (confirmBtn && triggerClick(confirmBtn)) {"
             + "      window.AndroidMigrationBridge.onStep('Clicked Confirm');"
             + "      return;"
             + "    }"
             + "    if (lastSection === 'data' || findVisibleByText([/导出所有历史对话|Export all/i], true)) {"
+            + "      if (reExportPhase === 'need_click') {"
+            + "        var reExpBtn = findVisibleByText([/^(重新导出|再次导出|Re-?export|Export again)$/i], true);"
+            + "        if (reExpBtn && triggerClick(reExpBtn)) {"
+            + "          reExportPhase = 'wait_start';"
+            + "          reExportWaitTicks = 0;"
+            + "          exportClicked = true;"
+            + "          window.AndroidMigrationBridge.onStep('Clicked Re-export');"
+            + "          window.AndroidMigrationBridge.onWaitingExport();"
+            + "          return;"
+            + "        }"
+            + "        var hasOldDl = !!findVisibleByText([/^(下载|Download)$/i], true);"
+            + "        if (!hasOldDl || ++reExportWaitTicks >= 4) {"
+            + "          reExportPhase = 'done';"
+            + "        } else {"
+            + "          return;"
+            + "        }"
+            + "      }"
+            + "      if (reExportPhase === 'wait_start') {"
+            + "        var oldDlStillThere = !!findVisibleByText([/^(下载|Download)$/i], true);"
+            + "        if (!oldDlStillThere || ++reExportWaitTicks >= 12) {"
+            + "          reExportPhase = 'done';"
+            + "        }"
+            + "        return;"
+            + "      }"
             + "      var dlBtn = findVisibleByText([/^(下载|Download)$/i], true);"
             + "      if (dlBtn && triggerClick(dlBtn)) {"
             + "        window.AndroidMigrationBridge.onStep('Clicked Download');"
