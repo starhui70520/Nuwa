@@ -76,6 +76,8 @@ export const en = {
   replyRateLimited: 'Too many requests. Please try again later.',
   completionServerBusyToast: 'Server busy, please try again later.',
   unknownError: 'Unknown error',
+  replyUnsupportedImage:
+    'Unsupported or corrupted image format. Please use JPG, PNG, or WebP and try again.',
   replyRefused: "Sorry, that's beyond my current scope. Let's talk about something else.",
   messageThinkDuration: 'Thought for {count} second',
   messageThinkDurationPlural: 'Thought for {count} seconds',

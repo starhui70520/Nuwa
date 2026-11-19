@@ -116,6 +116,92 @@ const next = () => {
   }
 }
 
+/** DeepSeek Messages API 原生稳定支持的图片格式 */
+const API_SUPPORTED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp'])
+
+const sniffApiSupportedImageMime = async (blob: Blob): Promise<string | null> => {
+  try {
+    const bytes = new Uint8Array(await blob.slice(0, 16).arrayBuffer())
+    if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+      return 'image/jpeg'
+    }
+    if (
+      bytes.length >= 8 &&
+      bytes[0] === 0x89 &&
+      bytes[1] === 0x50 &&
+      bytes[2] === 0x4e &&
+      bytes[3] === 0x47 &&
+      bytes[4] === 0x0d &&
+      bytes[5] === 0x0a &&
+      bytes[6] === 0x1a &&
+      bytes[7] === 0x0a
+    ) {
+      return 'image/png'
+    }
+    const header = new TextDecoder('ascii').decode(bytes.subarray(0, 12))
+    if (header.startsWith('GIF87a') || header.startsWith('GIF89a')) {
+      return 'image/gif'
+    }
+    if (header.startsWith('RIFF') && header.slice(8, 12) === 'WEBP') {
+      return 'image/webp'
+    }
+  } catch {
+    // 忽略读取异常
+  }
+  return null
+}
+
+const replaceExtension = (name: string, ext: string) => {
+  const dot = name.lastIndexOf('.')
+  return dot > 0 ? `${name.slice(0, dot)}.${ext}` : `${name}.${ext}`
+}
+
+/** 将 BMP / AVIF / HEIC 等非标准格式图片经 Canvas 转为 JPEG/PNG 后上传；失败时回退原文件。 */
+const normalizeImageForUpload = async (file: Blob, name: string): Promise<File> => {
+  const sniffed = await sniffApiSupportedImageMime(file)
+  if (sniffed && API_SUPPORTED_IMAGE_TYPES.has(sniffed)) {
+    return file instanceof File && file.type === sniffed
+      ? file
+      : new File([file], name, { type: sniffed })
+  }
+  if (typeof document === 'undefined' || typeof URL === 'undefined') {
+    return file instanceof File ? file : new File([file], name, { type: file.type })
+  }
+  const objectUrl = URL.createObjectURL(file)
+  try {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const el = new Image()
+      el.onload = () => resolve(el)
+      el.onerror = () => reject(new Error('Image decode failed'))
+      el.src = objectUrl
+    })
+    const width = img.naturalWidth || img.width
+    const height = img.naturalHeight || img.height
+    if (!width || !height) {
+      return file instanceof File ? file : new File([file], name, { type: file.type })
+    }
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const ctx = canvas.getContext('2d')
+    if (!ctx) {
+      return file instanceof File ? file : new File([file], name, { type: file.type })
+    }
+    ctx.drawImage(img, 0, 0)
+    const converted = await new Promise<Blob | null>((resolve) => {
+      canvas.toBlob(resolve, 'image/jpeg', 0.92)
+    })
+    if (converted && converted.size > 0) {
+      return new File([converted], replaceExtension(name, 'jpg'), { type: 'image/jpeg' })
+    }
+  } catch {
+    // 浏览器无法解码时原样回退，由请求层兜底处理
+  } finally {
+    URL.revokeObjectURL(objectUrl)
+  }
+  return file instanceof File ? file : new File([file], name, { type: file.type })
+}
+
 /** 排队上传，最多同时上传 MAX_CONCURRENT 个；排队期间中止的任务不会发出请求 */
 const enqueueUpload = (
   apiKey: string,
@@ -131,8 +217,12 @@ const enqueueUpload = (
         return
       }
       try {
-        const body = file instanceof File ? file : new File([file], name, { type: file.type })
-        resolve((await uploadFile(apiKey, body, getUploadPurpose(name, isImage), signal)).id)
+        const body = isImage
+          ? await normalizeImageForUpload(file, name)
+          : file instanceof File
+            ? file
+            : new File([file], name, { type: file.type })
+        resolve((await uploadFile(apiKey, body, getUploadPurpose(body.name, isImage), signal)).id)
       } catch (error) {
         reject(error)
       }

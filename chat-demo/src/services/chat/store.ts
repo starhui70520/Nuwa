@@ -3,7 +3,7 @@ import { showToast } from '../../components/base/toastState.js'
 import { createId } from '../../utils/id.js'
 import { refreshBalanceAfterReply } from '../api/balance.js'
 import { ApiError, streamMessage } from '../api/client.js'
-import type { ChatModel, CreateMessageRequest } from '../api/types.js'
+import type { ChatModel, CreateMessageRequest, MessageParam } from '../api/types.js'
 import { extractFileIds, getFileErrorCode, isRetryableApiError } from '../api/errors.js'
 import { cancelUpload, describeUploadError, uploadAttachment, useUploads } from '../attachments.js'
 import { getActiveSecret, isUsingDeepSeekAccount, useSettings } from '../settings.js'
@@ -68,6 +68,50 @@ const serverTools = (search: boolean, allowExtended: boolean): CreateMessageRequ
 const is32kInputLimitError = (error: unknown): boolean =>
   error instanceof ApiError &&
   /user input too long.*exceeds max 32768 tokens/i.test(error.message)
+
+/** 被服务端判定为不支持/已损坏的历史图片 file_id；同会话后续轮次直接跳过，避免整段对话死锁。 */
+const rejectedHistoryImageIds = new Set<string>()
+const MAX_SKIPPED_BAD_IMAGES = 10
+
+const parseUnsupportedImageError = (
+  error: unknown
+): { messageIndex: number; blockIndex: number } | null => {
+  if (!(error instanceof ApiError)) {
+    return null
+  }
+  const match = /messages\.(\d+)\.content\.(\d+):.*unsupported image/i.exec(error.message)
+  if (!match) {
+    return null
+  }
+  return {
+    messageIndex: Number.parseInt(match[1], 10),
+    blockIndex: Number.parseInt(match[2], 10),
+  }
+}
+
+const stripRejectedImages = (
+  messages: MessageParam[],
+  rejectedIds: ReadonlySet<string>
+): MessageParam[] => {
+  if (rejectedIds.size === 0) {
+    return messages
+  }
+  return messages.map((message) => {
+    if (message.role !== 'user' || typeof message.content === 'string') {
+      return message
+    }
+    const filtered = message.content.filter(
+      (block) => !(block.type === 'image' && rejectedIds.has(block.source.file_id))
+    )
+    if (filtered.length === message.content.length) {
+      return message
+    }
+    return {
+      ...message,
+      content: filtered.length > 0 ? filtered : [{ type: 'text', text: '[图片]' }],
+    }
+  })
+}
 
 /** 允许自动补标题的请求；手动重命名后取消本轮标题写入，包含主动清空标题的情况。 */
 const titleRequests = new Set<AbortController>()
@@ -1035,6 +1079,8 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
   let reply = initial
   let frame = 0
   let dropExtendedFor1M = false
+  let skippedBadImages = 0
+  let sentMessages: MessageParam[] = []
   const flush = () => {
     cancelAnimationFrame(frame)
     frame = 0
@@ -1057,13 +1103,17 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
         reply = { ...reply, latestReminder }
         updateReply(sessionId, reply)
         persist(sessionId)
-        const messages = toRequestMessages(
-          prepared.history,
-          prepared.question,
-          prepared.prefix,
-          initial.thinking ?? false,
-          latestReminder
+        const messages = stripRejectedImages(
+          toRequestMessages(
+            prepared.history,
+            prepared.question,
+            prepared.prefix,
+            initial.thinking ?? false,
+            latestReminder
+          ),
+          rejectedHistoryImageIds
         )
+        sentMessages = messages
         const configuredModel = useSettings.getState().apiModel.trim()
         const resolvedModel = isUsingDeepSeekAccount()
           ? MODEL
@@ -1131,6 +1181,43 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
         if (!receivedContent && !dropExtendedFor1M && is32kInputLimitError(error)) {
           dropExtendedFor1M = true
           continue
+        }
+        // 历史消息夹带不支持/已损坏的图片时，跳过该坏图并重试，避免整段长对话永久卡死。
+        const badImage = !receivedContent ? parseUnsupportedImageError(error) : null
+        if (badImage) {
+          let lastUserIndex = -1
+          for (let i = sentMessages.length - 1; i >= 0; i--) {
+            if (sentMessages[i].role === 'user') {
+              lastUserIndex = i
+              break
+            }
+          }
+          const targetMsg = sentMessages[badImage.messageIndex]
+          if (
+            badImage.messageIndex < lastUserIndex &&
+            skippedBadImages < MAX_SKIPPED_BAD_IMAGES &&
+            targetMsg?.role === 'user' &&
+            Array.isArray(targetMsg.content)
+          ) {
+            const targetBlock = targetMsg.content[badImage.blockIndex]
+            if (
+              targetBlock?.type === 'image' &&
+              !rejectedHistoryImageIds.has(targetBlock.source.file_id)
+            ) {
+              rejectedHistoryImageIds.add(targetBlock.source.file_id)
+              skippedBadImages += 1
+              continue
+            }
+          }
+          if (badImage.messageIndex === lastUserIndex && error instanceof ApiError) {
+            reply = settleReply(reply, 'error', Date.now(), {
+              kind: error.kind,
+              message: error.message,
+              status: error.status,
+              localMessage: { key: 'replyUnsupportedImage' },
+            })
+            break
+          }
         }
         // 附件失效：重新补传后重发。收到过内容块（含丢弃的客户端工具）后不自动重发。
         if (

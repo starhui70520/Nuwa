@@ -71,6 +71,7 @@ export const zh = {
   replyRateLimited: '请求过于频繁，请稍后再试',
   completionServerBusyToast: '服务器繁忙，请稍后再试',
   unknownError: '未知错误',
+  replyUnsupportedImage: '图片格式不受支持或已损坏，请换用 JPG、PNG 或 WebP 图片后重试',
   replyRefused: '你好，这个问题我暂时无法回答，让我们换个话题再聊聊吧。',
   messageThinkDuration: '已思考（用时 {count} 秒）',
   messageThinkDurationPlural: '已思考（用时 {count} 秒）',
