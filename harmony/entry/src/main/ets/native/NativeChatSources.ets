@@ -9,6 +9,7 @@ export interface NativeChatSource {
   publishedAt: string | null;
   siteIcon: string | null;
   searchResult: boolean;
+  searchOrder?: number;
 }
 
 export interface NativeChatCitation {
@@ -131,6 +132,12 @@ function parseSourceUrl(value?: string | null): url.URL | undefined {
 
 export function safeNativeSourceUrl(value?: string | null): string {
   return parseSourceUrl(value) && typeof value === 'string' ? value.trim() : '';
+}
+
+export function nativeSearchResults(sources: NativeChatSource[]): NativeChatSource[] {
+  return sources.filter((source: NativeChatSource): boolean => source.searchResult)
+    .sort((left: NativeChatSource, right: NativeChatSource): number =>
+      (left.searchOrder ?? Number.MAX_SAFE_INTEGER) - (right.searchOrder ?? Number.MAX_SAFE_INTEGER));
 }
 
 function clean(value: string | null | undefined, limit: number): string {
@@ -282,7 +289,8 @@ function register(sources: NativeChatSource[], byUrl: Map<string, NativeChatSour
 function sameSource(source: NativeChatSource, other: NativeChatSource): boolean {
   return source.index === other.index && source.url === other.url && source.title === other.title &&
     source.siteName === other.siteName && source.snippet === other.snippet && source.publishedAt === other.publishedAt &&
-    source.siteIcon === other.siteIcon && source.searchResult === other.searchResult;
+    source.siteIcon === other.siteIcon && source.searchResult === other.searchResult &&
+    source.searchOrder === other.searchOrder;
 }
 
 function sameView(a: SourcesView, b: SourcesView): boolean {
@@ -338,6 +346,7 @@ export class NativeChatSources {
       publishedAt: source.publishedAt,
       siteIcon: source.siteIcon,
       searchResult: source.searchResult,
+      searchOrder: source.searchOrder,
     }));
   }
 
@@ -415,12 +424,18 @@ export class NativeChatSources {
     const sources: NativeChatSource[] = [];
     const citations: NativeChatCitation[] = [];
     const byUrl = new Map<string, NativeChatSource>();
+    let nextSearchOrder = 0;
     // Android assigns tool-result indices in call order before assigning citation-only indices.
     this.calls.forEach((kind: string, id: string): void => {
       const result = this.results.get(id);
       if (result && result.kind === kind) {
         for (const seed of result.seeds) {
           register(sources, byUrl, seed, result.searchResult);
+          const source = byUrl.get(seed.url);
+          if (result.searchResult && source && source.searchOrder === undefined) {
+            source.searchOrder = nextSearchOrder;
+            nextSearchOrder += 1;
+          }
         }
       }
     });

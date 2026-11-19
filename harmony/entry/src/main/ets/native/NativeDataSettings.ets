@@ -7,6 +7,9 @@ export struct NativeDataSettings {
   @Prop locale: NativeLocale = 'zh-CN';
   @Prop busy: boolean = false;
   @Prop sessionCount: number = 0;
+  @Prop historyImportProgress: string = '';
+  @Prop historyImportResult: string = '';
+  @Prop historyImportFailed: boolean = false;
 
   onImport: () => void = () => {};
   onExport: () => void = () => {};
@@ -19,8 +22,8 @@ export struct NativeDataSettings {
   }
 
   @Builder
-  private actionButton(label: string, variant: string, enabled: boolean, action: () => void) {
-    Button(label, { type: ButtonType.Capsule })
+  private actionButton(label: () => string, variant: string, enabled: () => boolean, action: () => void) {
+    Button(label(), { type: ButtonType.Capsule })
       .height(36)
       .padding({ left: 14, right: 14 })
       .fontSize(14)
@@ -32,25 +35,25 @@ export struct NativeDataSettings {
       .border({ width: variant === 'primary' ? 0 : 1,
         color: variant === 'primary' ? $r('app.color.native_chat_blue') :
           (variant === 'danger' ? $r('app.color.native_chat_error') : $r('app.color.native_chat_stroke')) })
-      .enabled(enabled)
-      .opacity(enabled ? 1 : 0.45)
+      .enabled(enabled())
+      .opacity(enabled() ? 1 : 0.45)
       .onClick(action)
   }
 
   @Builder
-  private settingRow(label: string, description: string, buttonLabel: string,
-    variant: string, enabled: boolean, action: () => void) {
+  private settingRow(label: () => string, description: () => string, buttonLabel: () => string,
+    variant: string, enabled: () => boolean, action: () => void, error: () => boolean = () => false) {
     Row({ space: 8 }) {
       Column({ space: 4 }) {
-        Text(label)
+        Text(label())
           .fontSize(14)
           .lineHeight(22)
           .fontColor($r('app.color.native_chat_primary'))
-        Text(description)
+        Text(description())
           .fontSize(12)
           .lineHeight(18)
-          .fontColor($r('app.color.native_chat_secondary'))
-          .maxLines(3)
+          .fontColor(error() ? $r('app.color.native_chat_error') : $r('app.color.native_chat_secondary'))
+          .maxLines(error() ? 8 : 3)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
       }
       .layoutWeight(1)
@@ -67,39 +70,41 @@ export struct NativeDataSettings {
     Column({ space: 12 }) {
       Column({ space: 0 }) {
         this.settingRow(
-          this.text('一键迁移 DeepSeek 历史', 'One-Click DeepSeek Migration'),
-          this.text('登录官方网页端自动触发导出并合并到本机',
+          () => this.text('一键迁移 DeepSeek 历史', 'One-Click DeepSeek Migration'),
+          () => this.text('登录官方网页端自动触发导出并合并到本机',
             'Sign in to DeepSeek web to export and merge chats locally.'),
-          this.busy ? this.text('处理中…', 'Working…') : this.text('一键导入', 'Import'),
+          () => this.busy ? this.text('处理中…', 'Working…') : this.text('一键导入', 'Import'),
           'primary',
-          !this.busy,
+          () => !this.busy,
           this.onMigration,
         )
         this.settingRow(
-          this.text('通过分享链接导入', 'Import from share link'),
-          this.text('粘贴 DeepSeek 分享链接（如 chat.deepseek.com/share/...）直接导入并继续对话',
+          () => this.text('通过分享链接导入', 'Import from share link'),
+          () => this.text('粘贴 DeepSeek 分享链接（如 chat.deepseek.com/share/...）直接导入并继续对话',
             'Paste a DeepSeek share link (e.g. chat.deepseek.com/share/...) to import and continue the chat.'),
-          this.text('导入链接', 'Import link'),
+          () => this.text('导入链接', 'Import link'),
           'outlined',
-          !this.busy,
+          () => !this.busy,
           this.onShareImport,
         )
         this.settingRow(
-          this.text('导入历史对话', 'Import chat history'),
-          this.text('按会话 ID 增量合并导入，保留已有本地对话与附件，支持 DeepSeek 导出的 ZIP 文件。',
+          () => this.text('导入历史对话', 'Import chat history'),
+          () => this.historyImportProgress || this.historyImportResult ||
+            this.text('按会话 ID 增量合并导入，保留已有本地对话与附件，支持 DeepSeek 导出的 ZIP 文件。',
             'Merge chats by session ID while keeping existing local chats and attachments. Supports DeepSeek ZIP exports.'),
-          this.busy ? this.text('处理中…', 'Working…') : this.text('↑ 上传', '↑ Upload'),
+          () => this.historyImportProgress ? this.text('导入中…', 'Importing…') : this.text('↑ 上传', '↑ Upload'),
           'outlined',
-          !this.busy,
+          () => !this.busy,
           this.onImport,
+          () => this.historyImportFailed && !this.historyImportProgress,
         )
         this.settingRow(
-          this.text('导出所有历史对话', 'Export all chat history'),
-          this.text('包含所有历史对话及本地图片原件；其他附件仅保留文件信息，不包含 API Key。',
+          () => this.text('导出所有历史对话', 'Export all chat history'),
+          () => this.text('包含所有历史对话及本地图片原件；其他附件仅保留文件信息，不包含 API Key。',
             'Includes all chats and locally stored images. Other attachments keep file details only. API keys are excluded.'),
-          this.busy ? this.text('处理中…', 'Working…') : this.text('↓ 下载', '↓ Export'),
+          () => this.busy ? this.text('处理中…', 'Working…') : this.text('↓ 下载', '↓ Export'),
           'outlined',
-          !this.busy && this.sessionCount > 0,
+          () => !this.busy && this.sessionCount > 0,
           this.onExport,
         )
       }
@@ -110,12 +115,12 @@ export struct NativeDataSettings {
 
       Column({ space: 0 }) {
         this.settingRow(
-          this.text('删除所有对话', 'Delete all chats'),
-          this.text('删除后，所有对话都将被清空且无法找回。本地保存的附件及未发送的草稿也将被删除。',
+          () => this.text('删除所有对话', 'Delete all chats'),
+          () => this.text('删除后，所有对话都将被清空且无法找回。本地保存的附件及未发送的草稿也将被删除。',
             'All chats will be cleared permanently. Locally saved attachments and unsent drafts will also be deleted.'),
-          this.busy ? this.text('处理中…', 'Working…') : this.text('删除', 'Delete'),
+          () => this.busy ? this.text('处理中…', 'Working…') : this.text('删除', 'Delete'),
           'danger',
-          !this.busy && this.sessionCount > 0,
+          () => !this.busy && this.sessionCount > 0,
           this.onDeleteAll,
         )
       }

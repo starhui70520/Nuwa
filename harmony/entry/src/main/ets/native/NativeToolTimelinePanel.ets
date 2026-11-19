@@ -21,7 +21,10 @@ export struct NativeToolTimelinePanel {
   @Prop fontScale: number = 1;
   @Prop rtl: boolean = false;
   @Prop textOffset: number = 0;
-  onSources: (sources: NativeChatSource[]) => void = (_sources: NativeChatSource[]) => {};
+  @Prop messageId: string = '';
+  @Prop activeSourceEntry: string = '';
+  onSources: (entry: string, sources: NativeChatSource[]) => void =
+    (_entry: string, _sources: NativeChatSource[]) => {};
   @State private expanded: boolean = true;
   @State private tick: number = 0;
   private ticker: number = -1;
@@ -117,10 +120,14 @@ export struct NativeToolTimelinePanel {
     return matches;
   }
 
-  private showSources(addresses: string[]): void {
+  private sourceEntry(step: NativeToolTimelineStep): string {
+    return this.messageId + ':' + step.type + ':' + step.key;
+  }
+
+  private showSources(step: NativeToolTimelineStep, addresses: string[]): void {
     const matches = this.searchSources(addresses);
     if (matches.length > 0) {
-      this.onSources(matches);
+      this.onSources(this.sourceEntry(step), matches);
     }
   }
 
@@ -202,7 +209,10 @@ export struct NativeToolTimelinePanel {
             .rotate({ angle: this.rtl ? 180 : 0 })
         }
       }
-      .padding(0).height(24).onClick((): void => { this.showSources(step.resultUrls ?? []); })
+      .padding(0).height(24)
+      .backgroundColor(this.activeSourceEntry === this.sourceEntry(step) ? $r('app.color.native_chat_selected') :
+        Color.Transparent)
+      .onClick((): void => { this.showSources(step, step.resultUrls ?? []); })
     } else {
       Text(this.searchLabel(step)).fontSize(13 * this.fontScale)
         .fontColor($r('app.color.native_chat_secondary')).maxLines(1)
@@ -242,10 +252,12 @@ export struct NativeToolTimelinePanel {
         }, (page: NativeTimelinePage): string => JSON.stringify(page))
         if (step.type === 'open' && (step.pages?.length ?? 0) > 5) {
           Text(this.text('查看全部', 'View All')).fontSize(12 * this.fontScale)
-            .fontColor($r('app.color.native_chat_secondary')).backgroundColor($r('app.color.native_chat_field'))
+            .fontColor($r('app.color.native_chat_secondary'))
+            .backgroundColor(this.activeSourceEntry === this.sourceEntry(step) ? $r('app.color.native_chat_selected') :
+              $r('app.color.native_chat_field'))
             .padding(4).borderRadius(6)
             .onClick((): void => {
-              this.showSources((step.pages ?? []).map((page: NativeTimelinePage): string => page.url));
+              this.showSources(step, (step.pages ?? []).map((page: NativeTimelinePage): string => page.url));
             })
         }
       }

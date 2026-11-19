@@ -26,12 +26,19 @@ export interface NativeAttachment {
 export class NativeAttachmentUploadError extends Error {
   readonly retryable: boolean;
   readonly status?: number;
+  readonly contentRejected: boolean;
 
-  constructor(detail: string, retryable: boolean, status?: number) {
+  constructor(detail: string, retryable: boolean, status?: number, contentRejected: boolean = false) {
     super(detail);
     this.retryable = retryable;
     this.status = status;
+    this.contentRejected = contentRejected;
   }
+}
+
+function rejectedAttachmentContents(result: string): boolean {
+  const message = result.slice(0, 8192);
+  return /You have uploaded an (unsupported|invalid) (file|image)|The image is too large to process|password-protected|Failed to recognize the file/i.test(message);
 }
 
 interface UploadFile {
@@ -681,8 +688,9 @@ export class NativeChatAttachments {
       rejectCanceled(transfer);
       const status = response.responseCode;
       if (status < 200 || status >= 300) {
+        const contentRejected = status === 400 && typeof response.result === 'string' && rejectedAttachmentContents(response.result);
         throw new NativeAttachmentUploadError('附件上传失败（HTTP ' + status.toString() + '）。',
-          status === 429 || status >= 500, status >= 100 && status <= 599 ? status : undefined);
+          status === 429 || status >= 500, status >= 100 && status <= 599 ? status : undefined, contentRejected);
       }
       let payload: UploadData;
       try {

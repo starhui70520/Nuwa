@@ -5,7 +5,7 @@ import {
   attachmentMime, attachmentPurpose, attachmentRasterMime, attachmentUploadImageMime, NativeAttachment,
   NativeChatAttachments,
 } from './NativeChatAttachments';
-import { NativeChatCitation, NativeChatSource, safeNativeSourceUrl } from './NativeChatSources';
+import { NativeChatCitation, NativeChatSource, nativeSearchResults, safeNativeSourceUrl } from './NativeChatSources';
 import { NativeConversation, NativeConversationMessage, NativeConversationState, visibleMessages } from './NativeConversation';
 import { NativeLocale } from './NativeLocation';
 import { describeNativeReplyFailure, nativeRefusalText } from './NativeReplyNotice';
@@ -363,6 +363,7 @@ function readSourceMetadata(value: ArchiveSourceMetadata | undefined, contentLen
       publishedAt: sourceString(item.publishedAt, 120) || null,
       siteIcon: safeNativeSourceUrl(item.siteIcon) || null,
       searchResult: item.searchResult === true,
+      searchOrder: item.searchOrder !== undefined && count(item.searchOrder) ? item.searchOrder : undefined,
     });
   }
   const citations = value.citations.slice(0, MAX_PORTABLE_CITATIONS)
@@ -373,7 +374,7 @@ function readSourceMetadata(value: ArchiveSourceMetadata | undefined, contentLen
 }
 
 function addPortableSource(sources: NativeChatSource[], seen: Map<string, NativeChatSource>,
-  item: ArchiveSearchResult, searchResult: boolean): void {
+  item: ArchiveSearchResult, searchOrder?: number): void {
   const address = safeNativeSourceUrl(item?.url);
   if (!address) {
     return;
@@ -395,13 +396,14 @@ function addPortableSource(sources: NativeChatSource[], seen: Map<string, Native
     cached.snippet = cached.snippet ?? snippet;
     cached.publishedAt = cached.publishedAt ?? publishedAt;
     cached.siteIcon = cached.siteIcon ?? siteIcon;
-    cached.searchResult = cached.searchResult || searchResult;
+    cached.searchOrder = cached.searchOrder ?? searchOrder;
+    cached.searchResult = cached.searchOrder !== undefined;
     return;
   }
   if (sources.length < MAX_PORTABLE_SOURCES) {
     const source: NativeChatSource = {
       index: sources.length + 1, url: address, title: title, siteName: siteName, snippet: snippet,
-      publishedAt: publishedAt, siteIcon: siteIcon, searchResult: searchResult,
+      publishedAt: publishedAt, siteIcon: siteIcon, searchResult: searchOrder !== undefined, searchOrder: searchOrder,
     };
     sources.push(source);
     seen.set(address, source);
@@ -415,16 +417,18 @@ function portableSources(message: ArchiveMessage, contentLength: number): Archiv
   }
   const sources: NativeChatSource[] = [];
   const seen = new Map<string, NativeChatSource>();
+  let searchOrder = 0;
   for (const fragment of message.fragments) {
     if (fragment.type === 'TOOL_SEARCH' && Array.isArray(fragment.results)) {
       for (const result of fragment.results) {
-        addPortableSource(sources, seen, result, true);
+        addPortableSource(sources, seen, result, searchOrder);
+        searchOrder += 1;
       }
     } else if (fragment.type === 'TOOL_OPEN' && fragment.status === 'FINISHED' && fragment.url) {
       addPortableSource(sources, seen, {
         url: fragment.url, title: fragment.title ?? '', snippet: fragment.snippet ?? '',
         site_name: fragment.site_name ?? null, site_icon: null, published_at: fragment.published_at ?? null,
-      }, false);
+      });
     }
   }
   return sources.length ? { version: 1, sources: sources, citations: [] } : undefined;
@@ -445,7 +449,7 @@ function appendPortableSources(message: ArchiveMessage, item: NativeConversation
   if (!validated || message.fragments.some((fragment: ArchiveFragment): boolean => fragment.type === 'TOOL_SEARCH')) {
     return;
   }
-  const results = validated.sources.filter((source: NativeChatSource): boolean => source.searchResult)
+  const results = nativeSearchResults(validated.sources)
     .map((source: NativeChatSource): ArchiveSearchResult => ({
       url: source.url, title: source.title, snippet: source.snippet ?? '', site_name: source.siteName || null,
       site_icon: source.siteIcon, published_at: portableSourceDate(source.publishedAt),
@@ -745,12 +749,14 @@ export async function decodeChatBackup(bytes: Uint8Array): Promise<NativeConvers
 }
 
 async function readChatBackup(input: NativeBackupZipInput, context?: common.UIAbilityContext,
-  limit?: number, onVerified?: () => Promise<void>): Promise<NativeConversation[]> {
+  limit?: number, onVerified?: () => Promise<void>,
+  onProgress?: (sessions: number, images: number) => void): Promise<NativeConversation[]> {
   const sessions: PreparedSession[] = [];
   const ids = new Set<string>();
   const wantedImages = new Map<string, ArchiveImage[]>();
   const staged: string[] = [];
   let inlineBytes = 0;
+  let imageCount = 0;
   let manifest = false;
   let index: ArchiveIndexEntry[] | undefined;
   try {
@@ -789,6 +795,7 @@ async function readChatBackup(input: NativeBackupZipInput, context?: common.UIAb
         for (const imagePath of prepared.imagePaths) {
           wantedImages.set(imagePath, prepared.origin.images);
         }
+        onProgress?.(sessions.length, imageCount);
         return;
       }
       const imageOwner = /^chat_sessions\/([^/]+)_files\/[^/]/.exec(path)?.[1];
@@ -815,6 +822,8 @@ async function readChatBackup(input: NativeBackupZipInput, context?: common.UIAb
         const bytes = await readBackupZipEntry(entry);
         images.push({ path: path, bytes: base64.encodeToStringSync(bytes), size: entry.size, crc: entry.crc });
       }
+      imageCount++;
+      onProgress?.(sessions.length, imageCount);
     }, limit);
     if (!manifest || !index || index.length !== sessions.length) {
       return invalidArchive();
@@ -1220,14 +1229,16 @@ export class NativeChatBackup {
   private readonly attachments = new NativeChatAttachments();
 
   async importFromUri(uri: string, context?: common.UIAbilityContext,
-    onVerified?: () => Promise<void>): Promise<NativeConversation[]> {
+    onVerified?: () => Promise<void>,
+    onProgress?: (sessions: number, images: number) => void): Promise<NativeConversation[]> {
     return withBackupInput<NativeConversation[]>(uri,
       (input: NativeBackupZipInput): Promise<NativeConversation[]> =>
-        readChatBackup(input, context, context ? undefined : MAX_BACKUP_BYTES, onVerified));
+        readChatBackup(input, context, context ? undefined : MAX_BACKUP_BYTES, onVerified, onProgress));
   }
 
-  async importFromPicker(context: common.UIAbilityContext, onFileSelected?: () => void,
-    onVerified?: () => Promise<void>): Promise<NativeConversation[] | null> {
+  async importFromPicker(context: common.UIAbilityContext, onFileSelected?: () => Promise<boolean>,
+    onVerified?: () => Promise<void>,
+    onProgress?: (sessions: number, images: number) => void): Promise<NativeConversation[] | null> {
     const options = new picker.DocumentSelectOptions();
     options.maxSelectNumber = 1;
     options.fileSuffixFilters = ['历史备份|.zip'];
@@ -1235,8 +1246,8 @@ export class NativeChatBackup {
     if (!selected[0]) {
       return null;
     }
-    onFileSelected?.();
-    return this.importFromUri(selected[0], context, onVerified);
+    if (onFileSelected && !await onFileSelected()) return null;
+    return this.importFromUri(selected[0], context, onVerified, onProgress);
   }
 
   private async writeImage(context: common.UIAbilityContext, writer: NativeBackupZipWriter, name: string,
