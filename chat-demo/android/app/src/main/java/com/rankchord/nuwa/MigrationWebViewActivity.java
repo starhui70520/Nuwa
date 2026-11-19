@@ -478,83 +478,185 @@ public class MigrationWebViewActivity extends Activity {
     }
 
     private void downloadHttpFile(String urlStr, String userAgent, String fileName) {
-        HttpURLConnection conn = null;
-        try {
-            String currentUrl = urlStr;
-            int redirects = 0;
-            int code = 0;
-            while (true) {
-                URL url = new URL(currentUrl);
-                conn = (HttpURLConnection) url.openConnection();
-                conn.setInstanceFollowRedirects(false);
-                conn.setConnectTimeout(15000);
-                conn.setReadTimeout(30000);
-                String host = url.getHost() != null ? url.getHost().toLowerCase() : "";
-                if (host.endsWith("deepseek.com")) {
-                    String cookies = CookieManager.getInstance().getCookie(currentUrl);
-                    if (cookies != null && !cookies.isEmpty()) {
-                        conn.setRequestProperty("Cookie", cookies);
+        final int maxAttempts = 3;
+        File partFile = new File(getFilesDir(), "pending_migration.zip.part");
+        File outFile = new File(getFilesDir(), "pending_migration.zip");
+        //noinspection ResultOfMethodCallIgnored
+        partFile.delete();
+
+        Exception lastError = null;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            HttpURLConnection conn = null;
+            try {
+                String currentUrl = urlStr;
+                int redirects = 0;
+                int code = 0;
+                long existingBytes = partFile.exists() ? partFile.length() : 0L;
+
+                while (true) {
+                    URL url = new URL(currentUrl);
+                    conn = (HttpURLConnection) url.openConnection();
+                    conn.setInstanceFollowRedirects(false);
+                    conn.setConnectTimeout(20000);
+                    conn.setReadTimeout(60000);
+                    String host = url.getHost() != null ? url.getHost().toLowerCase() : "";
+                    if (host.endsWith("deepseek.com")) {
+                        String cookies = CookieManager.getInstance().getCookie(currentUrl);
+                        if (cookies != null && !cookies.isEmpty()) {
+                            conn.setRequestProperty("Cookie", cookies);
+                        }
+                        conn.setRequestProperty("Referer", TARGET_URL);
                     }
-                    conn.setRequestProperty("Referer", TARGET_URL);
-                }
-                if (userAgent != null && !userAgent.isEmpty()) {
-                    conn.setRequestProperty("User-Agent", userAgent);
-                }
-                conn.connect();
-                code = conn.getResponseCode();
-                if (code == HttpURLConnection.HTTP_MOVED_TEMP
-                    || code == HttpURLConnection.HTTP_MOVED_PERM
-                    || code == HttpURLConnection.HTTP_SEE_OTHER
-                    || code == 307
-                    || code == 308) {
-                    String location = conn.getHeaderField("Location");
-                    conn.disconnect();
-                    conn = null;
-                    if (location == null || location.isEmpty() || redirects >= 5) {
-                        throw new RuntimeException("HTTP " + code);
+                    if (userAgent != null && !userAgent.isEmpty()) {
+                        conn.setRequestProperty("User-Agent", userAgent);
                     }
-                    currentUrl = new URL(url, location).toString();
-                    redirects++;
+                    if (existingBytes > 0) {
+                        conn.setRequestProperty("Range", "bytes=" + existingBytes + "-");
+                    }
+                    conn.connect();
+                    code = conn.getResponseCode();
+                    if (code == HttpURLConnection.HTTP_MOVED_TEMP
+                        || code == HttpURLConnection.HTTP_MOVED_PERM
+                        || code == HttpURLConnection.HTTP_SEE_OTHER
+                        || code == 307
+                        || code == 308) {
+                        String location = conn.getHeaderField("Location");
+                        conn.disconnect();
+                        conn = null;
+                        if (location == null || location.isEmpty() || redirects >= 5) {
+                            throw new RuntimeException("HTTP " + code);
+                        }
+                        currentUrl = new URL(url, location).toString();
+                        redirects++;
+                        continue;
+                    }
+                    break;
+                }
+
+                if (code == 416 && existingBytes > 0) {
+                    // Range 越界，从头重新下载
+                    //noinspection ResultOfMethodCallIgnored
+                    partFile.delete();
                     continue;
                 }
-                break;
-            }
 
-            if (code < 200 || code >= 300) {
-                throw new RuntimeException("HTTP " + code);
-            }
+                if (code < 200 || code >= 300) {
+                    throw new RuntimeException("HTTP " + code);
+                }
 
-            File outFile = new File(getFilesDir(), "pending_migration.zip");
-            try (InputStream in = conn.getInputStream();
-                 FileOutputStream out = new FileOutputStream(outFile)) {
-                byte[] buf = new byte[8192];
-                int len;
-                while ((len = in.read(buf)) != -1) {
-                    out.write(buf, 0, len);
+                boolean append = (code == HttpURLConnection.HTTP_PARTIAL && existingBytes > 0);
+                if (!append) {
+                    existingBytes = 0L;
+                }
+                long contentLen = conn.getContentLengthLong();
+                long totalExpected = contentLen > 0 ? existingBytes + contentLen : -1L;
+
+                long downloaded = existingBytes;
+                long lastUiUpdate = 0L;
+                try (InputStream in = conn.getInputStream();
+                     FileOutputStream out = new FileOutputStream(partFile, append)) {
+                    byte[] buf = new byte[16384];
+                    int len;
+                    while ((len = in.read(buf)) != -1) {
+                        out.write(buf, 0, len);
+                        downloaded += len;
+                        long now = System.currentTimeMillis();
+                        if (now - lastUiUpdate >= 350) {
+                            lastUiUpdate = now;
+                            final long cur = downloaded;
+                            final long tot = totalExpected;
+                            runOnUiThread(() -> {
+                                if (guideView == null) return;
+                                if (tot > 0) {
+                                    int pct = (int) Math.min(99, (cur * 100L) / tot);
+                                    guideView.setText(String.format(
+                                        java.util.Locale.US,
+                                        "正在下载导出包 %d%% (%.1f/%.1f MB)...",
+                                        pct,
+                                        cur / (1024.0 * 1024.0),
+                                        tot / (1024.0 * 1024.0)
+                                    ));
+                                } else {
+                                    guideView.setText(String.format(
+                                        java.util.Locale.US,
+                                        "正在下载导出包 (%.1f MB)...",
+                                        cur / (1024.0 * 1024.0)
+                                    ));
+                                }
+                            });
+                        }
+                    }
+                }
+
+                Log.d(TAG, "Downloaded HTTP file (attempt " + attempt + "): size=" + partFile.length()
+                    + ", expected=" + totalExpected + ", type=" + conn.getContentType());
+
+                if (totalExpected > 0 && partFile.length() < totalExpected) {
+                    throw new java.io.IOException("下载不完整 (" + partFile.length() + "/" + totalExpected + ")");
+                }
+                if (!isZipMagic(partFile)) {
+                    //noinspection ResultOfMethodCallIgnored
+                    partFile.delete();
+                    throw new java.io.IOException("下载到的不是有效 ZIP 导出包");
+                }
+                if (!isZipComplete(partFile)) {
+                    //noinspection ResultOfMethodCallIgnored
+                    partFile.delete();
+                    throw new java.io.IOException("导出包校验不完整");
+                }
+
+                logZipSummary(partFile);
+                if (outFile.exists()) {
+                    //noinspection ResultOfMethodCallIgnored
+                    outFile.delete();
+                }
+                if (!partFile.renameTo(outFile)) {
+                    throw new java.io.IOException("保存导出包失败");
+                }
+                finishWithFile(outFile, fileName);
+                return;
+            } catch (Exception e) {
+                lastError = e;
+                Log.e(TAG, "downloadHttpFile attempt " + attempt + " failed: " + e.getMessage(), e);
+                if (attempt < maxAttempts) {
+                    final int nextAttempt = attempt + 1;
+                    runOnUiThread(() -> {
+                        if (guideView != null) {
+                            guideView.setText("网络波动，正在自动续传重试 (" + nextAttempt + "/" + maxAttempts + ")...");
+                        }
+                    });
+                    try {
+                        Thread.sleep(1000L * attempt);
+                    } catch (InterruptedException ignored) {
+                        break;
+                    }
+                }
+            } finally {
+                if (conn != null) {
+                    conn.disconnect();
                 }
             }
+        }
 
-            Log.d(TAG, "Downloaded HTTP file: size=" + outFile.length() + ", type=" + conn.getContentType());
-            if (!isZipMagic(outFile)) {
-                Log.e(TAG, "Downloaded file is not a ZIP archive");
-                //noinspection ResultOfMethodCallIgnored
-                outFile.delete();
-                runOnUiThread(() ->
-                    Toast.makeText(this, "下载到的不是有效 ZIP 导出包，请重试", Toast.LENGTH_LONG).show()
-                );
-                return;
+        //noinspection ResultOfMethodCallIgnored
+        partFile.delete();
+        final String errMsg = lastError != null && lastError.getMessage() != null
+            ? lastError.getMessage()
+            : "网络异常";
+        runOnUiThread(() -> {
+            if (guideView != null) {
+                guideView.setText("下载未完成，请保持网络稳定后重新点击页面上的「下载」");
             }
-            logZipSummary(outFile);
-            finishWithFile(outFile, fileName);
+            Toast.makeText(this, "下载接管失败（已重试3次）: " + errMsg, Toast.LENGTH_LONG).show();
+        });
+    }
+
+    private static boolean isZipComplete(File file) {
+        try (java.util.zip.ZipFile zf = new java.util.zip.ZipFile(file)) {
+            return zf.size() > 0;
         } catch (Exception e) {
-            Log.e(TAG, "downloadHttpFile failed: " + e.getMessage(), e);
-            runOnUiThread(() ->
-                Toast.makeText(this, "下载接管失败: " + e.getMessage(), Toast.LENGTH_LONG).show()
-            );
-        } finally {
-            if (conn != null) {
-                conn.disconnect();
-            }
+            Log.e(TAG, "isZipComplete check failed: " + e.getMessage());
+            return false;
         }
     }
 

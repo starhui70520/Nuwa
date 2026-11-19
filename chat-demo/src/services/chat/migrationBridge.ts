@@ -1,6 +1,7 @@
 import { Capacitor } from '@capacitor/core'
 import { showToast } from '../../components/base/toastState.js'
 import { checkPendingAndroidPlatformAuth, handleWebOAuthCallback } from '../api/dshAuth.js'
+import { recordAppLog } from '../errorLog.js'
 import { DeepSeekMigration, isNativeAndroid, isNativeIos } from '../nativeBridge.js'
 import { setDeepSeekAccountAuth } from '../settings.js'
 import { BackupError, importHistory, importHistoryFromBytes } from './backup.js'
@@ -26,16 +27,29 @@ export const runZipImport = async (
     )
     return count
   } catch (error) {
-    ;(
-      window as Window & {
-        __NUWA_LAST_IMPORT_ERR__?: string
-      }
-    ).__NUWA_LAST_IMPORT_ERR__ =
+    const errText =
       error instanceof BackupError
         ? `BackupError:${error.key}`
         : error instanceof Error
           ? `${error.name}:${error.message}`
           : String(error)
+    const size =
+      input instanceof File
+        ? input.size
+        : input instanceof Uint8Array
+          ? input.byteLength
+          : input.byteLength
+    recordAppLog(
+      'error',
+      'migration',
+      `ZIP import failed (${name || 'deepseek_data.zip'}, ${size} bytes): ${errText}`,
+      error instanceof Error ? error.stack : undefined
+    )
+    ;(
+      window as Window & {
+        __NUWA_LAST_IMPORT_ERR__?: string
+      }
+    ).__NUWA_LAST_IMPORT_ERR__ = errText
     showToast({
       key: error instanceof BackupError ? error.key : 'historyImportFailed',
       type: 'error',
