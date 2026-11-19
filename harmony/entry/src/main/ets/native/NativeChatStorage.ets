@@ -41,6 +41,7 @@ function isTimestamp(value: number): boolean {
 function validateConversation(session: NativeConversation): boolean {
   if (!session || typeof session.id !== 'string' || !session.id || typeof session.title !== 'string' ||
     !isTimestamp(session.createdAt) || !isTimestamp(session.updatedAt) ||
+    (session.archiveJson !== undefined && typeof session.archiveJson !== 'string') ||
     (session.pinnedAt !== undefined && !isTimestamp(session.pinnedAt)) || !Array.isArray(session.messages)) {
     return false;
   }

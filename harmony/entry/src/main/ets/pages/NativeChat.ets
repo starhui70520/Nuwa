@@ -1,8 +1,15 @@
-import { common } from '@kit.AbilityKit';
+import { common, ConfigurationConstant } from '@kit.AbilityKit';
 import { KeyboardAvoidMode } from '@kit.ArkUI';
-import { util } from '@kit.ArkTS';
+import { url, util } from '@kit.ArkTS';
+import { webview } from '@kit.ArkWeb';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { NativeChatClient, NativeChatConfig, NativeChatMessage } from '../native/NativeChatClient';
+import { loadNativeAccount, saveNativeAccount } from '../native/NativeAccountStore';
+import { NativeApiCredential, verifyNativeApiCredential } from '../native/NativeApiCredential';
+import { NativeDataSettings } from '../native/NativeDataSettings';
+import { NativeDeepSeekAccount, NativeDeepSeekAccountController, NativeDeepSeekBalance } from '../native/NativeDeepSeekAccount';
+import { NativeOnboarding, NativeOnboardingView } from '../native/NativeOnboarding';
+import { NativeChatBackup, mergeChatBackup } from '../native/NativeChatBackup';
 import { NativeChatStorage } from '../native/NativeChatStorage';
 import {
   appendBranch, createConversation, createConversationMessage, deleteConversations, groupConversations,
@@ -11,7 +18,7 @@ import {
   updateConversationMessage, upsertConversation, visibleMessages,
 } from '../native/NativeConversation';
 import { NativeMarkdown } from '../native/NativeMarkdown';
-import { NativeSettings, NativeSettingsController } from '../native/NativeSettings';
+import { NativeSettings, NativeSettingsController, NATIVE_CHAT_FONT_SIZES } from '../native/NativeSettings';
 import { openNuwaPrivacyPolicy } from '../native/PrivacyPolicy';
 import { HarmonySpeechRecognition } from '../speech/HarmonySpeechRecognition';
 import { HarmonyTextToSpeech } from '../speech/HarmonyTextToSpeech';
@@ -28,8 +35,8 @@ interface NativeReply {
 struct NativeChat {
   @State private history: NativeConversationState = { sessions: [], activeId: null };
   @State private settings: NativeSettings = {
-    baseUrl: 'https://api.deepseek.com', model: 'deepseek-chat', apiKey: '', protocol: 'openai',
-    thinking: false, search: false, ttsMuted: true,
+    baseUrl: 'https://api.deepseek.com', model: 'deepseek-chat', apiKey: '', protocol: 'openai', authMode: 'api-key',
+    theme: 'system', chatFontSize: 16, thinking: false, search: false, ttsMuted: true,
   };
   @State private draft: string = '';
   @State private loaded: boolean = false;
@@ -40,6 +47,21 @@ struct NativeChat {
   @State private selectedIds: string[] = [];
   @State private selecting: boolean = false;
   @State private settingsVisible: boolean = false;
+  @State private onboardingView: NativeOnboardingView = 'home';
+  @State private account: NativeDeepSeekAccount | null = null;
+  @State private balance: NativeDeepSeekBalance | null = null;
+  @State private authorizing: boolean = false;
+  @State private storingAccount: boolean = false;
+  @State private authorizationUrl: string = '';
+  @State private authorizationStatus: string = '';
+  @State private settingsSection: string = 'root';
+  @State private settingsKey: string = '';
+  @State private settingsBase: string = '';
+  @State private settingsModel: string = '';
+  @State private settingsProtocol: 'openai' | 'anthropic' = 'openai';
+  @State private settingsVerifying: boolean = false;
+  @State private settingsError: string = '';
+  @State private backupBusy: boolean = false;
   @State private renamingId: string = '';
   @State private editId: string = '';
   @State private renameText: string = '';
@@ -53,6 +75,11 @@ struct NativeChat {
 
   private readonly storage = new NativeChatStorage();
   private readonly settingsStore = new NativeSettingsController();
+  private readonly backup = new NativeChatBackup();
+  private readonly accountController = new NativeDeepSeekAccountController();
+  private readonly authBrowser = new webview.WebviewController();
+  private authAttempt: number = 0;
+  private migrationInProgress: boolean = false;
   private readonly scroller = new Scroller();
   private readonly drafts: Map<string, string> = new Map();
   private visible: boolean = false;
@@ -89,6 +116,12 @@ struct NativeChat {
 
   onPageShow(): void {
     this.visible = true;
+    if (this.migrationInProgress) {
+      this.migrationInProgress = false;
+      void this.storage.loadConversations(this.host()).then((history: NativeConversationState) => {
+        this.history = history;
+      }).catch(() => { this.toast('无法读取导入的对话'); });
+    }
   }
 
   onPageHide(): void {
@@ -107,11 +140,18 @@ struct NativeChat {
     this.replies.forEach((reply: NativeReply) => { reply.stopped = true; reply.client.cancel(); });
     this.stopVoice();
     this.speaker.destroy();
+    this.accountController.cancel();
   }
 
   onBackPress(): boolean {
-    if (this.settingsVisible) {
-      this.settingsVisible = false;
+    if (this.authorizing) {
+      this.cancelAuthorization();
+    } else if (this.settingsVisible) {
+      if (this.settingsSection === 'root') {
+        this.settingsVisible = false;
+      } else {
+        this.settingsSection = 'root';
+      }
     } else if (this.renamingId) {
       this.renamingId = '';
     } else if (this.selecting) {
@@ -120,6 +160,8 @@ struct NativeChat {
       this.setDrawer(false);
     } else if (this.editId) {
       this.editId = '';
+    } else if (!this.authenticated() && this.onboardingView !== 'home') {
+      this.onboardingView = 'home';
     } else {
       return false;
     }
@@ -141,10 +183,16 @@ struct NativeChat {
       this.history = await this.storage.loadConversations(context);
       try {
         this.settings = await this.settingsStore.load(context);
+        this.account = await loadNativeAccount();
+        if (this.account && !this.settings.apiKey) {
+          this.settings.authMode = 'deepseek-account';
+        }
+        void this.refreshBalance();
       } catch {
         this.toast('无法读取已保存的服务设置');
       }
       this.loaded = true;
+      this.applyTheme();
       this.scrollToLatest();
     } catch {
       this.status = '无法读取本地会话';
@@ -159,16 +207,210 @@ struct NativeChat {
     }
   }
 
-  private async saveSettings(): Promise<void> {
-    const settings: NativeSettings = {
+  private settingsSnapshot(): NativeSettings {
+    return {
       baseUrl: this.settings.baseUrl, apiKey: this.settings.apiKey, model: this.settings.model,
       protocol: this.settings.protocol, thinking: this.settings.thinking, search: this.settings.search,
-      ttsMuted: this.settings.ttsMuted,
+      ttsMuted: this.settings.ttsMuted, authMode: this.settings.authMode,
+      theme: this.settings.theme, chatFontSize: this.settings.chatFontSize,
     };
+  }
+
+  private async saveSettings(): Promise<void> {
     try {
-      await this.settingsStore.save(this.host(), settings);
+      await this.settingsStore.save(this.host(), this.settingsSnapshot());
     } catch {
       this.toast('无法保存设置');
+    }
+  }
+
+  private applyTheme(): void {
+    const mode = this.settings.theme === 'dark' ? ConfigurationConstant.ColorMode.COLOR_MODE_DARK :
+      this.settings.theme === 'light' ? ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT :
+        ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET;
+    try {
+      this.host().getApplicationContext().setColorMode(mode);
+    } catch {
+      this.toast('无法应用外观设置');
+    }
+  }
+
+  private accountToken(): string {
+    return this.settings.authMode === 'deepseek-account' ? this.account?.token ?? '' : '';
+  }
+
+  private authenticated(): boolean {
+    return !!this.settings.apiKey || !!this.accountToken();
+  }
+
+  private async refreshBalance(): Promise<void> {
+    const token = this.accountToken();
+    if (!token) {
+      this.balance = null;
+      return;
+    }
+    const balance = await this.accountController.fetchBalance(token, 'zh_CN');
+    if (this.accountToken() === token) {
+      this.balance = balance;
+    }
+  }
+
+  private async connectKey(credential: NativeApiCredential): Promise<void> {
+    const settings = this.settingsSnapshot();
+    settings.apiKey = credential.apiKey;
+    settings.baseUrl = credential.baseUrl;
+    settings.model = credential.model;
+    settings.protocol = credential.protocol;
+    settings.authMode = 'api-key';
+    await this.settingsStore.save(this.host(), settings);
+    this.settings = settings;
+    this.onboardingView = 'home';
+    void this.refreshBalance();
+  }
+
+  private openCredentialForm(): void {
+    this.settingsKey = '';
+    this.settingsBase = this.settings.baseUrl;
+    this.settingsModel = this.settings.model;
+    this.settingsProtocol = this.settings.protocol;
+    this.settingsError = '';
+    this.settingsSection = 'key';
+  }
+
+  private async verifySettingsKey(): Promise<void> {
+    if (this.settingsVerifying || !this.settingsKey.trim()) {
+      return;
+    }
+    const credential: NativeApiCredential = {
+      apiKey: this.settingsKey.trim(), baseUrl: this.settingsBase.trim(),
+      model: this.settingsModel.trim(), protocol: this.settingsProtocol,
+    };
+    this.settingsVerifying = true;
+    this.settingsError = '';
+    try {
+      await verifyNativeApiCredential(credential);
+      await this.connectKey(credential);
+      this.settingsKey = '';
+      this.settingsSection = 'account';
+    } catch (error) {
+      this.settingsError = (error as Error).message;
+    } finally {
+      this.settingsVerifying = false;
+    }
+  }
+
+  private async startAuthorization(): Promise<void> {
+    if (this.authorizing) {
+      return;
+    }
+    this.authorizing = true;
+    this.authorizationUrl = '';
+    this.authorizationStatus = '正在连接 DeepSeek 开放平台…';
+    const attempt = ++this.authAttempt;
+    try {
+      const challenge = await this.accountController.startLogin(this.host(), 'zh_CN');
+      if (attempt === this.authAttempt) {
+        this.authorizationStatus = '请登录并授权 Nuwa 使用你的 DeepSeek API 账号';
+        this.authorizationUrl = challenge.authorizeUrl;
+      }
+    } catch (error) {
+      if (attempt === this.authAttempt) {
+        this.cancelAuthorization();
+        this.toast((error as Error).message || '无法连接 DeepSeek 开放平台');
+      }
+    }
+  }
+
+  private cancelAuthorization(): void {
+    if (this.storingAccount) {
+      return;
+    }
+    this.authAttempt++;
+    this.accountController.cancel();
+    this.authorizationUrl = '';
+    this.authorizing = false;
+  }
+
+  private interceptAuthorization(target: string): boolean {
+    if (this.accountController.isRedirect(target)) {
+      void this.consumeAuthorization(target, this.authAttempt);
+      return true;
+    }
+    try {
+      const location = url.URL.parseURL(target);
+      return location.protocol !== 'https:' || location.hostname !== 'platform.deepseek.com' ||
+        !!location.username || !!location.password || (!!location.port && location.port !== '443');
+    } catch {
+      return true;
+    }
+  }
+
+  private async consumeAuthorization(target: string, attempt: number): Promise<void> {
+    this.authorizationStatus = '正在确认授权…';
+    try {
+      const account = await this.accountController.handleRedirect(target);
+      if (!account || attempt !== this.authAttempt) {
+        return;
+      }
+      this.storingAccount = true;
+      try {
+        await saveNativeAccount(account);
+      } finally {
+        this.storingAccount = false;
+      }
+      const settings = this.settingsSnapshot();
+      settings.authMode = 'deepseek-account';
+      this.account = account;
+      this.settings = settings;
+      this.onboardingView = 'home';
+      this.cancelAuthorization();
+      void this.saveSettings();
+      void this.refreshBalance();
+    } catch (error) {
+      if (attempt === this.authAttempt) {
+        this.cancelAuthorization();
+        this.toast((error as Error).message || 'DeepSeek 授权失败');
+      }
+    }
+  }
+
+  private async enableAccount(): Promise<void> {
+    if (!this.account) {
+      return;
+    }
+    const settings = this.settingsSnapshot();
+    settings.authMode = 'deepseek-account';
+    try {
+      await this.settingsStore.save(this.host(), settings);
+      this.settings = settings;
+      void this.refreshBalance();
+    } catch {
+      this.toast('无法保存设置');
+    }
+  }
+
+  private async logoutAccount(): Promise<void> {
+    const account = this.account;
+    try {
+      await saveNativeAccount(null);
+      this.account = null;
+      this.balance = null;
+      this.settings.authMode = 'api-key';
+      await this.saveSettings();
+      if (!this.authenticated()) {
+        this.settingsVisible = false;
+      }
+      void this.accountController.logout(account?.token ?? '', 'zh_CN');
+    } catch {
+      this.toast('退出登录失败，请重试');
+    }
+  }
+
+  private async openLink(target: string): Promise<void> {
+    try {
+      await this.host().openLink(target, { appLinkingOnly: false });
+    } catch {
+      this.toast('无法打开链接');
     }
   }
 
@@ -242,7 +484,7 @@ struct NativeChat {
   }
 
   private async deleteSessions(ids: string[]): Promise<void> {
-    if (!ids.length) {
+    if (!ids.length || this.backupBusy) {
       return;
     }
     try {
@@ -281,18 +523,19 @@ struct NativeChat {
 
   private startReply(session: NativeConversation, parentId: string | null,
     prompt?: NativeConversationMessage, clearDraft: boolean = false): void {
-    if (!this.loaded || this.reply(session.id)) {
+    if (!this.loaded || this.backupBusy || this.reply(session.id)) {
       return;
     }
     const config: NativeChatConfig = {
       baseUrl: this.settings.baseUrl.trim(), model: this.settings.model.trim(), apiKey: this.settings.apiKey.trim(),
       protocol: this.settings.protocol, thinking: this.settings.thinking, search: this.settings.search,
+      accountToken: this.accountToken(),
     };
-    if (!config.baseUrl || !config.model || (!config.apiKey && config.baseUrl === 'https://api.deepseek.com')) {
-      this.settingsVisible = true;
+    if (!config.accountToken && (!config.baseUrl || !config.model || !config.apiKey)) {
+      this.openSettings('account');
       return;
     }
-    const message = createConversationMessage('assistant', '', '', Date.now(), 'pending', config.model);
+    const message = createConversationMessage('assistant', '', '', Date.now(), 'pending', config.accountToken ? 'deepseek-flash' : config.model);
     const next = appendBranch(session, parentId, prompt ? [prompt, message] : [message]);
     const reply: NativeReply = { sessionId: next.id, message, client: new NativeChatClient(), stopped: false };
     this.replies = [...this.replies, reply];
@@ -363,6 +606,9 @@ struct NativeChat {
         }
       }
       this.replies = this.replies.filter((item: NativeReply): boolean => item.sessionId !== reply.sessionId);
+      if (!error && config.accountToken && config.accountToken === this.accountToken()) {
+        void this.refreshBalance();
+      }
     }
   }
 
@@ -632,7 +878,7 @@ struct NativeChat {
         }
         .width('100%').borderRadius(22).border({ width: 1, color: $r('app.color.native_chat_blue') })
       } else {
-        Text(message.content).fontSize(16).lineHeight(24).fontColor($r('app.color.native_chat_primary'))
+        Text(message.content).fontSize(this.settings.chatFontSize).lineHeight(this.settings.chatFontSize * 1.5).fontColor($r('app.color.native_chat_primary'))
           .constraintSize({ maxWidth: Math.max(140, Math.min(this.viewportWidth - 40, 752) - 68) })
           .padding({ left: 16, right: 16, top: 10, bottom: 10 }).borderRadius(22)
           .backgroundColor($r('app.color.native_chat_bubble')).copyOption(CopyOptions.LocalDevice)
@@ -673,7 +919,7 @@ struct NativeChat {
       }
     }
     if (text) {
-      NativeMarkdown({ content: text })
+      NativeMarkdown({ content: text, fontScale: this.settings.chatFontSize / 16 })
     }
   }
 
@@ -717,50 +963,275 @@ struct NativeChat {
     .width('100%').alignItems(HorizontalAlign.Start).padding({ bottom: 8 })
   }
 
+  private openSettings(section: string = 'root'): void {
+    this.settingsSection = section;
+    this.settingsVisible = true;
+  }
+
+  private async importChatHistory(): Promise<void> {
+    if (this.backupBusy || this.replies.length > 0) {
+      this.toast('请在回复结束后导入');
+      return;
+    }
+    this.backupBusy = true;
+    try {
+      const context = this.host();
+      const sessions = await this.backup.importFromPicker(context);
+      if (sessions) {
+        const merged = mergeChatBackup(this.history, sessions);
+        await this.storage.saveConversations(context, merged.history);
+        this.history = merged.history;
+        this.toast(merged.importedCount ? `已导入 ${merged.importedCount} 个对话` : '没有新增对话');
+      }
+    } catch (error) {
+      this.toast((error as Error).message || '文件导入失败');
+    } finally {
+      this.backupBusy = false;
+    }
+  }
+
+  private async exportChatHistory(): Promise<void> {
+    if (this.backupBusy) {
+      return;
+    }
+    this.backupBusy = true;
+    try {
+      if (await this.backup.exportToPicker(this.host(), this.historyWithPartialReplies().sessions)) {
+        this.toast('已导出历史对话');
+      }
+    } catch (error) {
+      this.toast((error as Error).message || '导出失败');
+    } finally {
+      this.backupBusy = false;
+    }
+  }
+
+  private async openHistoryMigration(): Promise<void> {
+    if (this.backupBusy || this.replies.length > 0) {
+      this.toast('请在回复结束后迁移');
+      return;
+    }
+    this.settingsVisible = false;
+    this.migrationInProgress = true;
+    try {
+      await this.getUIContext().getRouter().pushUrl({ url: 'pages/Index', params: { migrate: true } });
+    } catch {
+      this.migrationInProgress = false;
+      this.toast('无法打开历史迁移');
+    }
+  }
+
+  private settingsTitle(): string {
+    switch (this.settingsSection) {
+      case 'account': return '账号管理';
+      case 'key': return '更换 API Key';
+      case 'data': return '数据管理';
+      default: return '设置';
+    }
+  }
+
+  @Builder
+  private configInput(value: string, placeholder: string, inputType: InputType, change: (value: string) => void) {
+    TextInput({ text: value, placeholder: placeholder }).width('100%').height(46).type(inputType).fontSize(14)
+      .backgroundColor($r('app.color.native_chat_field')).fontColor($r('app.color.native_chat_primary'))
+      .placeholderColor($r('app.color.native_chat_caption')).onChange(change)
+  }
+
+  @Builder
+  private settingsLabel(title: string) {
+    Text(title).width('100%').fontSize(12).fontColor($r('app.color.native_chat_secondary')).padding({ left: 9, bottom: 4 })
+  }
+
+  @Builder
+  private settingsRow(title: string, value: string, click: () => void) {
+    Button({ type: ButtonType.Normal }) {
+      Row({ space: 10 }) {
+        Text(title).layoutWeight(1).fontSize(15).fontColor($r('app.color.native_chat_primary'))
+        if (value) {
+          Text(value).fontSize(13).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+            .constraintSize({ maxWidth: '45%' }).fontColor($r('app.color.native_chat_secondary'))
+        }
+        Image($r('app.media.native_chevron_right')).width(14).height(14).fillColor($r('app.color.native_chat_caption'))
+      }
+      .width('100%').padding({ left: 15, right: 12 })
+    }
+    .height(48).width('100%').padding(0).borderRadius(0).backgroundColor(Color.Transparent).onClick(click)
+  }
+
+  @Builder
+  private settingsRoot() {
+    this.settingsLabel('账户')
+    Column() {
+      this.settingsRow('账号管理', this.accountToken() ? this.account?.label ?? 'DeepSeek API 账号' : this.settings.model,
+        () => { this.settingsSection = 'account'; void this.refreshBalance(); })
+      Divider().color($r('app.color.native_chat_stroke')).margin({ left: 14 })
+      this.settingsRow('API 余额', this.balance?.formatted ?? '前往充值',
+        () => { void this.openLink('https://platform.deepseek.com/top_up'); })
+      Divider().color($r('app.color.native_chat_stroke')).margin({ left: 14 })
+      this.settingsRow('数据管理', `${this.history.sessions.length} 条对话`, () => { this.settingsSection = 'data'; })
+    }
+    .width('100%').borderRadius(16).clip(true).backgroundColor($r('app.color.native_chat_surface'))
+    this.settingsLabel('应用')
+    Column() {
+      Row() {
+        Text('外观').layoutWeight(1).fontSize(15).fontColor($r('app.color.native_chat_primary'))
+        Select([{ value: '系统' }, { value: '浅色' }, { value: '深色' }])
+          .selected(this.settings.theme === 'dark' ? 2 : this.settings.theme === 'light' ? 1 : 0)
+          .value(this.settings.theme === 'dark' ? '深色' : this.settings.theme === 'light' ? '浅色' : '系统')
+          .onSelect((index: number) => {
+            this.settings.theme = index === 2 ? 'dark' : index === 1 ? 'light' : 'system';
+            this.applyTheme();
+            void this.saveSettings();
+          })
+      }
+      .width('100%').height(48).padding({ left: 15, right: 12 })
+      Divider().color($r('app.color.native_chat_stroke')).margin({ left: 14 })
+      Row() {
+        Text('字体大小').layoutWeight(1).fontSize(15).fontColor($r('app.color.native_chat_primary'))
+        Select([{ value: '12px' }, { value: '14px' }, { value: '16px（默认）' },
+          { value: '18px' }, { value: '20px' }, { value: '22px' }])
+          .selected(NATIVE_CHAT_FONT_SIZES.indexOf(this.settings.chatFontSize))
+          .value(this.settings.chatFontSize === 16 ? '16px（默认）' : `${this.settings.chatFontSize}px`)
+          .onSelect((index: number) => {
+            this.settings.chatFontSize = NATIVE_CHAT_FONT_SIZES[index] ?? 16;
+            void this.saveSettings();
+          })
+      }
+      .width('100%').height(48).padding({ left: 15, right: 12 })
+    }
+    .width('100%').borderRadius(16).clip(true).backgroundColor($r('app.color.native_chat_surface'))
+    this.settingsLabel('语音')
+    Row() {
+      Text('语音引擎').layoutWeight(1).fontSize(15).fontColor($r('app.color.native_chat_primary'))
+      Text('设备原生').fontSize(13).fontColor($r('app.color.native_chat_secondary'))
+    }
+    .width('100%').height(48).padding({ left: 15, right: 12 }).borderRadius(16)
+    .backgroundColor($r('app.color.native_chat_surface'))
+    Text('语音输入与回答朗读由鸿蒙系统语音服务处理').width('100%').fontSize(12)
+      .fontColor($r('app.color.native_chat_secondary')).padding({ left: 9 })
+    this.settingsLabel('关于')
+    Column() {
+      this.settingsRow('隐私政策', '', () => { void openNuwaPrivacyPolicy(this.host()).catch(() => { this.toast('无法打开隐私政策'); }); })
+      Divider().color($r('app.color.native_chat_stroke')).margin({ left: 14 })
+      this.settingsRow('更新日志', '', () => { void this.openLink('https://github.com/starhui70520/Nuwa/releases'); })
+    }
+    .width('100%').borderRadius(16).clip(true).backgroundColor($r('app.color.native_chat_surface'))
+  }
+
+  @Builder
+  private accountSettings() {
+    this.settingsLabel('DeepSeek API 账号')
+    Column() {
+      if (this.account) {
+        Text(this.accountToken() ? `当前生效：${this.account.label}` : `已登录：${this.account.label}`)
+          .width('100%').fontSize(14).padding(14).fontColor($r('app.color.native_chat_secondary'))
+        if (!this.accountToken()) {
+          this.settingsRow('切换为此账号', '', () => { void this.enableAccount(); })
+        }
+        this.settingsRow('退出登录', '', () => { void this.logoutAccount(); })
+      } else {
+        Text('通过 DeepSeek 开放平台授权登录，免手动复制 API Key')
+          .width('100%').fontSize(14).padding(14).fontColor($r('app.color.native_chat_secondary'))
+        this.settingsRow('账号登录', '', () => { this.settingsVisible = false; void this.startAuthorization(); })
+      }
+    }
+    .width('100%').borderRadius(16).clip(true).backgroundColor($r('app.color.native_chat_surface'))
+    this.settingsLabel('API Key')
+    Column() {
+      this.settingsRow(this.settings.apiKey ? '更换 API Key' : '配置第三方兼容 API', this.settings.model,
+        () => { this.openCredentialForm(); })
+    }
+    .width('100%').borderRadius(16).clip(true).backgroundColor($r('app.color.native_chat_surface'))
+  }
+
+  @Builder
+  private keySettings() {
+    this.settingsLabel('接口协议')
+    Select([{ value: 'OpenAI 兼容' }, { value: 'Anthropic 兼容' }])
+      .selected(this.settingsProtocol === 'anthropic' ? 1 : 0)
+      .value(this.settingsProtocol === 'anthropic' ? 'Anthropic 兼容' : 'OpenAI 兼容')
+      .onSelect((index: number) => { this.settingsProtocol = index === 1 ? 'anthropic' : 'openai'; })
+    this.settingsLabel('API 地址 (Base URL)')
+    this.configInput(this.settingsBase, '例如 https://api.deepseek.com', InputType.Normal,
+      (value: string) => { this.settingsBase = value; })
+    this.settingsLabel('模型名称')
+    this.configInput(this.settingsModel, '例如 deepseek-chat', InputType.Normal,
+      (value: string) => { this.settingsModel = value; })
+    this.settingsLabel('API Key')
+    this.configInput(this.settingsKey, '请输入 API Key', InputType.Password,
+      (value: string) => { this.settingsKey = value; })
+    if (this.settingsError) {
+      Text(this.settingsError).width('100%').fontSize(13).fontColor($r('app.color.native_chat_error'))
+    }
+    Button(this.settingsVerifying ? '正在验证...' : '验证并继续').width('100%')
+      .backgroundColor($r('app.color.native_chat_blue')).enabled(!this.settingsVerifying && !!this.settingsKey.trim())
+      .onClick(() => { void this.verifySettingsKey(); })
+  }
+
   @Builder
   private settingsPage() {
-    Scroll() {
-      Column({ space: 12 }) {
-        Text('设置').fontSize(22).fontWeight(FontWeight.Medium).width('100%')
-        Text('API 地址').width('100%')
-        TextInput({ text: this.settings.baseUrl, placeholder: 'https://api.deepseek.com' }).onChange((value: string) => {
-          const key = this.settings.baseUrl.trim() === value.trim() ? this.settings.apiKey : '';
-          this.settings.apiKey = key;
-          this.settings.baseUrl = value;
-        })
-        Text('模型').width('100%')
-        TextInput({ text: this.settings.model, placeholder: 'deepseek-chat' }).onChange((value: string) => {
-          this.settings.model = value;
-        })
-        Text('API 格式').width('100%')
-        Select([{ value: 'OpenAI' }, { value: 'Anthropic' }]).selected(this.settings.protocol === 'anthropic' ? 1 : 0)
-          .value(this.settings.protocol === 'anthropic' ? 'Anthropic' : 'OpenAI').onSelect((index: number) => {
-            const protocol = index === 1 ? 'anthropic' : 'openai';
-            const key = protocol === this.settings.protocol ? this.settings.apiKey : '';
-            this.settings.apiKey = key;
-            this.settings.protocol = protocol;
-          })
-        Text('API 密钥').width('100%')
-        TextInput({ text: this.settings.apiKey, placeholder: 'API 密钥' }).type(InputType.Password)
-          .onChange((value: string) => { this.settings.apiKey = value; })
-        Button('隐私政策', { buttonStyle: ButtonStyleMode.TEXTUAL }).onClick(async (): Promise<void> => {
-          try {
-            await openNuwaPrivacyPolicy(this.host());
-          } catch {
-            this.toast('无法打开隐私政策');
-          }
-        })
-        Button('原版 Nuwa', { buttonStyle: ButtonStyleMode.TEXTUAL }).onClick(() => {
-          this.settingsVisible = false;
-          void this.getUIContext().getRouter().pushUrl({ url: 'pages/Index' }).catch(() => { this.toast('无法打开原版'); });
-        })
-        Button('完成').width('100%').onClick(async (): Promise<void> => {
-          await this.saveSettings();
-          this.settingsVisible = false;
-        })
+    Column() {
+      Row() {
+        if (this.settingsSection === 'root') {
+          Blank().width(38)
+        } else {
+          this.iconButton($r('app.media.native_chevron_left'), '返回', () => {
+            this.settingsSection = this.settingsSection === 'key' ? 'account' : 'root';
+          }, 38, 18)
+        }
+        Text(this.settingsTitle()).layoutWeight(1).textAlign(TextAlign.Center).fontSize(17).fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.native_chat_primary'))
+        Button('×', { buttonStyle: ButtonStyleMode.TEXTUAL }).width(38).height(36).padding(0).fontSize(23)
+          .fontColor($r('app.color.native_chat_secondary')).accessibilityText('关闭')
+          .onClick(() => { this.settingsKey = ''; this.settingsVisible = false; })
       }
-      .width('100%').padding({ left: 24, right: 24, top: 20, bottom: 28 })
+      .width('100%').height(50).padding({ left: 12, right: 12 })
+      Scroll() {
+        Column({ space: 10 }) {
+          if (this.settingsSection === 'account') {
+            this.accountSettings()
+          } else if (this.settingsSection === 'key') {
+            this.keySettings()
+          } else if (this.settingsSection === 'data') {
+            NativeDataSettings({
+              busy: this.backupBusy, sessionCount: this.history.sessions.length,
+              onMigration: () => { void this.openHistoryMigration(); },
+              onImport: () => { void this.importChatHistory(); },
+              onExport: () => { void this.exportChatHistory(); },
+              onDeleteAll: () => { void this.deleteSessions(this.history.sessions.map<string>(
+                (session: NativeConversation): string => session.id)); },
+            })
+          } else {
+            this.settingsRoot()
+          }
+        }
+        .width('100%').padding({ left: 16, right: 16, top: 12, bottom: 28 }).alignItems(HorizontalAlign.Start)
+      }
+      .width('100%').layoutWeight(1).scrollBar(BarState.Off)
     }
+    .width('100%').height('100%').backgroundColor($r('app.color.native_chat_sidebar'))
+  }
+
+  @Builder
+  private authorizationPage() {
+    Column() {
+      Row({ space: 8 }) {
+        Text(this.authorizationStatus).fontSize(13).fontColor($r('app.color.native_chat_secondary')).layoutWeight(1)
+          .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
+        Button('关闭', { buttonStyle: ButtonStyleMode.TEXTUAL }).enabled(!this.storingAccount)
+          .onClick(() => { this.cancelAuthorization(); })
+      }
+      .width('100%').padding({ left: 14, right: 8, top: 6, bottom: 6 })
+      if (this.authorizationUrl) {
+        Web({ src: this.authorizationUrl, controller: this.authBrowser }).width('100%').layoutWeight(1)
+          .mixedMode(MixedMode.None).javaScriptAccess(true).domStorageAccess(true).fileAccess(false)
+          .onLoadIntercept((event) => { return this.interceptAuthorization(event.data.getRequestUrl()); })
+      } else {
+        Column() { LoadingProgress().width(30).height(30) }
+        .width('100%').layoutWeight(1).justifyContent(FlexAlign.Center)
+      }
+    }
+    .width('100%').height('100%').backgroundColor($r('app.color.native_chat_bg'))
   }
 
   @Builder
@@ -881,13 +1352,19 @@ struct NativeChat {
         Button({ type: ButtonType.Normal }) {
           Row({ space: 10 }) {
             Image($r('app.media.native_welcome_logo')).width(31).height(31).borderRadius(10).draggable(false)
-            Text('设置').fontSize(15).layoutWeight(1).fontColor($r('app.color.native_chat_primary'))
+            Text(this.accountToken() ? this.account?.label ?? 'DeepSeek API 账号' : '设置')
+              .fontSize(15).layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+              .fontColor($r('app.color.native_chat_primary'))
+            if (this.balance) {
+              Text(this.balance.formatted).fontSize(12).fontColor($r('app.color.native_chat_blue_text'))
+                .onClick(() => { void this.openLink('https://platform.deepseek.com/top_up'); })
+            }
             Text('⋯').fontSize(18).fontColor($r('app.color.native_chat_secondary'))
           }
           .width('100%').padding({ left: 6, right: 6 })
         }
         .height(52).width('100%').padding(0).backgroundColor(Color.Transparent)
-        .onClick(() => { this.setDrawer(false); this.settingsVisible = true; })
+        .onClick(() => { this.setDrawer(false); this.openSettings(); })
       }
     }
     .width(this.drawerWidth()).height('100%').padding({ left: 16, right: 10, top: 14, bottom: 8 })
@@ -964,7 +1441,18 @@ struct NativeChat {
         this.drawer()
       }
       Stack() {
-        this.chatPage()
+        if (this.loaded && !this.authenticated()) {
+          NativeOnboarding({
+            compact: this.compact(), busy: this.authorizing, view: this.$onboardingView,
+            initialUrl: this.settings.baseUrl, initialModel: this.settings.model, initialProtocol: this.settings.protocol,
+            onAccount: () => { void this.startAuthorization(); },
+            onConnect: (credential: NativeApiCredential): Promise<void> => this.connectKey(credential),
+            onHelp: () => { void this.openLink('https://api-docs.deepseek.com/zh-cn/'); },
+            onPlatformKeys: () => { void this.openLink('https://platform.deepseek.com/api_keys'); },
+          })
+        } else {
+          this.chatPage()
+        }
         if (this.drawerProgress() > 0) {
           Column().width('100%').height('100%').backgroundColor(Color.Transparent)
             .onClick(() => { this.setDrawer(false); })
@@ -973,6 +1461,9 @@ struct NativeChat {
       .width('100%').height('100%').translate({ x: this.drawerProgress() * this.drawerWidth() })
       .scale({ x: 1 - this.drawerProgress() * 0.05, y: 1 - this.drawerProgress() * 0.05, centerX: '0%' })
       .borderRadius(this.drawerProgress() > 0 ? 24 : 0).clip(this.drawerProgress() > 0)
+      if (this.authorizing) {
+        this.authorizationPage()
+      }
       if (this.renamingId) {
         Stack({ alignContent: Alignment.Center }) {
           Column().width('100%').height('100%').backgroundColor('#66000000').onClick(() => { this.renamingId = ''; })
@@ -990,7 +1481,8 @@ struct NativeChat {
       PanGesture({ direction: PanDirection.Horizontal, distance: 14 })
         .onActionStart((event: GestureEvent) => { this.touchStart = event.fingerList[0]?.globalX ?? this.viewportWidth; })
         .onActionUpdate((event: GestureEvent) => {
-          if (!this.settingsVisible && !this.renamingId && (this.drawerOpen || this.touchStart < 160)) {
+          if (this.authenticated() && !this.settingsVisible && !this.renamingId && !this.authorizing &&
+            (this.drawerOpen || this.touchStart < 160)) {
             this.drawerDrag = event.offsetX;
           }
         })

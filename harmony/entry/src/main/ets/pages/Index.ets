@@ -8,7 +8,13 @@ import { http } from '@kit.NetworkKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { HarmonySpeechRecognition } from '../speech/HarmonySpeechRecognition';
 import { HarmonyTextToSpeech } from '../speech/HarmonyTextToSpeech';
+import { NativeChatBackup, mergeChatBackup } from '../native/NativeChatBackup';
+import { NativeChatStorage } from '../native/NativeChatStorage';
 import { openNuwaPrivacyPolicy } from '../native/PrivacyPolicy';
+
+interface MigrationRouteParams {
+  migrate?: boolean;
+}
 
 const PLATFORM_ORIGIN = 'https://platform.deepseek.com';
 const CLIENT_VERSION = '0.2.2';
@@ -235,6 +241,10 @@ struct Index {
   @State private authUrl: string = '';
   @State private authStatusText: string = '正在连接 DeepSeek 开放平台...';
 
+  @State private nativeMigration: boolean = false;
+  @State private importingMigration: boolean = false;
+  private readonly backup = new NativeChatBackup();
+  private readonly conversationStorage = new NativeChatStorage();
   @State private migrationVisible: boolean = false;
   @State private migrationStatusText: string = '请登录 DeepSeek 账号并在「设置 → 数据管理」点击导出';
 
@@ -299,7 +309,16 @@ struct Index {
     }
   });
 
+  aboutToAppear(): void {
+    const params = this.getUIContext().getRouter().getParams() as MigrationRouteParams | undefined;
+    if (params?.migrate) {
+      this.nativeMigration = true;
+      this.openMigrationOverlay();
+    }
+  }
+
   aboutToDisappear(): void {
+    this.stopMigrationLoginPoll();
     this.harmonyBridge.destroySpeech();
     try {
       this.controller.deleteJavaScriptRegister('__NUWA_HARMONY__');
@@ -686,8 +705,32 @@ struct Index {
     }
   }
 
+  private async importNativeDownload(path: string): Promise<void> {
+    this.importingMigration = true;
+    this.migrationStatusText = '正在导入并合并历史对话，请稍候…';
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    try {
+      const sessions = await this.backup.importFromUri(path);
+      const history = await this.conversationStorage.loadConversations(context);
+      const merged = mergeChatBackup(history, sessions);
+      await this.conversationStorage.saveConversations(context, merged.history);
+      const ui = this.getUIContext();
+      ui.getPromptAction().showToast({ message: merged.importedCount ? `已导入 ${merged.importedCount} 个对话` : '没有新增对话' });
+      ui.getRouter().back();
+    } catch (error) {
+      this.migrationStatusText = (error as Error).message || '读取导出包失败，请重试';
+    } finally {
+      this.importingMigration = false;
+      await fs.unlink(path).catch(() => {});
+    }
+  }
+
   private setupMigrationDownloadDelegate(): void {
     this.downloadDelegate.onBeforeDownload((item: webview.WebDownloadItem) => {
+      if (this.importingMigration) {
+        item.cancel();
+        return;
+      }
       const suggested = item.getSuggestedFileName();
       this.migrationFileName = suggested && suggested.trim().length > 0 ? suggested.trim() : 'deepseek_data.zip';
       this.migrationSavePath = `${getContext(this).cacheDir}/pending_migration.zip`;
@@ -707,6 +750,10 @@ struct Index {
     });
 
     this.downloadDelegate.onDownloadFinish((_item: webview.WebDownloadItem) => {
+      if (this.nativeMigration) {
+        void this.importNativeDownload(this.migrationSavePath);
+        return;
+      }
       try {
         const stat = fs.statSync(this.migrationSavePath);
         const buf = new ArrayBuffer(stat.size);
@@ -737,6 +784,16 @@ struct Index {
   }
 
   onBackPress(): boolean {
+    if (this.importingMigration) {
+      return true;
+    }
+    if (this.nativeMigration) {
+      if (this.migrationController.accessBackward()) {
+        this.migrationController.backward();
+        return true;
+      }
+      return false;
+    }
     if (this.migrationVisible) {
       if (this.migrationController.accessBackward()) {
         this.migrationController.backward();
@@ -762,31 +819,34 @@ struct Index {
 
   build() {
     Stack() {
-      Web({
-        src: APP_WEB_URL,
-        controller: this.controller,
-      })
-        .width('100%')
-        .height('100%')
-        .javaScriptAccess(true)
-        .domStorageAccess(true)
-        .databaseAccess(true)
-        .fileAccess(true)
-        .mixedMode(MixedMode.Compatible)
-        .darkMode(WebDarkMode.Auto)
-        .javaScriptProxy({
-          object: this.harmonyBridge,
-          name: '__NUWA_HARMONY__',
-          methodList: [
-            'startPlatformAuth', 'logoutPlatformAuth', 'openExportBrowser', 'openPrivacyPolicy',
-            'startSpeechRecognition', 'stopSpeechRecognition', 'cancelSpeechRecognition', 'speakText', 'stopSpeaking'
-          ],
-          permission: APP_BRIDGE_PERMISSION,
+      if (!this.nativeMigration) {
+        Web({
+          src: APP_WEB_URL,
           controller: this.controller,
         })
-        .onPageBegin(() => {
-          this.harmonyBridge.destroySpeech();
-        })
+          .width('100%')
+          .height('100%')
+          .javaScriptAccess(true)
+          .domStorageAccess(true)
+          .databaseAccess(true)
+          .fileAccess(true)
+          .mixedMode(MixedMode.Compatible)
+          .darkMode(WebDarkMode.Auto)
+          .javaScriptProxy({
+            object: this.harmonyBridge,
+            name: '__NUWA_HARMONY__',
+            methodList: [
+              'startPlatformAuth', 'logoutPlatformAuth', 'openExportBrowser', 'openPrivacyPolicy',
+              'startSpeechRecognition', 'stopSpeechRecognition', 'cancelSpeechRecognition', 'speakText', 'stopSpeaking'
+            ],
+            permission: APP_BRIDGE_PERMISSION,
+            controller: this.controller,
+          })
+          .onPageBegin(() => {
+            this.harmonyBridge.destroySpeech();
+          })
+
+      }
 
       if (this.migrationVisible) {
         Column() {
@@ -809,7 +869,13 @@ struct Index {
               .fontColor('#FFFFFF')
               .backgroundColor(Color.Transparent)
               .onClick(() => {
-                this.closeMigrationOverlay();
+                if (this.nativeMigration) {
+                  if (!this.importingMigration) {
+                    this.getUIContext().getRouter().back();
+                  }
+                } else {
+                  this.closeMigrationOverlay();
+                }
               })
           }
           .width('100%')

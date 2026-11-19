@@ -5,6 +5,9 @@ import { util } from '@kit.ArkTS';
 import { BusinessError } from '@kit.BasicServicesKit';
 
 export type NativeApiProtocol = 'openai' | 'anthropic';
+export type NativeAuthMode = 'api-key' | 'deepseek-account';
+export type NativeTheme = 'system' | 'light' | 'dark';
+export const NATIVE_CHAT_FONT_SIZES: number[] = [12, 14, 16, 18, 20, 22];
 
 /** User-configurable settings. API credentials are held separately in Asset Store Kit. */
 export interface NativeSettings {
@@ -12,6 +15,9 @@ export interface NativeSettings {
   apiKey: string;
   model: string;
   protocol: NativeApiProtocol;
+  authMode: NativeAuthMode;
+  theme: NativeTheme;
+  chatFontSize: number;
   thinking: boolean;
   search: boolean;
   ttsMuted: boolean;
@@ -106,6 +112,9 @@ export class NativeSettingsController {
     const baseUrl = await store.get('baseUrl', DEFAULT_BASE_URL) as string;
     const model = await store.get('model', DEFAULT_MODEL) as string;
     const protocol = await store.get('protocol', 'openai') as string;
+    const authMode = await store.get('authMode', 'api-key') as string;
+    const theme = await store.get('theme', 'system') as string;
+    const chatFontSize = await store.get('chatFontSize', 16) as number;
     const thinking = await store.get('thinking', false) as boolean;
     const search = await store.get('search', false) as boolean;
     const ttsMuted = await store.get('ttsMuted', true) as boolean;
@@ -117,6 +126,9 @@ export class NativeSettingsController {
       apiKey,
       model,
       protocol: resolvedProtocol,
+      authMode: authMode === 'deepseek-account' ? 'deepseek-account' : 'api-key',
+      theme: theme === 'dark' || theme === 'light' ? theme : 'system',
+      chatFontSize: NATIVE_CHAT_FONT_SIZES.includes(chatFontSize) ? chatFontSize : 16,
       thinking,
       search,
       ttsMuted,
@@ -131,7 +143,7 @@ export class NativeSettingsController {
 
       if (!settings.apiKey) {
         await writeApiKey('', '');
-      } else if (!credential || credential.apiKey !== settings.apiKey || credential.binding === nextBinding) {
+      } else if (!credential || credential.apiKey !== settings.apiKey) {
         await writeApiKey(settings.apiKey, nextBinding);
       }
       // If a caller changes endpoint/protocol while retaining the same key, keep
@@ -141,6 +153,9 @@ export class NativeSettingsController {
         store.put('baseUrl', settings.baseUrl),
         store.put('model', settings.model),
         store.put('protocol', settings.protocol),
+        store.put('authMode', settings.authMode),
+        store.put('theme', settings.theme),
+        store.put('chatFontSize', settings.chatFontSize),
         store.put('thinking', settings.thinking),
         store.put('search', settings.search),
         store.put('ttsMuted', settings.ttsMuted),

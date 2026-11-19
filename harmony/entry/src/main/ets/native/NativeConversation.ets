@@ -24,6 +24,8 @@ export interface NativeConversation {
   // The selected root and child links identify the visible path through all versions.
   rootMessageId: string | null;
   messages: NativeConversationMessage[];
+  // Imported fragments and original image bytes are retained for portable exports.
+  archiveJson?: string;
 }
 
 export interface NativeConversationState {
@@ -74,6 +76,7 @@ function copyConversation(session: NativeConversation): NativeConversation {
     pinnedAt: session.pinnedAt,
     rootMessageId: session.rootMessageId,
     messages: session.messages,
+    archiveJson: session.archiveJson,
   };
 }
 
