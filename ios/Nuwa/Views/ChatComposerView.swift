@@ -132,8 +132,8 @@ struct ChatComposerView: View {
     @ViewBuilder
     private func draftAttachmentChip(_ item: DraftAttachment) -> some View {
         ZStack(alignment: .topTrailing) {
-            Group {
-                if item.file.isImage, let uiImg = AttachmentStore.loadThumbnail(for: item.file, targetPointSize: 56) {
+            AttachmentThumbnail(file: item.file, pointSize: 56) { image in
+                if let uiImg = image {
                     Image(uiImage: uiImg)
                         .resizable()
                         .scaledToFill()

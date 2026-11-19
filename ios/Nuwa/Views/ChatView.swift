@@ -3,12 +3,6 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
-/// High-performance 120Hz native SwiftUI ChatView (1:1 Nuwa v0.1.31 UX + iOS 26 Liquid Glass chrome):
-/// - Root `Color.nuwaSidebarFill.ignoresSafeArea()` outside GeometryReader (100% uniform sidebar top color)
-/// - Zero offscreen `.mask`/`.shadow`/`.scaleEffect` when drawer is closed (`progress == 0`)
-/// - Isolated `ChatComposerContainer` & `ChatHeaderView` & `SessionDrawerView` (typing / audio metering / streaming never cascade!)
-/// - Tap-to-close overlay lives INSIDE `mainSurface`, so sidebar buttons (including Settings) are 100% unobstructed
-/// - Zero `.glassEffect()` inside ScrollView rows (Liquid Glass reserved strictly for floating chrome!)
 struct ChatView: View {
     @ObservedObject var chatStore: ChatStore
     let draftStore: DraftStore
@@ -18,10 +12,11 @@ struct ChatView: View {
 
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var drawerOpen = false
-    @State private var dragProgress: CGFloat? = nil
-    @State private var isTrackingHorizontalDrag = false
+    @GestureState private var drawerDrag: CGFloat? = nil
+    @SceneStorage("chat.sidebarVisible") private var sidebarVisible = true
 
     @State private var showSettings = false
     @State private var showMigrationWeb = false
@@ -38,59 +33,68 @@ struct ChatView: View {
 
     private let topUpURL = URL(string: "https://platform.deepseek.com/top_up")!
 
-    private var visibleMessages: [ChatMessage] {
-        chatStore.activeSession?.visibleMessages() ?? []
-    }
-
-    private var hasMessages: Bool {
-        !visibleMessages.isEmpty
-    }
-
-    private var effectiveProgress: CGFloat {
-        dragProgress ?? (drawerOpen ? 1 : 0)
-    }
-
     var body: some View {
         ZStack {
-            // Single edge-to-edge sidebar background behind GeometryReader -> zero top safe-area color seam!
             Color.nuwaSidebarFill.ignoresSafeArea()
 
             GeometryReader { geo in
-                let drawerWidth = min(geo.size.width * 0.82, 310)
-                let progress = effectiveProgress
+                let wide = geo.size.width >= 680
+                let drawerWidth = wide ? min(geo.size.width * 0.31, 300) : min(geo.size.width * 0.82, 310)
+                let showSidebar = wide ? sidebarVisible : drawerOpen
+                let progress = drawerDrag ?? (drawerOpen ? 1 : 0)
+                let inset = wide && showSidebar ? drawerWidth : 0
 
                 ZStack(alignment: .leading) {
-                    SessionDrawerView(
-                        listStore: listStore,
-                        settings: settings,
-                        activeSessionId: chatStore.activeSessionId,
-                        isOpen: drawerOpen,
-                        onSelectSession: { chatStore.selectSession($0) },
-                        onCreateNewSession: { chatStore.createNewSession(silentIfAlreadyNew: true) },
-                        onTogglePin: { chatStore.togglePin($0) },
-                        onSetSessionsPinned: { chatStore.setSessionsPinned($0, pinned: $1) },
-                        onRenameSession: { chatStore.renameSession($0, title: $1) },
-                        onDeleteSession: { chatStore.deleteSession($0) },
-                        onDeleteSessions: { chatStore.deleteSessions($0) },
-                        onMatchesQuery: { chatStore.sessionMatchesQuery($0, query: $1) },
-                        onClose: { closeDrawer() },
-                        onOpenSettings: { showSettings = true }
-                    )
-                    .frame(width: drawerWidth)
+                    if !wide || showSidebar {
+                        SessionDrawerView(
+                            listStore: listStore,
+                            settings: settings,
+                            activeSessionId: chatStore.activeSessionId,
+                            isOpen: showSidebar || progress > 0,
+                            onSelectSession: { chatStore.selectSession($0) },
+                            onCreateNewSession: { chatStore.createNewSession(silentIfAlreadyNew: true) },
+                            onTogglePin: { chatStore.togglePin($0) },
+                            onSetSessionsPinned: { chatStore.setSessionsPinned($0, pinned: $1) },
+                            onRenameSession: { chatStore.renameSession($0, title: $1) },
+                            onDeleteSession: { chatStore.deleteSession($0) },
+                            onDeleteSessions: { chatStore.deleteSessions($0) },
+                            onSearch: { await chatStore.matchingSessionIDs(query: $0) },
+                            onClose: { if !wide { closeDrawer() } },
+                            onOpenSettings: { showSettings = true }
+                        )
+                        .frame(width: drawerWidth)
+                        .opacity(showSidebar || progress > 0 ? 1 : 0)
+                        .allowsHitTesting(showSidebar)
+                        .accessibilityHidden(!showSidebar)
+                        .task {
+                            if wide { await settings.refreshBalance() }
+                        }
+                    }
 
-                    mainSurface
+                    mainSurface(sidebarShown: showSidebar, onToggleSidebar: {
+                        if wide {
+                            sidebarVisible.toggle()
+                        } else if drawerOpen {
+                            closeDrawer()
+                        } else {
+                            openDrawer()
+                        }
+                    })
                         .overlay {
-                            // Dismiss catcher sits strictly INSIDE mainSurface so it NEVER blocks sidebar touches!
-                            if drawerOpen && dragProgress == nil {
+                            if !wide && drawerOpen && drawerDrag == nil {
                                 Color.black.opacity(0.001)
                                     .ignoresSafeArea(.container, edges: .vertical)
                                     .onTapGesture { closeDrawer() }
+                                    .accessibilityHidden(true)
                             }
                         }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .modifier(DrawerSurfaceTransform(progress: progress, drawerWidth: drawerWidth))
+                        .frame(width: max(0, geo.size.width - inset), height: geo.size.height)
+                        .background(Color.nuwaBgBase.ignoresSafeArea(.container, edges: .vertical))
+                        .accessibilityHidden(!wide && drawerOpen)
+                        .offset(x: wide ? 0 : drawerWidth * progress)
+                        .padding(.leading, inset)
                         .animation(
-                            dragProgress == nil ? .spring(response: 0.28, dampingFraction: 0.90) : nil,
+                            drawerDrag == nil && !reduceMotion ? .spring(response: 0.28, dampingFraction: 0.90) : nil,
                             value: drawerOpen
                         )
 
@@ -119,51 +123,43 @@ struct ChatView: View {
                     }
                 }
                 .simultaneousGesture(
-                    DragGesture(minimumDistance: 20, coordinateSpace: .global)
-                        .onChanged { value in
-                            guard !settings.showMigrationPrompt, !showSettings, editingMessageId == nil, previewImage == nil else { return }
+                    DragGesture(minimumDistance: 20, coordinateSpace: .local)
+                        .updating($drawerDrag) { value, progress, _ in
+                            guard wide == false, !settings.showMigrationPrompt, !showSettings,
+                                  editingMessageId == nil, previewImage == nil else { return }
                             let dx = value.translation.width
-                            let dy = value.translation.height
-
-                            if !isTrackingHorizontalDrag {
-                                guard abs(dx) > abs(dy) * 1.6 else { return }
-                                if (!drawerOpen && dx <= 0) || (drawerOpen && dx >= 0) {
-                                    return
-                                }
-                                isTrackingHorizontalDrag = true
-                                UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                            if progress == nil {
+                                guard abs(dx) > abs(value.translation.height) * 1.6,
+                                      drawerOpen ? dx < 0 : (dx > 0 && value.startLocation.x < 32)
+                                else { return }
                             }
-
-                            let raw = drawerOpen ? (1.0 + dx / drawerWidth) : (dx / drawerWidth)
-                            dragProgress = max(0, min(1, raw))
+                            progress = max(0, min(1, (drawerOpen ? 1 : 0) + dx / drawerWidth))
                         }
                         .onEnded { value in
-                            guard isTrackingHorizontalDrag else { return }
-                            let current = dragProgress ?? (drawerOpen ? 1 : 0)
+                            guard !wide, let current = drawerDrag else { return }
                             let predictedDx = value.predictedEndTranslation.width
                             let predictedProgress = drawerOpen
                                 ? (1.0 + predictedDx / drawerWidth)
                                 : (predictedDx / drawerWidth)
-
-                            isTrackingHorizontalDrag = false
-                            dragProgress = nil
-
-                            if drawerOpen {
-                                drawerOpen = !(current < 0.72 || predictedProgress < 0.55)
-                            } else {
-                                drawerOpen = (current > 0.28 || predictedProgress > 0.45)
-                            }
-                        }
+                            let open = drawerOpen
+                                ? !(current < 0.72 || predictedProgress < 0.55)
+                                : current > 0.28 || predictedProgress > 0.45
+                            if open { openDrawer() } else { closeDrawer() }
+                        },
+                    including: wide ? .subviews : .all
                 )
+                .onChange(of: wide) { _, _ in closeDrawer() }
             }
         }
-        .onAppear {
+        .task(id: chatStore.historyLoaded) {
+            guard chatStore.historyLoaded else { return }
             chatStore.checkPendingMigration()
             chatStore.maybeAutoBackupToIcloud(settings: settings)
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 chatStore.checkPendingMigration()
+                chatStore.maybeAutoBackupToIcloud(settings: settings)
             } else if phase == .background {
                 chatStore.flushPendingSave()
             }
@@ -251,8 +247,10 @@ struct ChatView: View {
         }
     }
 
-    private var mainSurface: some View {
-        VStack(spacing: 0) {
+    private func mainSurface(sidebarShown: Bool, onToggleSidebar: @escaping () -> Void) -> some View {
+        let session = chatStore.activeSession
+        let messages = session?.visibleMessages() ?? []
+        return VStack(spacing: 0) {
             if chatStore.importingHistory {
                 HStack(spacing: 8) {
                     ProgressView()
@@ -270,17 +268,30 @@ struct ChatView: View {
             ChatHeaderView(
                 speech: speech,
                 settings: settings,
-                hasMessages: hasMessages,
-                sessionTitle: chatStore.activeSession?.title ?? "",
-                onOpenDrawer: { openDrawer() },
+                hasMessages: !messages.isEmpty,
+                sessionTitle: session?.title ?? "",
+                sidebarShown: sidebarShown,
+                onOpenDrawer: onToggleSidebar,
                 onScrollToTop: { scrollToTopToken += 1 },
                 onCreateNewSession: { chatStore.createNewSession() },
                 onToast: { chatStore.showToast($0) }
             )
 
             ZStack(alignment: .top) {
-                if let session = chatStore.activeSession, !visibleMessages.isEmpty {
-                    messageList(session: session, messages: visibleMessages)
+                if chatStore.historyLoadFailed {
+                    ContentUnavailableView(
+                        settings.locale == .enUS ? "Couldn’t load conversations" : "无法读取对话记录",
+                        systemImage: "exclamationmark.triangle",
+                        description: Text(settings.locale == .enUS
+                            ? "Your data hasn’t been changed. Reopen Nuwa to try again."
+                            : "数据未被修改，请重新打开 Nuwa 后重试。")
+                    )
+                } else if !chatStore.historyLoaded {
+                    ProgressView()
+                        .frame(maxHeight: .infinity)
+                } else if let session, !messages.isEmpty {
+                    messageList(session: session, messages: messages)
+                        .id(session.id)
                 } else {
                     welcomeView
                 }
@@ -306,7 +317,7 @@ struct ChatView: View {
                 speech: speech,
                 sessionId: chatStore.activeSessionId,
                 isGenerating: chatStore.isGenerating,
-                isImporting: chatStore.importingHistory,
+                isImporting: chatStore.importingHistory || !chatStore.historyLoaded,
                 onSend: sendMessage,
                 onStop: {
                     speech.stopSpeaking()
@@ -315,6 +326,8 @@ struct ChatView: View {
                 onPickFiles: { showAttachmentFilePicker = true },
                 onToast: { chatStore.showToast($0) }
             )
+            .frame(maxWidth: 760)
+            .frame(maxWidth: .infinity)
         }
     }
 
@@ -343,70 +356,36 @@ struct ChatView: View {
     }
 
     private func messageList(session: ChatSession, messages: [ChatMessage]) -> some View {
-        ScrollViewReader { proxy in
-            ZStack(alignment: .bottomTrailing) {
-                ScrollView {
-                    LazyVStack(spacing: 18) {
-                        Color.clear.frame(height: 1).id("top-anchor")
-                        ForEach(messages) { message in
-                            messageRow(
-                                session: session,
-                                message: message,
-                                isLast: message.id == messages.last?.id
-                            )
-                            .id(message.id)
+        let versions = session.messageVersions()
+        let last = messages.last
+        return ChatTimeline(
+            isAtBottom: $isAtBottom,
+            last: last,
+            topCommand: scrollToTopToken,
+            latestLabel: settings.locale == .enUS ? "Scroll to latest" : "跳到最新消息"
+        ) { followLatest in
+            ForEach(messages) { message in
+                Group {
+                    if message.id == last?.id && message.isStreaming && chatStore.isGenerating {
+                        LiveReplyRow(store: chatStore.liveReply, fallback: message) { reply in
+                            messageRow(message: reply, versionInfo: versions[reply.id], isLast: true)
+                        } onUpdate: {
+                            if isAtBottom { followLatest() }
                         }
-                        Color.clear
-                            .frame(height: 8)
-                            .id("bottom-anchor")
-                            .onAppear { isAtBottom = true }
-                            .onDisappear { isAtBottom = false }
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.top, 12)
-                }
-                .nuwaNoScrollEdgeEffect()
-                .scrollDismissesKeyboard(.interactively)
-                .onChange(of: messages.count) { _, _ in
-                    withAnimation(.easeOut(duration: 0.2)) {
-                        proxy.scrollTo("bottom-anchor", anchor: .bottom)
+                    } else {
+                        messageRow(message: message, versionInfo: versions[message.id], isLast: message.id == last?.id)
                     }
                 }
-                .onChange(of: messages.last?.content) { _, _ in
-                    if chatStore.isGenerating && isAtBottom {
-                        proxy.scrollTo("bottom-anchor", anchor: .bottom)
-                    }
-                }
-                .onChange(of: scrollToTopToken) { _, _ in
-                    withAnimation(.easeOut(duration: 0.25)) {
-                        proxy.scrollTo("top-anchor", anchor: .top)
-                    }
-                }
-
-                if !isAtBottom {
-                    Button {
-                        withAnimation(.easeOut(duration: 0.22)) {
-                            proxy.scrollTo("bottom-anchor", anchor: .bottom)
-                        }
-                    } label: {
-                        Image(systemName: "arrow.down")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(Color.nuwaLabelPrimary)
-                            .frame(width: 36, height: 36)
-                            .nuwaGlass(in: Circle(), interactive: true)
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.trailing, 16)
-                    .padding(.bottom, 12)
-                    .transition(.scale.combined(with: .opacity))
-                }
+                .frame(maxWidth: 748)
+                .frame(maxWidth: .infinity)
+                .id(ChatScrollTarget.message(message.id))
             }
         }
     }
 
     @ViewBuilder
-    private func messageRow(session: ChatSession, message: ChatMessage, isLast: Bool) -> some View {
-        let versionInfo = session.versionInfo(for: message)
+    private func messageRow(message: ChatMessage, versionInfo: MessageVersionInfo?, isLast: Bool) -> some View {
+        let versionInfo = versionInfo ?? MessageVersionInfo(ids: [message.id], index: 0)
 
         if message.role == .user {
             let isEditing = editingMessageId == message.id
@@ -553,6 +532,7 @@ struct ChatView: View {
                         text: displayText,
                         citations: refused ? [] : allCitations,
                         fontSize: settings.chatFontSize,
+                        isStreaming: message.isStreaming,
                         onCopyCode: { _ in chatStore.showToast(L10n.t("copied", locale: settings.locale)) }
                     )
                     .equatable()
@@ -666,39 +646,45 @@ struct ChatView: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 ForEach(files) { file in
-                    if file.isImage, let thumb = AttachmentStore.loadThumbnail(for: file, targetPointSize: 72) {
-                        Button {
-                            if let full = AttachmentStore.loadLocalImage(for: file) {
-                                withAnimation(.easeInOut(duration: 0.16)) {
-                                    previewImage = full
+                    AttachmentThumbnail(file: file, pointSize: 72) { image in
+                        if let thumb = image {
+                            Button {
+                                Task {
+                                    if let full = await Task.detached(priority: .userInitiated, operation: {
+                                        AttachmentStore.loadLocalImage(for: file)
+                                    }).value {
+                                        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.16)) {
+                                            previewImage = full
+                                        }
+                                    }
+                                }
+                            } label: {
+                                Image(uiImage: thumb)
+                                    .resizable()
+                                    .scaledToFill()
+                                    .frame(width: 72, height: 72)
+                                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            }
+                            .buttonStyle(NuwaTactileButtonStyle())
+                        } else {
+                            HStack(spacing: 6) {
+                                Image(systemName: file.isImage ? "photo" : "doc.text.fill")
+                                    .font(.system(size: 14))
+                                    .foregroundStyle(Color.nuwaBrandText)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(file.name)
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundStyle(Color.nuwaLabelPrimary)
+                                        .lineLimit(1)
+                                    Text(AttachmentStore.formatByteSize(file.size))
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(Color.nuwaLabelTertiary)
                                 }
                             }
-                        } label: {
-                            Image(uiImage: thumb)
-                                .resizable()
-                                .scaledToFill()
-                                .frame(width: 72, height: 72)
-                                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(Color.nuwaBubbleFill, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                         }
-                        .buttonStyle(NuwaTactileButtonStyle())
-                    } else {
-                        HStack(spacing: 6) {
-                            Image(systemName: file.isImage ? "photo" : "doc.text.fill")
-                                .font(.system(size: 14))
-                                .foregroundStyle(Color.nuwaBrandText)
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(file.name)
-                                    .font(.system(size: 12, weight: .medium))
-                                    .foregroundStyle(Color.nuwaLabelPrimary)
-                                    .lineLimit(1)
-                                Text(AttachmentStore.formatByteSize(file.size))
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(Color.nuwaLabelTertiary)
-                            }
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                        .background(Color.nuwaBubbleFill, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                     }
                 }
             }
@@ -727,38 +713,145 @@ struct ChatView: View {
     }
 }
 
-// MARK: - Zero-Overhead Main Surface Drawer Transform
+private enum ChatScrollTarget: Hashable {
+    case top, message(UUID), bottom
+}
 
-private struct DrawerSurfaceTransform: ViewModifier {
-    let progress: CGFloat
-    let drawerWidth: CGFloat
+private struct ChatTimeline<Rows: View>: View {
+    @Binding var isAtBottom: Bool
+    let last: ChatMessage?
+    let topCommand: Int
+    let latestLabel: String
+    @ViewBuilder let rows: (@escaping () -> Void) -> Rows
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    func body(content: Content) -> some View {
-        if progress <= 0.001 {
-            // Drawer completely closed: ZERO mask, ZERO shadow, ZERO scaleEffect -> pure 120Hz!
-            content
-                .background(Color.nuwaBgBase.ignoresSafeArea())
+    var body: some View {
+        if #available(iOS 18, *) {
+            ModernChatTimeline(timeline: self)
         } else {
-            let scale = 1.0 - 0.05 * progress
-            let cornerRadius = 24.0 * progress
-            content
-                .background(Color.nuwaBgBase.ignoresSafeArea(.container, edges: .vertical))
-                .mask {
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .ignoresSafeArea(.container, edges: .vertical)
+            ScrollViewReader { proxy in
+                decorated(
+                    scroll { proxy.scrollTo(ChatScrollTarget.bottom, anchor: .bottom) }
+                        .defaultScrollAnchor(.bottom)
+                ) { toBottom in
+                    if toBottom {
+                        proxy.scrollTo(ChatScrollTarget.bottom, anchor: .bottom)
+                    } else {
+                        proxy.scrollTo(ChatScrollTarget.top, anchor: .top)
+                    }
                 }
-                .shadow(
-                    color: Color.black.opacity(0.12 * progress),
-                    radius: 12,
-                    x: -4,
-                    y: 0
-                )
-                .scaleEffect(scale, anchor: .leading)
-                .offset(x: drawerWidth * progress)
+            }
+        }
+    }
+
+    func scroll(followLatest: @escaping () -> Void) -> some View {
+        ScrollView {
+            LazyVStack(spacing: 18) {
+                Color.clear.frame(height: 1).id(ChatScrollTarget.top)
+                rows(followLatest)
+                Color.clear
+                    .frame(height: 8)
+                    .id(ChatScrollTarget.bottom)
+                    .onAppear {
+                        if #unavailable(iOS 18) { isAtBottom = true }
+                    }
+                    .onDisappear {
+                        if #unavailable(iOS 18) { isAtBottom = false }
+                    }
+            }
+            .scrollTargetLayout()
+        }
+        .contentMargins(.horizontal, 16, for: .scrollContent)
+        .contentMargins(.top, 12, for: .scrollContent)
+        .nuwaNoScrollEdgeEffect()
+        .scrollDismissesKeyboard(.interactively)
+    }
+
+    func decorated<Scroll: View>(_ scroll: Scroll, scrollTo: @escaping (Bool) -> Void) -> some View {
+        ZStack(alignment: .bottomTrailing) {
+            scroll
+                .onChange(of: last) { _, _ in
+                    if isAtBottom { scrollTo(true) }
+                }
+                .onChange(of: topCommand) { _, _ in
+                    isAtBottom = false
+                    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.25)) { scrollTo(false) }
+                }
+            if !isAtBottom {
+                Button {
+                    isAtBottom = true
+                    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.22)) { scrollTo(true) }
+                } label: {
+                    Image(systemName: "arrow.down")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Color.nuwaLabelPrimary)
+                        .frame(width: 36, height: 36)
+                        .nuwaGlass(in: Circle(), interactive: true)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(latestLabel)
+                .padding(.trailing, 16)
+                .padding(.bottom, 12)
+            }
         }
     }
 }
 
+@available(iOS 18, *)
+private struct ModernChatTimeline<Rows: View>: View {
+    let timeline: ChatTimeline<Rows>
+    @State private var position = ScrollPosition(idType: ChatScrollTarget.self)
+    @State private var userScrolling = false
+
+    var body: some View {
+        timeline.decorated(
+            timeline.scroll { scrollTo(bottom: true) }
+                .scrollPosition($position)
+                .defaultScrollAnchor(.bottom, for: .initialOffset)
+                .defaultScrollAnchor(.top, for: .alignment)
+                .onScrollGeometryChange(for: CGSize.self, of: \.containerSize) { _, size in
+                    if size.width > 0 && size.height > 0 && timeline.isAtBottom && !userScrolling {
+                        scrollTo(bottom: true)
+                    }
+                }
+                .onScrollGeometryChange(for: Bool.self) { geo in
+                    nearBottom(geo)
+                } action: { _, nearBottom in
+                    if userScrolling { timeline.isAtBottom = nearBottom }
+                }
+                .onScrollPhaseChange { _, phase, context in
+                    let wasScrolling = userScrolling
+                    userScrolling = phase == .interacting || phase == .decelerating
+                    if userScrolling || (wasScrolling && phase == .idle) {
+                        timeline.isAtBottom = nearBottom(context.geometry)
+                    }
+                }
+        ) { scrollTo(bottom: $0) }
+    }
+
+    private func scrollTo(bottom: Bool) {
+        position.scrollTo(
+            id: bottom ? ChatScrollTarget.bottom : ChatScrollTarget.top,
+            anchor: bottom ? .bottom : .top
+        )
+    }
+
+    private func nearBottom(_ geometry: ScrollGeometry) -> Bool {
+        geometry.visibleRect.maxY >= geometry.contentSize.height - 40
+    }
+}
+
+private struct LiveReplyRow<Content: View>: View {
+    @ObservedObject var store: LiveReplyStore
+    let fallback: ChatMessage
+    @ViewBuilder let content: (ChatMessage) -> Content
+    let onUpdate: () -> Void
+
+    var body: some View {
+        content(store.message?.id == fallback.id ? store.message ?? fallback : fallback)
+            .onChange(of: store.message) { _, _ in onUpdate() }
+    }
+}
 // MARK: - Isolated Floating Liquid Glass Header
 
 private struct ChatHeaderView: View {
@@ -766,6 +859,7 @@ private struct ChatHeaderView: View {
     @ObservedObject var settings: SettingsStore
     let hasMessages: Bool
     let sessionTitle: String
+    let sidebarShown: Bool
     let onOpenDrawer: () -> Void
     let onScrollToTop: () -> Void
     let onCreateNewSession: () -> Void
@@ -777,14 +871,17 @@ private struct ChatHeaderView: View {
         NuwaGlassGroup(spacing: 10) {
             HStack(spacing: 10) {
                 Button(action: onOpenDrawer) {
-                    Image(systemName: "line.3.horizontal")
+                    Image(systemName: "sidebar.leading")
                         .font(.system(size: 17, weight: .medium))
                         .foregroundStyle(Color.nuwaLabelPrimary)
-                        .frame(width: 42, height: 42)
+                        .frame(width: 44, height: 44)
                         .nuwaGlass(in: Circle(), interactive: true)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("打开边栏")
+                .accessibilityLabel(settings.locale == .enUS
+                    ? (sidebarShown ? "Hide sidebar" : "Show sidebar")
+                    : (sidebarShown ? "隐藏边栏" : "打开边栏"))
 
                 if hasMessages {
                     let displayTitle = sessionTitle.isEmpty ? L10n.t("untitledChat", locale: settings.locale) : sessionTitle
@@ -832,9 +929,10 @@ private struct ChatHeaderView: View {
                             .foregroundStyle(Color.nuwaLabelPrimary)
                             .frame(width: 38, height: 34)
                             .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("开启新对话")
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut("n", modifiers: .command)
+                .accessibilityLabel("开启新对话")
                 }
                 .padding(.horizontal, 4)
                 .frame(height: 42)

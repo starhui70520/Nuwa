@@ -6,12 +6,6 @@ private struct SessionGroup: Identifiable {
     let sessions: [SessionSummaryItem]
 }
 
-/// Exact 1:1 recreation of chat-demo/src/components/sider/Sider.tsx + SessionItem.tsx
-/// Performance & UX hardened:
-/// - Observes ONLY `SessionListStore` (NEVER re-renders during typing or streaming deltas!)
-/// - Inherits 100% uniform `Color.nuwaSidebarFill` from root container (zero top safe-area color seam!)
-/// - Disables iOS 26 scrollEdgeEffect tint band on top of ScrollView
-/// - Full-width tactile bottom Settings card with zero gesture conflict (opens Settings immediately on tap!)
 struct SessionDrawerView: View {
     @ObservedObject var listStore: SessionListStore
     @ObservedObject var settings: SettingsStore
@@ -24,11 +18,12 @@ struct SessionDrawerView: View {
     let onRenameSession: (UUID, String) -> Void
     let onDeleteSession: (UUID) -> Void
     let onDeleteSessions: (Set<UUID>) -> Void
-    let onMatchesQuery: (UUID, String) -> Bool
+    let onSearch: (String) async -> Set<UUID>
     let onClose: () -> Void
     let onOpenSettings: () -> Void
 
     @State private var searchText = ""
+    @State private var searchResult: (query: String, ids: Set<UUID>)?
     @State private var selectMode = false
     @State private var selectedIds: Set<UUID> = []
     @State private var showBatchDeleteConfirm = false
@@ -38,17 +33,19 @@ struct SessionDrawerView: View {
 
     private var loc: AppLocale { settings.locale }
 
-    private var filteredSessions: [SessionSummaryItem] {
-        let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !q.isEmpty else { return listStore.summaries }
-        return listStore.summaries.filter { item in
-            item.title.localizedCaseInsensitiveContains(q) || onMatchesQuery(item.id, q)
-        }
+    private var query: String { searchText.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    private struct SearchInput: Equatable {
+        let query: String
+        let summaries: [SessionSummaryItem]
     }
 
     private var groupedSessions: [SessionGroup] {
         let calendar = Calendar.current
-        let now = Date()
+        let todayStart = calendar.startOfDay(for: Date())
+        let yesterdayStart = calendar.date(byAdding: .day, value: -1, to: todayStart) ?? todayStart
+        let weekStart = calendar.date(byAdding: .day, value: -7, to: todayStart) ?? todayStart
+        let monthStart = calendar.date(byAdding: .day, value: -30, to: todayStart) ?? todayStart
         var pinned: [SessionSummaryItem] = []
         var today: [SessionSummaryItem] = []
         var yesterday: [SessionSummaryItem] = []
@@ -56,21 +53,18 @@ struct SessionDrawerView: View {
         var last30Days: [SessionSummaryItem] = []
         var earlier: [SessionSummaryItem] = []
 
-        for s in filteredSessions {
+        let matches = searchResult?.query == query ? searchResult?.ids : nil
+        for s in listStore.summaries where query.isEmpty || matches?.contains(s.id) == true {
             if s.isPinned {
                 pinned.append(s)
-            } else if calendar.isDateInToday(s.updatedAt) {
+            } else if s.updatedAt >= todayStart {
                 today.append(s)
-            } else if calendar.isDateInYesterday(s.updatedAt) {
+            } else if s.updatedAt >= yesterdayStart {
                 yesterday.append(s)
-            } else if let diff = calendar.dateComponents([.day], from: s.updatedAt, to: now).day {
-                if diff <= 7 {
-                    last7Days.append(s)
-                } else if diff <= 30 {
-                    last30Days.append(s)
-                } else {
-                    earlier.append(s)
-                }
+            } else if s.updatedAt >= weekStart {
+                last7Days.append(s)
+            } else if s.updatedAt >= monthStart {
+                last30Days.append(s)
             } else {
                 earlier.append(s)
             }
@@ -99,6 +93,8 @@ struct SessionDrawerView: View {
     }
 
     var body: some View {
+        let groups = isOpen ? groupedSessions : []
+        let searchInput = SearchInput(query: isOpen ? query : "", summaries: isOpen && !query.isEmpty ? listStore.summaries : [])
         VStack(spacing: 0) {
             // Top Header: Select Mode header OR Search bar (clean uniform background, zero edge-tint artifact)
             if selectMode {
@@ -179,29 +175,33 @@ struct SessionDrawerView: View {
                     Spacer()
                 }
                 .frame(maxWidth: .infinity)
-            } else if filteredSessions.isEmpty {
+            } else if groups.isEmpty {
                 VStack {
                     Spacer()
-                    Text(L10n.t("emptySearch", locale: loc))
-                        .font(.system(size: 13))
-                        .foregroundStyle(Color.nuwaLabelTertiary)
+                    if !query.isEmpty && searchResult?.query != query {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Text(L10n.t("emptySearch", locale: loc))
+                            .font(.system(size: 13))
+                            .foregroundStyle(Color.nuwaLabelTertiary)
+                    }
                     Spacer()
                 }
                 .frame(maxWidth: .infinity)
             } else {
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 14) {
-                        ForEach(groupedSessions) { group in
-                            VStack(alignment: .leading, spacing: 3) {
+                    LazyVStack(alignment: .leading, spacing: 3) {
+                        ForEach(groups) { group in
+                            Section {
+                                ForEach(group.sessions) { session in
+                                    sessionRow(session)
+                                }
+                            } header: {
                                 Text(group.title)
                                     .font(.system(size: 12, weight: .medium))
                                     .foregroundStyle(Color.nuwaLabelTertiary)
                                     .padding(.horizontal, 12)
-                                    .padding(.bottom, 2)
-
-                                ForEach(group.sessions) { session in
-                                    sessionRow(session)
-                                }
+                                    .padding(.vertical, 6)
                             }
                         }
                     }
@@ -302,6 +302,16 @@ struct SessionDrawerView: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
             }
+        }
+        .task(id: searchInput) {
+            guard !searchInput.query.isEmpty else {
+                searchResult = nil
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(180))
+            guard !Task.isCancelled else { return }
+            let ids = await onSearch(searchInput.query)
+            if !Task.isCancelled { searchResult = (searchInput.query, ids) }
         }
         .onChange(of: isOpen) { _, open in
             if open {

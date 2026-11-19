@@ -1,4 +1,6 @@
 import Foundation
+import ImageIO
+import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
@@ -45,24 +47,31 @@ enum AttachmentStore {
         return filesDirectory.appendingPathComponent(fileName)
     }
 
-    /// Memory-cached downsampled thumbnail for fast 120Hz list & composer rendering.
-    static func loadThumbnail(for attachment: FileAttachment, targetPointSize: CGFloat = 72) -> UIImage? {
+    private static func loadThumbnail(for attachment: FileAttachment, maxPixels: Int) -> UIImage? {
         guard attachment.isImage, let fileName = attachment.localFileName else { return nil }
-        let key = "\(fileName)@\(Int(targetPointSize))" as NSString
+        let key = "\(fileName)@\(maxPixels)" as NSString
         if let cached = thumbnailCache.object(forKey: key) {
             return cached
         }
         guard let url = localURL(for: attachment),
-              let data = try? Data(contentsOf: url),
-              let full = UIImage(data: data)
+              let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                  kCGImageSourceCreateThumbnailFromImageAlways: true,
+                  kCGImageSourceCreateThumbnailWithTransform: true,
+                  kCGImageSourceShouldCacheImmediately: true,
+                  kCGImageSourceThumbnailMaxPixelSize: maxPixels
+              ] as CFDictionary)
         else { return nil }
 
-        let scale = UIScreen.main.scale
-        let pixelSize = CGSize(width: targetPointSize * scale, height: targetPointSize * scale)
-        let thumb = full.preparingThumbnail(of: pixelSize) ?? full
-        let cost = Int(thumb.size.width * thumb.size.height * 4)
-        thumbnailCache.setObject(thumb, forKey: key, cost: cost)
+        let thumb = UIImage(cgImage: image)
+        thumbnailCache.setObject(thumb, forKey: key, cost: image.bytesPerRow * image.height)
         return thumb
+    }
+
+    static func thumbnail(for attachment: FileAttachment, maxPixels: Int) async -> UIImage? {
+        await Task.detached(priority: .utility) {
+            loadThumbnail(for: attachment, maxPixels: maxPixels)
+        }.value
     }
 
     /// Full-resolution image for Lightbox preview only.
@@ -131,5 +140,24 @@ enum AttachmentStore {
                 try? FileManager.default.removeItem(at: url)
             }
         }
+    }
+}
+
+struct AttachmentThumbnail<Content: View>: View {
+    let file: FileAttachment
+    let pointSize: CGFloat
+    @ViewBuilder let content: (UIImage?) -> Content
+    @Environment(\.displayScale) private var displayScale
+    @State private var loaded: (key: String, image: UIImage?)?
+
+    var body: some View {
+        let maxPixels = max(1, Int((pointSize * displayScale).rounded(.up)))
+        let key = "\(file.localFileName ?? file.id)@\(maxPixels)"
+        content(loaded?.key == key ? loaded?.image : nil)
+            .task(id: key) {
+                guard file.isImage, file.localFileName != nil else { return }
+                let image = await AttachmentStore.thumbnail(for: file, maxPixels: maxPixels)
+                if !Task.isCancelled { loaded = (key, image) }
+            }
     }
 }

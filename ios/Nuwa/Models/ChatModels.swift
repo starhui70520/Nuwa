@@ -421,11 +421,16 @@ struct ChatSession: Identifiable, Codable, Equatable {
         return path
     }
 
-    /// Returns sibling version info for a message (1:1 buildMessageVersions).
-    func versionInfo(for message: ChatMessage) -> MessageVersionInfo {
-        let siblings = messages.filter { $0.parentId == message.parentId }.map(\.id)
-        let idx = siblings.firstIndex(of: message.id) ?? 0
-        return MessageVersionInfo(ids: siblings, index: idx)
+    func messageVersions() -> [UUID: MessageVersionInfo] {
+        let siblings = Dictionary(grouping: messages.map { ($0.parentId, $0.id) }, by: \.0)
+        var versions: [UUID: MessageVersionInfo] = [:]
+        for group in siblings.values where group.count > 1 {
+            let ids = group.map(\.1)
+            for (index, id) in ids.enumerated() {
+                versions[id] = MessageVersionInfo(ids: ids, index: index)
+            }
+        }
+        return versions
     }
 
     /// Appends a new branch under `parentId` and selects it while preserving old branches (1:1 appendBranch).

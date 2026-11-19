@@ -33,6 +33,11 @@ private final class CachedMarkdownBlocks: NSObject {
     init(_ blocks: [MarkdownBlock]) { self.blocks = blocks }
 }
 
+private final class CachedInlineMarkdown: NSObject {
+    let value: AttributedString
+    init(_ value: AttributedString) { self.value = value }
+}
+
 private enum MarkdownParseCache {
     static let citationRegex: NSRegularExpression? = try? NSRegularExpression(pattern: "\\[citation:(\\d+)\\]")
     static let inlineOptions = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
@@ -40,25 +45,35 @@ private enum MarkdownParseCache {
     static let cache: NSCache<NSString, CachedMarkdownBlocks> = {
         let c = NSCache<NSString, CachedMarkdownBlocks>()
         c.countLimit = 250
+        c.totalCostLimit = 8 * 1024 * 1024
         return c
     }()
 
-    static func parse(_ rawInput: String) -> [MarkdownBlock] {
+    static let inlineCache: NSCache<NSString, CachedInlineMarkdown> = {
+        let cache = NSCache<NSString, CachedInlineMarkdown>()
+        cache.countLimit = 512
+        cache.totalCostLimit = 2 * 1024 * 1024
+        return cache
+    }()
+
+    static func parse(_ rawInput: String, isStreaming: Bool) -> [MarkdownBlock] {
+        if isStreaming { return parseBlocks(cleanCitationTags(rawInput)) }
         let key = rawInput as NSString
         if let hit = cache.object(forKey: key) {
             return hit.blocks
         }
         let cleaned = cleanCitationTags(rawInput)
         let parsed = parseBlocks(cleaned)
-        cache.setObject(CachedMarkdownBlocks(parsed), forKey: key)
+        cache.setObject(CachedMarkdownBlocks(parsed), forKey: key, cost: key.length * 4)
         return parsed
     }
 
     private static func inlineAttributed(_ raw: String) -> AttributedString {
-        if let attributed = try? AttributedString(markdown: raw, options: inlineOptions) {
-            return attributed
-        }
-        return AttributedString(raw)
+        let key = raw as NSString
+        if let cached = inlineCache.object(forKey: key) { return cached.value }
+        let value = (try? AttributedString(markdown: raw, options: inlineOptions)) ?? AttributedString(raw)
+        inlineCache.setObject(CachedInlineMarkdown(value), forKey: key, cost: key.length * 4)
+        return value
     }
 
     private static func cleanCitationTags(_ input: String) -> String {
@@ -247,23 +262,26 @@ struct MarkdownMessageView: View, Equatable {
     let text: String
     let citations: [TextCitation]
     let fontSize: Double
+    let isStreaming: Bool
     let onCopyCode: (String) -> Void
 
     @Environment(\.openURL) private var openURL
 
     static func == (lhs: MarkdownMessageView, rhs: MarkdownMessageView) -> Bool {
         lhs.text == rhs.text && lhs.fontSize == rhs.fontSize && lhs.citations == rhs.citations
+            && lhs.isStreaming == rhs.isStreaming
     }
 
-    init(text: String, citations: [TextCitation] = [], fontSize: Double, onCopyCode: @escaping (String) -> Void) {
+    init(text: String, citations: [TextCitation] = [], fontSize: Double, isStreaming: Bool = false, onCopyCode: @escaping (String) -> Void) {
         self.text = text
         self.citations = citations
         self.fontSize = fontSize
+        self.isStreaming = isStreaming
         self.onCopyCode = onCopyCode
     }
 
     var body: some View {
-        let blocks = MarkdownParseCache.parse(text)
+        let blocks = MarkdownParseCache.parse(text, isStreaming: isStreaming)
         VStack(alignment: .leading, spacing: 8) {
             ForEach(blocks) { block in
                 switch block {
