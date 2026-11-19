@@ -327,8 +327,10 @@
     border-color: rgba(255, 255, 255, 0.12);
   }
 
-  &:hover:not(:disabled) {
-    background-color: var(--dsw-alias-interactive-bg-hover);
+  @media (hover: hover) {
+    &:hover:not(:disabled) {
+      background-color: var(--dsw-alias-interactive-bg-hover);
+    }
   }
 
   &:disabled {
@@ -345,8 +347,10 @@
       background-color: rgba(103, 158, 254, 0.18);
     }
 
-    &:hover {
-      background-color: var(--dsw-alias-button-ghost-active-hover);
+    @media (hover: hover) {
+      &:hover {
+        background-color: var(--dsw-alias-button-ghost-active-hover);
+      }
     }
   }
 }
@@ -411,8 +415,14 @@
   cursor: pointer;
   transition: background 0.2s ease;
 
-  &:not(.disabled):hover {
+  &:not(.disabled):active {
     background: var(--dsw-alias-button-primary-hover);
+  }
+
+  @media (hover: hover) {
+    &:not(.disabled):hover {
+      background: var(--dsw-alias-button-primary-hover);
+    }
   }
 
   &.disabled {

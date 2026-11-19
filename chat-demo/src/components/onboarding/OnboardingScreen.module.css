@@ -30,8 +30,14 @@
   text-decoration: none;
   cursor: pointer;
 
-  &:hover {
+  &:active {
     color: var(--dsw-alias-label-primary);
+  }
+
+  @media (hover: hover) {
+    &:hover {
+      color: var(--dsw-alias-label-primary);
+    }
   }
 }
 
@@ -91,8 +97,14 @@
   cursor: pointer;
   transition: background-color var(--ds-transition-duration) var(--ds-ease-in-out);
 
-  &:hover:not(:disabled) {
+  &:active:not(:disabled) {
     background-color: var(--dsw-specific-selector);
+  }
+
+  @media (hover: hover) {
+    &:hover:not(:disabled) {
+      background-color: var(--dsw-specific-selector);
+    }
   }
 
   &:disabled {
@@ -106,9 +118,16 @@
   background-color: var(--dsw-alias-button-primary-fill);
   color: var(--dsw-static-neutral-bluish-00);
 
-  &:hover:not(:disabled) {
+  &:active:not(:disabled) {
     background-color: var(--dsw-alias-button-primary-fill);
     opacity: 0.92;
+  }
+
+  @media (hover: hover) {
+    &:hover:not(:disabled) {
+      background-color: var(--dsw-alias-button-primary-fill);
+      opacity: 0.92;
+    }
   }
 }
 

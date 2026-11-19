@@ -28,8 +28,14 @@
   cursor: pointer;
   user-select: none;
 
-  &:hover {
+  &:active {
     background-color: var(--dsw-alias-interactive-bg-hover);
+  }
+
+  @media (hover: hover) {
+    &:hover {
+      background-color: var(--dsw-alias-interactive-bg-hover);
+    }
   }
 }
 
@@ -41,8 +47,14 @@
 .danger {
   color: var(--dsw-alias-state-error-primary);
 
-  &:hover {
+  &:active {
     background-color: var(--dsw-alias-interactive-bg-hover-danger);
+  }
+
+  @media (hover: hover) {
+    &:hover {
+      background-color: var(--dsw-alias-interactive-bg-hover-danger);
+    }
   }
 }
 

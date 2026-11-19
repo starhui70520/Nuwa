@@ -61,8 +61,14 @@
   color: var(--dsw-alias-label-primary-foreground);
   background-color: var(--dsw-alias-button-primary-fill);
 
-  &:hover:not(:disabled) {
+  &:active:not(:disabled) {
     background-color: var(--dsw-alias-button-primary-hover);
+  }
+
+  @media (hover: hover) {
+    &:hover:not(:disabled) {
+      background-color: var(--dsw-alias-button-primary-hover);
+    }
   }
 }
 
@@ -72,8 +78,14 @@
   border-color: var(--dsw-alias-border-l2);
   font-weight: 400;
 
-  &:hover:not(:disabled) {
+  &:active:not(:disabled) {
     background-color: var(--dsw-alias-interactive-bg-hover);
+  }
+
+  @media (hover: hover) {
+    &:hover:not(:disabled) {
+      background-color: var(--dsw-alias-interactive-bg-hover);
+    }
   }
 }
 
@@ -81,8 +93,14 @@
   color: var(--dsw-static-neutral-bluish-00);
   background-color: var(--dsw-alias-state-error-primary);
 
-  &:hover:not(:disabled) {
+  &:active:not(:disabled) {
     background-color: var(--dsw-alias-state-error-secondary);
+  }
+
+  @media (hover: hover) {
+    &:hover:not(:disabled) {
+      background-color: var(--dsw-alias-state-error-secondary);
+    }
   }
 }
 
@@ -92,8 +110,14 @@
   border-color: var(--dsw-alias-state-error-primary);
   font-weight: 400;
 
-  &:hover:not(:disabled) {
+  &:active:not(:disabled) {
     background-color: var(--dsw-alias-interactive-bg-hover-danger);
+  }
+
+  @media (hover: hover) {
+    &:hover:not(:disabled) {
+      background-color: var(--dsw-alias-interactive-bg-hover-danger);
+    }
   }
 
   &:focus-visible {

@@ -22,8 +22,10 @@
     background-color var(--ds-transition-duration) var(--ds-ease-in-out),
     color var(--ds-transition-duration) var(--ds-ease-in-out);
 
-  &:hover:not(:disabled) {
-    background: var(--dsw-alias-interactive-bg-hover-accent);
+  @media (hover: hover) {
+    &:hover:not(:disabled) {
+      background: var(--dsw-alias-interactive-bg-hover-accent);
+    }
   }
 
   &:focus-visible {
@@ -49,9 +51,11 @@
   background: transparent;
   color: var(--dsw-alias-label-secondary);
 
-  &:hover:not(:disabled) {
-    background: transparent;
-    color: var(--dsw-alias-label-primary);
+  @media (hover: hover) {
+    &:hover:not(:disabled) {
+      background: transparent;
+      color: var(--dsw-alias-label-primary);
+    }
   }
 
   .arrow {
@@ -113,8 +117,14 @@
   user-select: none;
   transition: background-color var(--ds-transition-duration) var(--ds-ease-in-out);
 
-  &:hover {
+  &:active {
     background: var(--dsw-alias-interactive-bg-hover);
+  }
+
+  @media (hover: hover) {
+    &:hover {
+      background: var(--dsw-alias-interactive-bg-hover);
+    }
   }
 }
 

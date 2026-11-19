@@ -49,8 +49,14 @@
   border-radius: 12px;
   transition: background-color var(--ds-transition-duration) var(--ds-ease-in-out);
 
-  &:hover {
+  &:active {
     background: var(--dsw-alias-interactive-bg-hover);
+  }
+
+  @media (hover: hover) {
+    &:hover {
+      background: var(--dsw-alias-interactive-bg-hover);
+    }
   }
 }
 

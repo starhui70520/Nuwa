@@ -1,7 +1,7 @@
 .dialog {
   width: 480px;
   height: 660px;
-  max-height: calc(100vh - 48px);
+  max-height: calc(100dvh - 32px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
   padding: 0;
   border-radius: 24px;
   background-color: #f5f6f8;
@@ -155,9 +155,14 @@
   cursor: pointer;
   transition: background-color var(--ds-transition-duration) var(--ds-ease-in-out);
 
-  &:active,
-  &:hover {
+  &:active {
     background-color: var(--dsw-alias-interactive-bg-hover);
+  }
+
+  @media (hover: hover) {
+    &:hover {
+      background-color: var(--dsw-alias-interactive-bg-hover);
+    }
   }
 }
 
