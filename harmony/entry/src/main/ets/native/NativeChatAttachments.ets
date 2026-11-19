@@ -392,6 +392,10 @@ export class NativeChatAttachments {
     const options = new picker.DocumentSelectOptions();
     options.maxSelectNumber = MAX_COUNT - existingCount;
     const uris = await new picker.DocumentViewPicker(context).select(options);
+    return this.importUris(context, uris, existingCount);
+  }
+
+  async importUris(context: common.UIAbilityContext, uris: string[], existingCount: number): Promise<NativeAttachment[]> {
     if (uris.length + existingCount > MAX_COUNT) {
       throw new Error('一次最多添加 50 个附件。');
     }

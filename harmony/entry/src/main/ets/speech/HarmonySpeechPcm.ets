@@ -6,9 +6,11 @@ export class HarmonySpeechPcm {
   private trailing: number = -1;
   private started: boolean = false;
   private readonly onPlaying: () => void;
+  private readonly onInterrupted: () => void;
 
-  constructor(onPlaying: () => void) {
+  constructor(onPlaying: () => void, onInterrupted: () => void) {
     this.onPlaying = onPlaying;
+    this.onInterrupted = onInterrupted;
   }
 
   async write(data: ArrayBuffer): Promise<void> {
@@ -85,6 +87,14 @@ export class HarmonySpeechPcm {
     const renderer = await audio.createAudioRenderer(options);
     try {
       if (!this.stopped) {
+        if (canIUse('SystemCapability.Multimedia.Audio.Interrupt')) {
+          renderer.on('audioInterrupt', (event: audio.InterruptEvent): void => {
+            if (!this.stopped && event.hintType === audio.InterruptHint.INTERRUPT_HINT_STOP) {
+              this.stop();
+              this.onInterrupted();
+            }
+          });
+        }
         await renderer.start();
         if (!this.stopped) {
           this.renderer = renderer;

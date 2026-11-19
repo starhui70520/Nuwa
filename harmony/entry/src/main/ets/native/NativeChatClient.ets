@@ -429,10 +429,13 @@ class ChatStream {
   private readonly onDelta: (content: string, reasoning: string) => void;
   private readonly protocol: 'openai' | 'anthropic';
   private readonly onAnthropicEvent?: (data: string) => void;
+  private readonly onTitle?: (title: string) => void;
 
   constructor(onDelta: (content: string, reasoning: string) => void,
-    protocol: 'openai' | 'anthropic' = 'openai', onAnthropicEvent?: (data: string) => void) {
+    protocol: 'openai' | 'anthropic' = 'openai', onAnthropicEvent?: (data: string) => void,
+    onTitle?: (title: string) => void) {
     this.onAnthropicEvent = onAnthropicEvent;
+    this.onTitle = onTitle;
     this.onDelta = onDelta;
     this.protocol = protocol;
   }
@@ -582,8 +585,13 @@ class ChatStream {
       const reason = delta?.stop_reason;
       if (typeof reason === 'string' && ANTHROPIC_STOP_REASONS.has(reason)) {
         this.outcome.stopReason = reason;
-        if ((reason === 'end_turn' || reason === 'max_tokens') && typeof delta?.title === 'string') {
-          this.outcome.title = delta.title.trim();
+        if (!this.outcome.title && (reason === 'end_turn' || reason === 'max_tokens') &&
+          typeof delta?.title === 'string') {
+          const title = delta.title.trim();
+          if (title) {
+            this.outcome.title = title;
+            this.onTitle?.(title);
+          }
         }
         this.onAnthropicEvent?.(data);
       }
@@ -706,7 +714,7 @@ export class NativeChatClient {
 
   async send(config: NativeChatConfig, messages: NativeChatMessage[],
     onDelta: (content: string, reasoning: string) => void,
-    onAnthropicEvent?: (data: string) => void): Promise<NativeReplyOutcome> {
+    onAnthropicEvent?: (data: string) => void, onTitle?: (title: string) => void): Promise<NativeReplyOutcome> {
     this.cancel();
     const apiKey = config.apiKey.trim();
     const accountToken = config.accountToken?.trim() ?? '';
@@ -822,7 +830,11 @@ export class NativeChatClient {
         if (this.settleRequest === settle) {
           onDelta(content, reasoning);
         }
-      }, protocol, onAnthropicEvent);
+      }, protocol, onAnthropicEvent, (title: string): void => {
+        if (this.settleRequest === settle && config.requestTitle) {
+          onTitle?.(title);
+        }
+      });
       const errorBody = new Uint8Array(MAX_ERROR_BODY_BYTES);
       let errorBodyLength = 0;
       let streamError: string = '';

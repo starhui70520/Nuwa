@@ -21,6 +21,10 @@
       "value": "#CFD3D6"
     },
     {
+      "name": "native_chat_action",
+      "value": "#ADB2B8"
+    },
+    {
       "name": "native_chat_caption",
       "value": "#81858C"
     },
@@ -59,6 +63,10 @@
     {
       "name": "native_chat_glass",
       "value": "#801C1C1E"
+    },
+    {
+      "name": "native_chat_drag_mask",
+      "value": "#B3272730"
     },
     {
       "name": "native_chat_error",

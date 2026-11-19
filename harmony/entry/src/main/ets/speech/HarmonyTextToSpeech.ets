@@ -217,7 +217,10 @@ export class HarmonyTextToSpeech {
       return;
     }
     const cloud = new HarmonyCloudSpeech();
-    const pcm = new HarmonySpeechPcm((): void => { this.markPlaying(playback); });
+    const pcm = new HarmonySpeechPcm(
+      (): void => { this.markPlaying(playback); },
+      (): void => { this.finish(playback, 'done'); }
+    );
     playback.cloud = cloud;
     playback.pcm = pcm;
     try {

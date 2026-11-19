@@ -108,6 +108,11 @@ export struct NativeMarkdown {
     return level === 1 ? 24 : level === 2 ? 22 : level === 3 ? 20 : 16;
   }
 
+  private headingLineHeight(level: number): number {
+    if (this.muted) return 24;
+    return level === 1 ? 34 : level === 2 ? 32 : level === 3 ? 30 : 28;
+  }
+
   private prepareMathPresentation(): void {
     const context = this.getUIContext();
     const density = context.vp2px(1);
@@ -366,7 +371,8 @@ export struct NativeMarkdown {
         const taskMatch: RegExpMatchArray | null = line.substring(prefix.length).match(/^\[([ xX])\]\s+/);
         const marker: string = taskMatch ? (taskMatch[1].toLowerCase() === 'x' ? '☑' : '□') :
           (ordered ? `${numberMatch?.[1]}.` : '•');
-        const indent: number = Math.min(32, Math.floor(prefix.length / 2) * 14);
+        const leading = prefix.substring(0, prefix.length - prefix.trimStart().length).replace(/\t/g, '  ');
+        const indent: number = Math.min(54, Math.floor(leading.length / 2) * 18);
         result.push({
           kind: 'list',
           text: line.substring(prefix.length + (taskMatch ? taskMatch[0].length : 0)),
@@ -789,7 +795,7 @@ export struct NativeMarkdown {
   }
 
   @Builder
-  private inlineText(value: string, size: number, maxWidth: number = 0) {
+  private inlineText(value: string, size: number, maxWidth: number = 0, lineHeight?: number) {
     Text() {
       ForEach(this.inlineParts(value), (part: InlinePart) => {
         if (part.citation !== undefined) {
@@ -825,7 +831,7 @@ export struct NativeMarkdown {
       }, (part: InlinePart, index: number): string => `${index}:${part.text}:${part.target ?? ''}:${part.citation ?? 0}`)
     }
     .fontSize(size * this.fontScale)
-    .lineHeight(size * this.fontScale * (this.muted ? 24 / 14 : 1.75))
+    .lineHeight((lineHeight ?? size * (this.muted ? 24 / 14 : 1.75)) * this.fontScale)
     .width('100%')
     .accessibilityText(this.inlineAccessibilityText(value))
     .copyOption(CopyOptions.LocalDevice)
@@ -912,65 +918,89 @@ export struct NativeMarkdown {
     .backgroundColor($r('app.color.native_chat_field'))
   }
 
-  build() {
-    Column({ space: 10 }) {
-      ForEach(this.blocks(), (block: MarkdownBlock, index: number) => {
-        if (block.kind === 'code') {
-          this.codeBlock(block, index)
-        } else if (block.kind === 'math') {
-          if (this.mathPicture(block.text, this.bodySize(), true)) {
-            this.displayedFormula(this.mathPicture(block.text, this.bodySize(), true)!, block.text)
-          } else {
-            NativeMathEquation({ expression: block.math ?? null, source: block.text,
-              formulaFontSize: (this.bodySize() + 1) * this.fontScale })
-          }
-        } else if (block.kind === 'heading') {
-          this.inlineText(`**${block.text}**`, this.headingSize(block.level))
-        } else if (block.kind === 'list') {
-          Row({ space: 8 }) {
-            Text(block.marker).fontSize(this.muted ? this.bodySize() * this.fontScale : 16).width(22)
-              .fontColor($r('app.color.native_chat_secondary'))
-            this.inlineText(block.text, this.bodySize())
-          }
-          .width('100%')
-          .padding({ left: block.level, top: 3, bottom: 3 })
-        } else if (block.kind === 'hr') {
-          Row() {}
-            .width('100%')
-            .height(1)
-            .margin({ top: 8, bottom: 8 })
-            .backgroundColor($r('app.color.native_chat_stroke'))
-        } else if (block.kind === 'quote') {
-          Row({ space: 14 }) {
-            Text('│').fontSize(16).fontColor($r('app.color.native_chat_caption'))
-            this.inlineText(block.text, this.bodySize())
-          }
-          .width('100%')
-        } else if (block.kind === 'table') {
-          Scroll() {
-            Column({ space: 0 }) {
-              ForEach(block.rows ?? [], (row: string[], rowIndex: number) => {
-                Row({ space: 0 }) {
-                  ForEach(row, (cell: string, cellIndex: number) => {
-                    Column() {
-                      this.inlineText(rowIndex === 0 && cell.length > 0 ? `**${cell}**` : cell,
-                        this.muted || rowIndex === 0 ? 14 : 13, 104)
-                    }
-                    .width(128)
-                    .padding({ left: cellIndex === 0 ? 0 : 12, right: 12, top: 10, bottom: 10 })
-                    .border({ width: { bottom: 1 }, color: $r('app.color.native_chat_stroke'), radius: 0 })
-                    .backgroundColor(rowIndex === 0 ? $r('app.color.native_chat_sidebar') : Color.Transparent)
-                  }, (cell: string, cellIndex: number): string => `${rowIndex}-${cellIndex}`)
-                }
-              }, (row: string[], rowIndex: number): string => `table-row-${rowIndex}`)
-            }
-          }
-          .width('100%')
-          .scrollable(ScrollDirection.Horizontal)
-          .scrollBar(BarState.Off)
-        } else {
+  private blockGap(block: MarkdownBlock, index: number): number {
+    if (!index) return 0;
+    const previous = this.blocks()[index - 1];
+    if (block.kind === 'heading' && !this.muted) return block.level <= 3 ? 32 : 16;
+    if (block.kind === 'list') {
+      if (previous?.kind === 'list') return 6;
+      return previous?.kind === 'heading' && previous.level >= 4 ? 8 : 16;
+    }
+    return previous?.kind === 'list' || previous?.kind === 'heading' ? 16 : 10;
+  }
+
+  @Builder
+  private renderBlock(block: MarkdownBlock, index: number) {
+    if (block.kind === 'code') {
+      this.codeBlock(block, index)
+    } else if (block.kind === 'math') {
+      if (this.mathPicture(block.text, this.bodySize(), true)) {
+        this.displayedFormula(this.mathPicture(block.text, this.bodySize(), true)!, block.text)
+      } else {
+        NativeMathEquation({ expression: block.math ?? null, source: block.text,
+          formulaFontSize: (this.bodySize() + 1) * this.fontScale })
+      }
+    } else if (block.kind === 'heading') {
+      this.inlineText(`**${block.text}**`, this.headingSize(block.level), 0, this.headingLineHeight(block.level))
+    } else if (block.kind === 'list') {
+      Row({ space: 8 }) {
+        Text(block.marker).fontSize(this.bodySize() * this.fontScale)
+          .lineHeight(this.bodySize() * this.fontScale * (this.muted ? 24 / 14 : 1.75))
+          .width(block.ordered ? Math.max(10, block.marker.length * 8) : 10)
+          .fontColor($r('app.color.native_chat_secondary'))
+        Column() {
           this.inlineText(block.text, this.bodySize())
         }
+        .layoutWeight(1).alignItems(HorizontalAlign.Start)
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Top).padding({ left: block.level })
+    } else if (block.kind === 'hr') {
+      Row() {}
+        .width('100%')
+        .height(1)
+        .margin({ top: 8, bottom: 8 })
+        .backgroundColor($r('app.color.native_chat_stroke'))
+    } else if (block.kind === 'quote') {
+      Row({ space: 14 }) {
+        Text('│').fontSize(16).fontColor($r('app.color.native_chat_caption'))
+        this.inlineText(block.text, this.bodySize())
+      }
+      .width('100%')
+    } else if (block.kind === 'table') {
+      Scroll() {
+        Column({ space: 0 }) {
+          ForEach(block.rows ?? [], (row: string[], rowIndex: number) => {
+            Row({ space: 0 }) {
+              ForEach(row, (cell: string, cellIndex: number) => {
+                Column() {
+                  this.inlineText(rowIndex === 0 && cell.length > 0 ? `**${cell}**` : cell,
+                    this.muted || rowIndex === 0 ? 14 : 13, 104)
+                }
+                .width(128)
+                .padding({ left: cellIndex === 0 ? 0 : 12, right: 12, top: 10, bottom: 10 })
+                .border({ width: { bottom: 1 }, color: $r('app.color.native_chat_stroke'), radius: 0 })
+                .backgroundColor(rowIndex === 0 ? $r('app.color.native_chat_sidebar') : Color.Transparent)
+              }, (cell: string, cellIndex: number): string => `${rowIndex}-${cellIndex}`)
+            }
+          }, (row: string[], rowIndex: number): string => `table-row-${rowIndex}`)
+        }
+      }
+      .width('100%')
+      .scrollable(ScrollDirection.Horizontal)
+      .scrollBar(BarState.Off)
+    } else {
+      this.inlineText(block.text, this.bodySize())
+    }
+  }
+
+  build() {
+    Column() {
+      ForEach(this.blocks(), (block: MarkdownBlock, index: number) => {
+        Column() {
+          this.renderBlock(block, index)
+        }
+        .width('100%').alignItems(HorizontalAlign.Start).margin({ top: this.blockGap(block, index) })
       }, (block: MarkdownBlock, index: number): string => this.blockKey(block, index))
     }
     .width('100%')

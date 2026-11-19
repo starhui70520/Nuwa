@@ -25,6 +25,10 @@
       "value": "#61666B"
     },
     {
+      "name": "native_chat_action",
+      "value": "#81858C"
+    },
+    {
       "name": "native_chat_caption",
       "value": "#ADB2B8"
     },
@@ -63,6 +67,10 @@
     {
       "name": "native_chat_glass",
       "value": "#8CFFFFFF"
+    },
+    {
+      "name": "native_chat_drag_mask",
+      "value": "#B3FFFFFF"
     },
     {
       "name": "native_chat_error",
