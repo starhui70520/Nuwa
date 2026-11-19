@@ -6,6 +6,18 @@ export interface NativeBackupZipEntry {
   data: Uint8Array;
 }
 
+export interface NativeBackupZipInput {
+  size: number;
+  read: (offset: number, length: number) => Promise<Uint8Array>;
+}
+
+export interface NativeBackupZipStreamEntry {
+  name: string;
+  size: number;
+  crc: number;
+  consume: (write: (chunk: Uint8Array) => Promise<void>) => Promise<void>;
+}
+
 interface DirectoryEntry {
   name: string;
   nameBytes: Uint8Array;
@@ -23,6 +35,10 @@ interface ZipDirectory {
 }
 
 export const MAX_BACKUP_BYTES = 64 * 1024 * 1024;
+export const MAX_FILE_BACKUP_BYTES = 512 * 1024 * 1024;
+export const MAX_BACKUP_ENTRY_BYTES = 64 * 1024 * 1024;
+const MAX_DIRECTORY_BYTES = 16 * 1024 * 1024;
+const CHUNK_BYTES = 256 * 1024;
 const LOCAL_HEADER = 0x04034b50;
 const CENTRAL_HEADER = 0x02014b50;
 const END_HEADER = 0x06054b50;
@@ -46,12 +62,23 @@ function crcTable(): Uint32Array {
 
 const CRC_TABLE = crcTable();
 
-function crc32(data: Uint8Array): number {
-  let crc = 0xffffffff;
+function accumulateCrc(crc: number, data: Uint8Array): number {
   for (const byte of data) {
     crc = (crc >>> 8) ^ CRC_TABLE[(crc ^ byte) & 0xff];
   }
+  return crc;
+}
+
+function completeCrc(crc: number): number {
   return (crc ^ 0xffffffff) >>> 0;
+}
+
+function crc32(data: Uint8Array): number {
+  return completeCrc(accumulateCrc(0xffffffff, data));
+}
+
+export function backupZipChecksum(data: Uint8Array): number {
+  return crc32(data);
 }
 
 function invalidZip(): never {
@@ -60,6 +87,27 @@ function invalidZip(): never {
 
 function tooLarge(): never {
   throw new Error('暂不支持超过 64 MB 的历史备份。');
+}
+
+function fileBackupTooLarge(): never {
+  throw new Error('备份超过 512 MB，或单个条目超过 64 MB。');
+}
+
+export function memoryBackupInput(data: Uint8Array): NativeBackupZipInput {
+  return { size: data.byteLength, read: async (offset: number, length: number): Promise<Uint8Array> =>
+    data.subarray(offset, offset + length) };
+}
+
+function viewOf(bytes: Uint8Array): DataView {
+  return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+}
+
+async function checkedRead(input: NativeBackupZipInput, offset: number, length: number): Promise<Uint8Array> {
+  if (offset < 0 || length < 0 || offset + length > input.size) {
+    return invalidZip();
+  }
+  const data = await input.read(offset, length);
+  return data.length === length ? data : invalidZip();
 }
 
 export function backupUtf8(value: string): Uint8Array {
@@ -104,21 +152,28 @@ function locateEnd(view: DataView): number {
   return invalidZip();
 }
 
-function readDirectory(data: Uint8Array, view: DataView): ZipDirectory {
-  const end = locateEnd(view);
-  const count = view.getUint16(end + 10, true);
-  const size = view.getUint32(end + 12, true);
-  const start = view.getUint32(end + 16, true);
-  if (view.getUint16(end + 4, true) !== 0 || view.getUint16(end + 6, true) !== 0 ||
-    view.getUint16(end + 8, true) !== count || count === 0xffff || start + size !== end) {
+async function readDirectory(input: NativeBackupZipInput, limit: number): Promise<ZipDirectory> {
+  const tailOffset = Math.max(0, input.size - 65_557);
+  const tail = viewOf(await checkedRead(input, tailOffset, input.size - tailOffset));
+  const end = locateEnd(tail);
+  const count = tail.getUint16(end + 10, true);
+  const size = tail.getUint32(end + 12, true);
+  const start = tail.getUint32(end + 16, true);
+  if (tail.getUint16(end + 4, true) !== 0 || tail.getUint16(end + 6, true) !== 0 ||
+    tail.getUint16(end + 8, true) !== count || count === 0xffff || start + size !== tailOffset + end) {
     return invalidZip();
   }
+  if (size > MAX_DIRECTORY_BYTES) {
+    return fileBackupTooLarge();
+  }
+  const data = await checkedRead(input, start, size);
+  const view = viewOf(data);
   const entries: DirectoryEntry[] = [];
   const names = new Set<string>();
   let total = 0;
-  let offset = start;
+  let offset = 0;
   for (let i = 0; i < count; i++) {
-    if (offset + 46 > end || view.getUint32(offset, true) !== CENTRAL_HEADER) {
+    if (offset + 46 > size || view.getUint32(offset, true) !== CENTRAL_HEADER) {
       return invalidZip();
     }
     const flags = view.getUint16(offset + 8, true);
@@ -128,8 +183,9 @@ function readDirectory(data: Uint8Array, view: DataView): ZipDirectory {
     const extraStart = nameStart + length;
     const extraEnd = extraStart + view.getUint16(offset + 30, true);
     const next = extraEnd + view.getUint16(offset + 32, true);
-    if (!length || next > end || (flags & ~(UTF8_FLAG | DESCRIPTOR_FLAG | 6)) !== 0 ||
-      (method !== STORED && method !== DEFLATE) || view.getUint16(offset + 34, true) !== 0) {
+    if (!length || next > size || (flags & ~(UTF8_FLAG | DESCRIPTOR_FLAG | 6)) !== 0 ||
+      (method !== STORED && method !== DEFLATE) || view.getUint16(offset + 34, true) !== 0 ||
+      ((view.getUint32(offset + 38, true) >>> 16) & 0xf000) === 0xa000) {
       return invalidZip();
     }
     validateExtra(view, extraStart, extraEnd);
@@ -148,63 +204,76 @@ function readDirectory(data: Uint8Array, view: DataView): ZipDirectory {
       size: view.getUint32(offset + 24, true),
       offset: view.getUint32(offset + 42, true),
     };
-    if (names.has(name) || entry.offset + 30 > start ||
+    const identity = name.endsWith('/') ? name.slice(0, -1) : name;
+    if (names.has(identity) || entry.offset + 30 > start ||
       (method === STORED && entry.compressedSize !== entry.size) || (name.endsWith('/') && entry.size !== 0)) {
       return invalidZip();
     }
-    names.add(name);
+    if (entry.size > MAX_BACKUP_ENTRY_BYTES || entry.compressedSize > MAX_BACKUP_ENTRY_BYTES) {
+      return fileBackupTooLarge();
+    }
+    names.add(identity);
     entries.push(entry);
     total += entry.size;
-    if (total > MAX_BACKUP_BYTES) {
-      return tooLarge();
+    if (total > limit) {
+      return limit === MAX_BACKUP_BYTES ? tooLarge() : fileBackupTooLarge();
     }
     offset = next;
   }
-  if (offset !== end) {
+  if (offset !== size) {
     return invalidZip();
   }
   entries.sort((a: DirectoryEntry, b: DirectoryEntry): number => a.offset - b.offset);
   return { entries: entries, offset: start };
 }
 
-function verifyDescriptor(view: DataView, entry: DirectoryEntry, dataEnd: number, boundary: number): void {
+async function verifyDescriptor(input: NativeBackupZipInput, entry: DirectoryEntry, dataEnd: number,
+  boundary: number): Promise<void> {
   if (dataEnd + 12 > boundary) {
     invalidZip();
   }
-  const hasSignature = view.getUint32(dataEnd, true) === DESCRIPTOR_HEADER;
-  const first = hasSignature ? dataEnd + 4 : dataEnd;
-  if (first + 12 > boundary || view.getUint32(first, true) !== entry.crc ||
+  const view = viewOf(await checkedRead(input, dataEnd, Math.min(16, boundary - dataEnd)));
+  const hasSignature = view.getUint32(0, true) === DESCRIPTOR_HEADER;
+  const first = hasSignature ? 4 : 0;
+  if (first + 12 > view.byteLength || view.getUint32(first, true) !== entry.crc ||
     view.getUint32(first + 4, true) !== entry.compressedSize || view.getUint32(first + 8, true) !== entry.size) {
     invalidZip();
   }
 }
 
-function localData(data: Uint8Array, view: DataView, entry: DirectoryEntry, boundary: number): Uint8Array {
-  const header = entry.offset;
-  const nameStart = header + 30;
-  const extraStart = nameStart + view.getUint16(header + 26, true);
-  const start = extraStart + view.getUint16(header + 28, true);
-  const end = start + entry.compressedSize;
-  if (end > boundary || view.getUint32(header, true) !== LOCAL_HEADER ||
-    view.getUint16(header + 6, true) !== entry.flags || view.getUint16(header + 8, true) !== entry.method ||
-    extraStart - nameStart !== entry.nameBytes.length ||
-    entry.nameBytes.some((byte: number, index: number): boolean => byte !== data[nameStart + index])) {
+async function localData(input: NativeBackupZipInput, entry: DirectoryEntry, boundary: number): Promise<number> {
+  if (entry.offset + 30 > boundary) {
     return invalidZip();
   }
-  validateExtra(view, extraStart, start);
+  const view = viewOf(await checkedRead(input, entry.offset, 30));
+  const nameStart = entry.offset + 30;
+  const nameLength = view.getUint16(26, true);
+  const extraLength = view.getUint16(28, true);
+  const start = nameStart + nameLength + extraLength;
+  const end = start + entry.compressedSize;
+  if (end > boundary || view.getUint32(0, true) !== LOCAL_HEADER ||
+    view.getUint16(6, true) !== entry.flags || view.getUint16(8, true) !== entry.method ||
+    nameLength !== entry.nameBytes.length) {
+    return invalidZip();
+  }
+  const metadata = await checkedRead(input, nameStart, nameLength + extraLength);
+  if (entry.nameBytes.some((byte: number, index: number): boolean => byte !== metadata[index])) {
+    return invalidZip();
+  }
+  validateExtra(viewOf(metadata), nameLength, metadata.length);
   const descriptor = (entry.flags & DESCRIPTOR_FLAG) !== 0;
-  const crc = view.getUint32(header + 14, true);
-  const compressed = view.getUint32(header + 18, true);
-  const size = view.getUint32(header + 22, true);
+  const crc = view.getUint32(14, true);
+  const compressed = view.getUint32(18, true);
+  const size = view.getUint32(22, true);
   if ((crc !== entry.crc && (!descriptor || crc !== 0)) ||
     (compressed !== entry.compressedSize && (!descriptor || compressed !== 0)) ||
     (size !== entry.size && (!descriptor || size !== 0))) {
     return invalidZip();
   }
   if (descriptor) {
-    verifyDescriptor(view, entry, end, boundary);
+    await verifyDescriptor(input, entry, end, boundary);
   }
-  return data.subarray(start, end);
+  return start;
 }
 
 async function inflateRaw(compressed: Uint8Array, size: number): Promise<Uint8Array> {
@@ -212,7 +281,8 @@ async function inflateRaw(compressed: Uint8Array, size: number): Promise<Uint8Ar
   const output = new Uint8Array(size);
   let written = 0;
   const stream: zlib.ZStream = {
-    nextIn: compressed.slice().buffer as ArrayBuffer,
+    nextIn: compressed.byteOffset === 0 && compressed.byteLength === compressed.buffer.byteLength ?
+      compressed.buffer as ArrayBuffer : compressed.slice().buffer as ArrayBuffer,
     availableIn: compressed.byteLength,
   };
   const initialized = await zip.inflateBackInit({}, 15, new ArrayBuffer(32 * 1024));
@@ -243,22 +313,175 @@ export async function readBackupZip(data: Uint8Array): Promise<NativeBackupZipEn
   if (data.length > MAX_BACKUP_BYTES) {
     return tooLarge();
   }
-  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-  const directory = readDirectory(data, view);
   const result: NativeBackupZipEntry[] = [];
+  await readBackupZipEntries(memoryBackupInput(data), async (entry: NativeBackupZipStreamEntry): Promise<void> => {
+    result.push({ name: entry.name, data: await readBackupZipEntry(entry) });
+  }, MAX_BACKUP_BYTES);
+  return result;
+}
+
+export async function readBackupZipEntry(entry: NativeBackupZipStreamEntry): Promise<Uint8Array> {
+  let data: Uint8Array | undefined;
+  let offset = 0;
+  await entry.consume(async (chunk: Uint8Array): Promise<void> => {
+    if (offset === 0 && chunk.length === entry.size) {
+      data = chunk;
+    } else {
+      data = data ?? new Uint8Array(entry.size);
+      data.set(chunk, offset);
+    }
+    offset += chunk.length;
+  });
+  return data ?? new Uint8Array(0);
+}
+
+export async function readBackupZipEntries(input: NativeBackupZipInput,
+  visit: (entry: NativeBackupZipStreamEntry) => Promise<void>, limit: number = MAX_FILE_BACKUP_BYTES): Promise<void> {
+  if (!Number.isSafeInteger(input.size) || input.size < 22 || input.size > limit) {
+    return input.size > limit ? fileBackupTooLarge() : invalidZip();
+  }
+  const directory = await readDirectory(input, limit);
   for (let i = 0; i < directory.entries.length; i++) {
     const entry = directory.entries[i];
     const boundary = directory.entries[i + 1]?.offset ?? directory.offset;
-    const compressed = localData(data, view, entry, boundary);
-    const content = entry.method === STORED ? compressed : await inflateRaw(compressed, entry.size);
-    if (content.length !== entry.size || crc32(content) !== entry.crc) {
-      return invalidZip();
-    }
+    const offset = await localData(input, entry, boundary);
+    let consumed = false;
+    const consume = async (write: (chunk: Uint8Array) => Promise<void>): Promise<void> => {
+      if (consumed) {
+        return invalidZip();
+      }
+      let crc = 0xffffffff;
+      if (entry.method === STORED) {
+        for (let cursor = 0; cursor < entry.size; cursor += CHUNK_BYTES) {
+          const chunk = await checkedRead(input, offset + cursor, Math.min(CHUNK_BYTES, entry.size - cursor));
+          crc = accumulateCrc(crc, chunk);
+          await write(chunk);
+        }
+      } else {
+        const compressed = await checkedRead(input, offset, entry.compressedSize);
+        const data = await inflateRaw(compressed, entry.size);
+        crc = accumulateCrc(crc, data);
+        await write(data);
+      }
+      if (completeCrc(crc) !== entry.crc) {
+        return invalidZip();
+      }
+      consumed = true;
+    };
     if (!entry.name.endsWith('/')) {
-      result.push({ name: entry.name, data: content });
+      await visit({ name: entry.name, size: entry.size, crc: entry.crc, consume: consume });
+    }
+    if (!consumed) {
+      await consume(async (): Promise<void> => {});
     }
   }
-  return result;
+}
+
+interface WrittenEntry {
+  name: Uint8Array;
+  size: number;
+  crc: number;
+  offset: number;
+}
+
+function storedLocalHeader(name: Uint8Array): Uint8Array {
+  const bytes = new Uint8Array(30 + name.length);
+  const view = viewOf(bytes);
+  view.setUint32(0, LOCAL_HEADER, true);
+  view.setUint16(4, 20, true);
+  view.setUint16(6, UTF8_FLAG | DESCRIPTOR_FLAG, true);
+  view.setUint16(12, 0x21, true);
+  view.setUint16(26, name.length, true);
+  bytes.set(name, 30);
+  return bytes;
+}
+
+function storedDescriptor(size: number, crc: number): Uint8Array {
+  const bytes = new Uint8Array(16);
+  const view = viewOf(bytes);
+  view.setUint32(0, DESCRIPTOR_HEADER, true);
+  view.setUint32(4, crc, true);
+  view.setUint32(8, size, true);
+  view.setUint32(12, size, true);
+  return bytes;
+}
+
+function storedCentralHeader(entry: WrittenEntry): Uint8Array {
+  const bytes = new Uint8Array(46 + entry.name.length);
+  const view = viewOf(bytes);
+  view.setUint32(0, CENTRAL_HEADER, true);
+  view.setUint16(4, 20, true);
+  view.setUint16(6, 20, true);
+  view.setUint16(8, UTF8_FLAG | DESCRIPTOR_FLAG, true);
+  view.setUint16(14, 0x21, true);
+  view.setUint32(16, entry.crc, true);
+  view.setUint32(20, entry.size, true);
+  view.setUint32(24, entry.size, true);
+  view.setUint16(28, entry.name.length, true);
+  view.setUint32(42, entry.offset, true);
+  bytes.set(entry.name, 46);
+  return bytes;
+}
+
+export class NativeBackupZipWriter {
+  private readonly entries: WrittenEntry[] = [];
+  private readonly names = new Set<string>();
+  private readonly write: (chunk: Uint8Array) => Promise<void>;
+  private offset: number = 0;
+  private directorySize: number = 0;
+  private ended: boolean = false;
+
+  constructor(write: (chunk: Uint8Array) => Promise<void>) {
+    this.write = write;
+  }
+
+  async add(path: string, input: NativeBackupZipInput): Promise<number> {
+    const name = backupPath(path);
+    const encoded = backupUtf8(name);
+    if (this.ended || this.names.has(name) || name.endsWith('/') || encoded.length > 0xffff ||
+      backupText(encoded) !== name || !Number.isSafeInteger(input.size) || input.size < 0) {
+      return invalidZip();
+    }
+    const directorySize = this.directorySize + 46 + encoded.length;
+    const next = this.offset + 46 + encoded.length + input.size;
+    if (input.size > MAX_BACKUP_ENTRY_BYTES || directorySize > MAX_DIRECTORY_BYTES ||
+      next + directorySize + 22 > MAX_FILE_BACKUP_BYTES || this.entries.length >= 0xfffe) {
+      return fileBackupTooLarge();
+    }
+    await this.write(storedLocalHeader(encoded));
+    let crc = 0xffffffff;
+    for (let cursor = 0; cursor < input.size; cursor += CHUNK_BYTES) {
+      const size = Math.min(CHUNK_BYTES, input.size - cursor);
+      const chunk = await checkedRead(input, cursor, size);
+      crc = accumulateCrc(crc, chunk);
+      await this.write(chunk);
+    }
+    const checksum = completeCrc(crc);
+    await this.write(storedDescriptor(input.size, checksum));
+    this.entries.push({ name: encoded, size: input.size, crc: checksum, offset: this.offset });
+    this.offset = next;
+    this.directorySize = directorySize;
+    this.names.add(name);
+    return checksum;
+  }
+
+  async finish(): Promise<void> {
+    if (this.ended) {
+      return invalidZip();
+    }
+    this.ended = true;
+    for (const entry of this.entries) {
+      await this.write(storedCentralHeader(entry));
+    }
+    const bytes = new Uint8Array(22);
+    const view = viewOf(bytes);
+    view.setUint32(0, END_HEADER, true);
+    view.setUint16(8, this.entries.length, true);
+    view.setUint16(10, this.entries.length, true);
+    view.setUint32(12, this.directorySize, true);
+    view.setUint32(16, this.offset, true);
+    await this.write(bytes);
+  }
 }
 
 export function writeBackupZip(entries: NativeBackupZipEntry[]): Uint8Array {

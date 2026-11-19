@@ -710,7 +710,7 @@ struct Index {
     this.migrationStatusText = '正在导入并合并历史对话，请稍候…';
     const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
     try {
-      const sessions = await this.backup.importFromUri(path);
+      const sessions = await this.backup.importFromUri(path, context);
       const history = await this.conversationStorage.loadConversations(context);
       const merged = mergeChatBackup(history, sessions);
       await this.conversationStorage.saveConversations(context, merged.history);

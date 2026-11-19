@@ -1,22 +1,27 @@
 import { common } from '@kit.AbilityKit';
 import { url, util } from '@kit.ArkTS';
-import { fileIo, picker } from '@kit.CoreFileKit';
+import { fileIo, fileUri, picker } from '@kit.CoreFileKit';
 import {
   attachmentMime, attachmentPurpose, attachmentRasterMime, NativeAttachment, NativeChatAttachments,
 } from './NativeChatAttachments';
 import { NativeChatCitation, NativeChatSource, safeNativeSourceUrl } from './NativeChatSources';
 import { NativeConversation, NativeConversationMessage, NativeConversationState, visibleMessages } from './NativeConversation';
 import {
-  backupPath, backupText, backupUtf8, MAX_BACKUP_BYTES, NativeBackupZipEntry, readBackupZip, writeBackupZip,
+  backupPath, backupText, backupUtf8, backupZipChecksum, MAX_BACKUP_BYTES, MAX_BACKUP_ENTRY_BYTES, memoryBackupInput,
+  NativeBackupZipEntry, NativeBackupZipInput, NativeBackupZipStreamEntry, NativeBackupZipWriter, readBackupZipEntries,
+  readBackupZipEntry, writeBackupZip,
 } from './NativeBackupZip';
+import {
+  backupImagePath, copyBackupFile, removeBackupImage, stageBackupImage, withBackupInput, writeBackupFile,
+} from './NativeBackupFiles';
 
 const MANIFEST = 'manifest.json';
 const SESSION_INDEX = 'chat_session_index.json';
 const USER = 'user.json';
 const VERSION = 3;
-const IO_CHUNK = 256 * 1024;
-const MAX_IMAGE_BYTES = 16 * 1024 * 1024;
+const MAX_INLINE_IMAGE_BYTES = 16 * 1024 * 1024;
 const MAX_PREVIEW_BYTES = 1024 * 1024;
+const MAX_HYDRATE_BYTES = 16 * 1024 * 1024;
 const MAX_PORTABLE_SOURCES = 256;
 const MAX_PORTABLE_CITATIONS = 4_096;
 const base64 = new util.Base64Helper();
@@ -99,7 +104,16 @@ interface ArchiveIndexEntry extends ArchiveSummary {
 
 interface ArchiveImage {
   path: string;
-  bytes: string;
+  bytes?: string;
+  blobId?: string;
+  size?: number;
+  crc?: number;
+  mimeType?: string;
+}
+
+interface BackupImageSource {
+  retained?: ArchiveImage;
+  live?: NativeAttachment;
 }
 
 interface ArchiveOrigin {
@@ -107,10 +121,10 @@ interface ArchiveOrigin {
   images: ArchiveImage[];
 }
 
-interface ArchiveRaster {
-  encoded: string;
-  data: Uint8Array;
-  mimeType: string;
+interface PreparedSession {
+  session: NativeConversation;
+  origin: ArchiveOrigin;
+  imagePaths: string[];
 }
 
 export interface NativeBackupMergeResult {
@@ -382,8 +396,8 @@ function original(session: NativeConversation): ArchiveOrigin | undefined {
   return session.archiveJson ? JSON.parse(session.archiveJson) as ArchiveOrigin : undefined;
 }
 
-function archiveRaster(session: NativeConversation, item: NativeAttachment): ArchiveRaster | undefined {
-  if (!item.isImage || item.local || item.size > MAX_PREVIEW_BYTES || !session.archiveJson) {
+function retainedImage(session: NativeConversation, item: NativeAttachment): ArchiveImage | undefined {
+  if (!item.isImage || item.local || !session.archiveJson) {
     return undefined;
   }
   try {
@@ -402,14 +416,9 @@ function archiveRaster(session: NativeConversation, item: NativeAttachment): Arc
             continue;
           }
           const path = backupPath(file.export_path);
-          const entry = archive.images.find((image: ArchiveImage): boolean => image.path === path);
-          if (!entry || entry.bytes.length > Math.ceil(MAX_PREVIEW_BYTES / 3) * 4) {
-            continue;
-          }
-          const bytes = base64.decodeSync(entry.bytes);
-          const mime = attachmentRasterMime(bytes);
-          if (mime && bytes.length <= MAX_PREVIEW_BYTES) {
-            return { encoded: entry.bytes, data: bytes, mimeType: mime };
+          const found = archive.images.find((image: ArchiveImage): boolean => image.path === path);
+          if (found) {
+            return found;
           }
         }
       }
@@ -420,15 +429,50 @@ function archiveRaster(session: NativeConversation, item: NativeAttachment): Arc
   return undefined;
 }
 
-export function importedAttachmentPreview(session: NativeConversation, item: NativeAttachment): string {
-  const raster = archiveRaster(session, item);
-  return raster ? 'data:' + raster.mimeType + ';base64,' + raster.encoded : '';
+export function importedAttachmentPreview(session: NativeConversation, item: NativeAttachment,
+  context?: common.UIAbilityContext): string {
+  const image = retainedImage(session, item);
+  if (!image) {
+    return '';
+  }
+  try {
+    if (context && image.blobId && image.size !== undefined && image.size <= MAX_HYDRATE_BYTES &&
+      ['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(image.mimeType ?? '')) {
+      return fileUri.getUriFromPath(backupImagePath(context, image.blobId));
+    }
+    if (image.bytes && image.bytes.length <= Math.ceil(MAX_PREVIEW_BYTES / 3) * 4) {
+      const bytes = base64.decodeSync(image.bytes);
+      const mime = attachmentRasterMime(bytes);
+      if (mime && bytes.length <= MAX_PREVIEW_BYTES) {
+        return 'data:' + mime + ';base64,' + image.bytes;
+      }
+    }
+  } catch {
+    return '';
+  }
+  return '';
 }
 
 export async function hydrateImportedAttachment(context: common.UIAbilityContext, session: NativeConversation,
   item: NativeAttachment): Promise<NativeAttachment | null> {
-  const raster = archiveRaster(session, item);
-  return raster ? new NativeChatAttachments().storeOriginal(context, item, raster.data, raster.mimeType) : null;
+  const image = retainedImage(session, item);
+  if (!image || (image.size ?? item.size) > MAX_HYDRATE_BYTES) {
+    return null;
+  }
+  const bytes = image.blobId ? await withBackupInput<Uint8Array>(backupImagePath(context, image.blobId),
+    (input: NativeBackupZipInput): Promise<Uint8Array> => {
+      if (input.size !== image.size || input.size > MAX_HYDRATE_BYTES) {
+        return Promise.reject(new Error('图片原件大小无效。'));
+      }
+      return input.read(0, input.size);
+    }) : (image.bytes && image.bytes.length <= Math.ceil(MAX_HYDRATE_BYTES / 3) * 4 ?
+    base64.decodeSync(image.bytes) : new Uint8Array(0));
+  if (image.crc !== undefined && backupZipChecksum(bytes) !== image.crc) {
+    throw new Error('图片原件校验失败。');
+  }
+  const mime = attachmentRasterMime(bytes);
+  return mime && bytes.length <= MAX_HYDRATE_BYTES ?
+    new NativeChatAttachments().storeOriginal(context, item, bytes, mime) : null;
 }
 
 function nativeFiles(message: ArchiveMessage): NativeAttachment[] | undefined {
@@ -454,7 +498,7 @@ function nativeFiles(message: ArchiveMessage): NativeAttachment[] | undefined {
   return result.length > 0 ? result : undefined;
 }
 
-function nativeSession(source: ArchiveSession, entries: Map<string, Uint8Array>): NativeConversation {
+function nativeSession(source: ArchiveSession): PreparedSession {
   validateSummary(source);
   if (!Array.isArray(source.messages) || !count(source.current_message_id)) {
     return invalidArchive();
@@ -513,87 +557,115 @@ function nativeSession(source: ArchiveSession, entries: Map<string, Uint8Array>)
     }
     root = current.id;
   }
-  const images: ArchiveImage[] = [];
-  for (const path of imagePaths.keys()) {
-    const bytes = entries.get(path);
-    if (bytes) {
-      images.push({ path: path, bytes: base64.encodeToStringSync(bytes) });
-      entries.delete(path);
-    }
-  }
-  const retained: ArchiveOrigin = { session: source, images: images };
-  return {
+  const session: NativeConversation = {
     id: source.id,
     title: source.title ?? '',
     createdAt: timestamp(source.inserted_at),
     updatedAt: timestamp(source.updated_at),
     rootMessageId: root,
     messages: messages,
-    archiveJson: JSON.stringify(retained),
+  };
+  return {
+    session: session, origin: { session: source, images: [] }, imagePaths: Array.from(imagePaths.keys()),
   };
 }
 
 export async function decodeChatBackup(bytes: Uint8Array): Promise<NativeConversation[]> {
-  const entries = await readBackupZip(bytes);
-  if (entries[0]?.name !== MANIFEST) {
-    throw new Error('无法识别历史备份。请选择 DeepSeek 或 Nuwa 的 ZIP 备份。');
-  }
-  const manifest = JSON.parse(backupText(entries[0].data)) as ArchiveManifest;
-  if (manifest?.export_format_version !== VERSION) {
-    throw new Error('暂不支持此备份版本，请选择第 3 版历史备份。');
-  }
-  const sessions: ArchiveSession[] = [];
+  return readChatBackup(memoryBackupInput(bytes), undefined, MAX_BACKUP_BYTES);
+}
+
+async function readChatBackup(input: NativeBackupZipInput, context?: common.UIAbilityContext,
+  limit?: number): Promise<NativeConversation[]> {
+  const sessions: PreparedSession[] = [];
   const ids = new Set<string>();
-  const images = new Map<string, Uint8Array>();
-  let imageBytes = 0;
+  const wantedImages = new Map<string, ArchiveImage[]>();
+  const staged: string[] = [];
+  let inlineBytes = 0;
+  let manifest = false;
   let index: ArchiveIndexEntry[] | undefined;
-  for (let position = 1; position < entries.length; position++) {
-    const entry = entries[position];
-    const path = entry.name;
-    if ((path === USER && !sessions.length && !index) || path === 'yejian_meta.json' || path.startsWith('yejian/')) {
-      // The v3 archive can contain account or third-party app metadata.
-      continue;
-    }
-    if (path === SESSION_INDEX) {
-      index = JSON.parse(backupText(entry.data)) as ArchiveIndexEntry[];
-      if (!Array.isArray(index)) {
+  try {
+    await readBackupZipEntries(input, async (entry: NativeBackupZipStreamEntry): Promise<void> => {
+      const path = entry.name;
+      if (!manifest) {
+        if (path !== MANIFEST) {
+          throw new Error('无法识别历史备份。请选择 DeepSeek 或 Nuwa 的 ZIP 备份。');
+        }
+        const header = JSON.parse(backupText(await readBackupZipEntry(entry))) as ArchiveManifest;
+        if (header?.export_format_version !== VERSION) {
+          throw new Error('暂不支持此备份版本，请选择第 3 版历史备份。');
+        }
+        manifest = true;
+        return;
+      }
+      if ((path === USER && !sessions.length && !index) || path === 'yejian_meta.json' || path.startsWith('yejian/')) {
+        return;
+      }
+      if (path === SESSION_INDEX) {
+        index = JSON.parse(backupText(await readBackupZipEntry(entry))) as ArchiveIndexEntry[];
+        if (!Array.isArray(index)) {
+          invalidArchive();
+        }
+        return;
+      }
+      if (/^chat_sessions\/[^/]+\.json$/.test(path) && !index) {
+        const original = JSON.parse(backupText(await readBackupZipEntry(entry))) as ArchiveSession;
+        if (!original || !validId(original.id) || sessionPath(original.id) !== path || ids.has(original.id)) {
+          return invalidArchive();
+        }
+        const prepared = nativeSession(original);
+        sessions.push(prepared);
+        ids.add(original.id);
+        for (const imagePath of prepared.imagePaths) {
+          wantedImages.set(imagePath, prepared.origin.images);
+        }
+        return;
+      }
+      const imageOwner = /^chat_sessions\/([^/]+)_files\/[^/]/.exec(path)?.[1];
+      if (!imageOwner || (index ? !ids.has(imageOwner) : sessions[sessions.length - 1]?.session.id !== imageOwner)) {
         return invalidArchive();
       }
-      continue;
-    }
-    if (/^chat_sessions\/[^/]+\.json$/.test(path) && !index) {
-      const session = JSON.parse(backupText(entry.data)) as ArchiveSession;
-      if (!session || !validId(session.id) || sessionPath(session.id) !== path || ids.has(session.id)) {
-        return invalidArchive();
+      const images = wantedImages.get(path);
+      if (!images) {
+        // Android accepts files in the session directory even when no fragment references them.
+        return;
       }
-      sessions.push(session);
-      ids.add(session.id);
-      continue;
-    }
-    if (/^chat_sessions\/[^/]+_files\/[^/]/.test(path)) {
-      imageBytes += entry.data.length;
-      if (imageBytes > MAX_IMAGE_BYTES) {
-        throw new Error('图片原件超过 16 MB，无法导入此历史备份。');
+      if (context) {
+        const id = await stageBackupImage(context, entry);
+        staged.push(id);
+        const mimeType = await withBackupInput<string>(backupImagePath(context, id),
+          async (file: NativeBackupZipInput): Promise<string> =>
+            attachmentRasterMime(await file.read(0, Math.min(file.size, 64 * 1024))));
+        images.push({ path: path, blobId: id, size: entry.size, crc: entry.crc, mimeType: mimeType });
+      } else {
+        inlineBytes += entry.size;
+        if (inlineBytes > MAX_INLINE_IMAGE_BYTES) {
+          throw new Error('图片原件超过 16 MB，请使用应用中的文件导入。');
+        }
+        const bytes = await readBackupZipEntry(entry);
+        images.push({ path: path, bytes: base64.encodeToStringSync(bytes), size: entry.size, crc: entry.crc });
       }
-      images.set(path, entry.data);
-      continue;
-    }
-    return invalidArchive();
-  }
-  if (!index || index.length !== sessions.length) {
-    return invalidArchive();
-  }
-  for (const summary of index) {
-    validateSummary(summary);
-    if (!count(summary.message_count) || !ids.delete(summary.id)) {
+    }, limit);
+    if (!manifest || !index || index.length !== sessions.length) {
       return invalidArchive();
     }
+    for (const summary of index) {
+      validateSummary(summary);
+      if (!count(summary.message_count) || !ids.delete(summary.id)) {
+        return invalidArchive();
+      }
+    }
+    return sessions.map((prepared: PreparedSession): NativeConversation => {
+      prepared.session.archiveJson = JSON.stringify(prepared.origin);
+      return prepared.session;
+    });
+  } catch (error) {
+    if (context) {
+      for (const id of staged) {
+        await removeBackupImage(context, id);
+      }
+    }
+    throw error as Error;
   }
-  const imported = sessions.map((session: ArchiveSession): NativeConversation => nativeSession(session, images));
-  if (images.size > 0) {
-    return invalidImages();
-  }
-  return imported;
 }
 
 function updateText(message: ArchiveMessage, type: string, value: string): void {
@@ -643,7 +715,7 @@ function safeFileName(name: string): string {
 }
 
 function outgoingFile(item: NativeAttachment, sessionId: string, originalFiles: Map<string, ArchiveFile>,
-  sourceId: string, images: Map<string, Uint8Array>, liveImages: Map<string, Uint8Array>): ArchiveFile {
+  sourceId: string, images: Map<string, BackupImageSource>): ArchiveFile {
   const existing = originalFiles.get(item.archiveId ?? item.id);
   if (existing) {
     const retained = JSON.parse(JSON.stringify(existing)) as ArchiveFile;
@@ -654,12 +726,8 @@ function outgoingFile(item: NativeAttachment, sessionId: string, originalFiles: 
   }
   let path: string | null = null;
   if (item.isImage && item.local) {
-    const bytes = liveImages.get(item.id);
-    if (!bytes || bytes.length !== item.size) {
-      throw new Error('本地图片原件未能读取：' + item.name);
-    }
     path = backupPath(filesPrefix(sessionId) + safeFileName(item.id) + '_' + safeFileName(item.name));
-    images.set(path, bytes);
+    images.set(path, { live: item });
   }
   return {
     id: item.id,
@@ -674,8 +742,7 @@ function outgoingFile(item: NativeAttachment, sessionId: string, originalFiles: 
   };
 }
 
-function archiveSession(session: NativeConversation, images: Map<string, Uint8Array>,
-  liveImages: Map<string, Uint8Array>): ArchiveSession {
+function archiveSession(session: NativeConversation, images: Map<string, BackupImageSource>): ArchiveSession {
   if (!validId(session.id)) {
     return invalidArchive();
   }
@@ -696,7 +763,7 @@ function archiveSession(session: NativeConversation, images: Map<string, Uint8Ar
     }
     for (const image of previous.images) {
       const path = rewriteImagePath(image.path, sourceId, session.id);
-      images.set(path, base64.decodeSync(image.bytes));
+      images.set(path, { retained: image });
     }
   }
   const ids = new Map<string, number>();
@@ -761,7 +828,7 @@ function archiveSession(session: NativeConversation, images: Map<string, Uint8Ar
     }
     if (!preexisting && item.files?.length) {
       const files = item.files.map((file: NativeAttachment): ArchiveFile =>
-        outgoingFile(file, session.id, originalFiles, sourceId, images, liveImages));
+        outgoingFile(file, session.id, originalFiles, sourceId, images));
       message.fragments.push({ type: 'FILE', files: files });
     }
     ids.set(item.id, index + 1);
@@ -787,29 +854,35 @@ function jsonEntry(name: string, value: Object): NativeBackupZipEntry {
   return { name: name, data: backupUtf8(JSON.stringify(value)) };
 }
 
+function summaryEntry(file: ArchiveSession): ArchiveIndexEntry {
+  return {
+    id: file.id, title: file.title, pinned: file.pinned, message_count: file.messages.length,
+    inserted_at: file.inserted_at, updated_at: file.updated_at,
+  };
+}
+
 export function encodeChatBackup(sessions: NativeConversation[],
   liveImages: Map<string, Uint8Array> = new Map<string, Uint8Array>()): Uint8Array {
   const manifest: ArchiveManifest = { export_format_version: VERSION };
   const entries = [jsonEntry(MANIFEST, manifest)];
-  const images = new Map<string, Uint8Array>();
+  const images = new Map<string, BackupImageSource>();
   const index: ArchiveIndexEntry[] = [];
   for (const session of sessions) {
-    const file = archiveSession(session, images, liveImages);
+    const file = archiveSession(session, images);
     entries.push(jsonEntry(sessionPath(file.id), file));
-    index.push({
-      id: file.id,
-      title: file.title,
-      pinned: file.pinned,
-      message_count: file.messages.length,
-      inserted_at: file.inserted_at,
-      updated_at: file.updated_at,
-    });
+    index.push(summaryEntry(file));
   }
   entries.push(jsonEntry(SESSION_INDEX, index));
   let imageBytes = 0;
-  images.forEach((data: Uint8Array, name: string): void => {
+  images.forEach((image: BackupImageSource, name: string): void => {
+    const data = image.retained?.bytes !== undefined ? base64.decodeSync(image.retained.bytes) :
+      liveImages.get(image.retained?.blobId ?? image.live?.id ?? '');
+    if (!data || data.length !== (image.live?.size ?? image.retained?.size ?? data.length) ||
+      (image.retained?.crc !== undefined && backupZipChecksum(data) !== image.retained.crc)) {
+      throw new Error('本地图片原件未能读取：' + (image.live?.name ?? name));
+    }
     imageBytes += data.length;
-    if (imageBytes > MAX_IMAGE_BYTES) {
+    if (imageBytes > MAX_INLINE_IMAGE_BYTES) {
       throw new Error('图片原件超过 16 MB，无法导出此历史备份。');
     }
     entries.push({ name: name, data: data });
@@ -895,13 +968,43 @@ function copyMerged(session: NativeConversation, id: string, title: string, pinn
   };
 }
 
+function retainedImageKey(image: ArchiveImage): string {
+  if (image.size !== undefined && image.crc !== undefined) {
+    return image.size.toString() + ':' + image.crc.toString();
+  }
+  if (image.bytes !== undefined) {
+    const data = base64.decodeSync(image.bytes);
+    return data.length.toString() + ':' + backupZipChecksum(data).toString();
+  }
+  return '';
+}
+
+function sameArchiveSource(first: ArchiveOrigin, second: ArchiveOrigin): boolean {
+  if (first.images.length !== second.images.length || JSON.stringify(first.session) !== JSON.stringify(second.session)) {
+    return false;
+  }
+  const imageKeys = new Map<string, string>();
+  first.images.forEach((image: ArchiveImage): void => { imageKeys.set(image.path, retainedImageKey(image)); });
+  return second.images.every((image: ArchiveImage): boolean => imageKeys.get(image.path) === retainedImageKey(image));
+}
+
 export function mergeChatBackup(history: NativeConversationState, imported: NativeConversation[]): NativeBackupMergeResult {
   const sessions = history.sessions.slice();
+  const priorArchives = new Map<string, ArchiveOrigin[]>();
+  for (const stored of sessions) {
+    const archive = original(stored);
+    if (archive) {
+      const sameId = priorArchives.get(archive.session.id) ?? [];
+      sameId.push(archive);
+      priorArchives.set(archive.session.id, sameId);
+    }
+  }
   let total = 0;
   for (const incoming of imported) {
     // A previously diverged import retains the source archive ID and payload.
-    if (incoming.archiveJson && sessions.some((stored: NativeConversation): boolean =>
-      stored.archiveJson === incoming.archiveJson)) {
+    const source = original(incoming);
+    const existingSources = source ? priorArchives.get(source.session.id) : undefined;
+    if (source && existingSources?.some((stored: ArchiveOrigin): boolean => sameArchiveSource(stored, source))) {
       continue;
     }
     const index = sessions.findIndex((stored: NativeConversation): boolean => stored.id === incoming.id);
@@ -927,53 +1030,13 @@ export function mergeChatBackup(history: NativeConversationState, imported: Nati
   return { history: { sessions: sessions, activeId: history.activeId }, importedCount: total };
 }
 
-async function readFile(uri: string): Promise<Uint8Array> {
-  const file = await fileIo.open(uri, fileIo.OpenMode.READ_ONLY);
-  try {
-    const length = (await fileIo.stat(file.fd)).size;
-    if (!length || length > MAX_BACKUP_BYTES) {
-      throw new Error('历史备份不能为空或超过 64 MB。');
-    }
-    const bytes = new Uint8Array(length);
-    let offset = 0;
-    while (offset < length) {
-      const chunk = new ArrayBuffer(Math.min(IO_CHUNK, length - offset));
-      const read = await fileIo.read(file.fd, chunk);
-      if (read <= 0) {
-        throw new Error('历史备份读取未完成。');
-      }
-      bytes.set(new Uint8Array(chunk, 0, read), offset);
-      offset += read;
-    }
-    return bytes;
-  } finally {
-    await fileIo.close(file);
-  }
-}
-
-async function writeFile(uri: string, bytes: Uint8Array): Promise<void> {
-  const file = await fileIo.open(uri, fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.TRUNC);
-  try {
-    let offset = 0;
-    while (offset < bytes.length) {
-      const chunk = bytes.slice(offset, offset + IO_CHUNK).buffer as ArrayBuffer;
-      const written = await fileIo.write(file.fd, chunk);
-      if (written <= 0) {
-        throw new Error('历史备份写入未完成。');
-      }
-      offset += written;
-    }
-    await fileIo.fsync(file.fd);
-  } finally {
-    await fileIo.close(file);
-  }
-}
-
 export class NativeChatBackup {
   private readonly attachments = new NativeChatAttachments();
 
-  async importFromUri(uri: string): Promise<NativeConversation[]> {
-    return decodeChatBackup(await readFile(uri));
+  async importFromUri(uri: string, context?: common.UIAbilityContext): Promise<NativeConversation[]> {
+    return withBackupInput<NativeConversation[]>(uri,
+      (input: NativeBackupZipInput): Promise<NativeConversation[]> =>
+        readChatBackup(input, context, context ? undefined : MAX_BACKUP_BYTES));
   }
 
   async importFromPicker(context: common.UIAbilityContext): Promise<NativeConversation[] | null> {
@@ -981,41 +1044,82 @@ export class NativeChatBackup {
     options.maxSelectNumber = 1;
     options.fileSuffixFilters = ['历史备份|.zip'];
     const selected = await new picker.DocumentViewPicker(context).select(options);
-    return selected[0] ? await this.importFromUri(selected[0]) : null;
+    return selected[0] ? await this.importFromUri(selected[0], context) : null;
+  }
+
+  private async writeImage(context: common.UIAbilityContext, writer: NativeBackupZipWriter, name: string,
+    image: BackupImageSource): Promise<void> {
+    const retained = image.retained;
+    if (retained?.bytes !== undefined) {
+      if (retained.bytes.length > Math.ceil(MAX_BACKUP_ENTRY_BYTES / 3) * 4) {
+        throw new Error('单个图片原件超过 64 MB。');
+      }
+      const bytes = base64.decodeSync(retained.bytes);
+      const crc = await writer.add(name, memoryBackupInput(bytes));
+      if ((retained.size !== undefined && retained.size !== bytes.length) ||
+        (retained.crc !== undefined && retained.crc !== crc)) {
+        throw new Error('图片原件校验失败。');
+      }
+      return;
+    }
+    const live = image.live;
+    const uri = retained?.blobId ? backupImagePath(context, retained.blobId) :
+      (live ? this.attachments.previewUri(context, live) : '');
+    if (!uri) {
+      throw new Error('本地图片原件未能读取：' + (live?.name ?? name));
+    }
+    await withBackupInput<void>(uri, async (input: NativeBackupZipInput): Promise<void> => {
+      if (input.size !== (retained?.size ?? live?.size)) {
+        throw new Error('图片原件大小无效。');
+      }
+      const crc = await writer.add(name, input);
+      if (retained?.crc !== undefined && retained.crc !== crc) {
+        throw new Error('图片原件校验失败。');
+      }
+    });
+  }
+
+  private async writeArchive(context: common.UIAbilityContext, path: string,
+    sessions: NativeConversation[]): Promise<void> {
+    await writeBackupFile(path, true, async (write: (chunk: Uint8Array) => Promise<void>): Promise<void> => {
+      const writer = new NativeBackupZipWriter(write);
+      const manifest: ArchiveManifest = { export_format_version: VERSION };
+      const images = new Map<string, BackupImageSource>();
+      const index: ArchiveIndexEntry[] = [];
+      await writer.add(MANIFEST, memoryBackupInput(backupUtf8(JSON.stringify(manifest))));
+      for (const session of sessions) {
+        const file = archiveSession(session, images);
+        await writer.add(sessionPath(file.id), memoryBackupInput(backupUtf8(JSON.stringify(file))));
+        index.push(summaryEntry(file));
+      }
+      await writer.add(SESSION_INDEX, memoryBackupInput(backupUtf8(JSON.stringify(index))));
+      for (const name of images.keys()) {
+        const image = images.get(name);
+        if (image) {
+          await this.writeImage(context, writer, name, image);
+        }
+      }
+      await writer.finish();
+    });
   }
 
   async exportToPicker(context: common.UIAbilityContext, sessions: NativeConversation[]): Promise<boolean> {
-    const images = new Map<string, Uint8Array>();
-    let size = 0;
-    for (const session of sessions) {
-      for (const message of session.messages) {
-        for (const file of message.files ?? []) {
-          if (!file.isImage || !file.local || file.archiveId || images.has(file.id)) {
-            continue;
-          }
-          size += file.size;
-          if (size > MAX_IMAGE_BYTES) {
-            throw new Error('图片原件超过 16 MB，无法导出此历史备份。');
-          }
-          const bytes = await this.attachments.readOriginal(context, file);
-          if (!bytes) {
-            throw new Error('本地图片原件未能读取：' + file.name);
-          }
-          images.set(file.id, bytes);
-        }
-      }
-    }
-    const bytes = encodeChatBackup(sessions, images);
     const options = new picker.DocumentSaveOptions();
     const date = new Date();
     const day = date.getFullYear().toString() + '-' + (date.getMonth() + 1).toString().padStart(2, '0') + '-' +
       date.getDate().toString().padStart(2, '0');
     options.newFileNames = ['deepseek_data-' + day + '.zip'];
-    const selected = await new picker.DocumentViewPicker(context).save(options);
-    if (!selected[0]) {
-      return false;
+    const temporary = (context.cacheDir || context.filesDir) + '/nuwa-backup-' + util.generateRandomUUID(true) + '.zip';
+    try {
+      await this.writeArchive(context, temporary, sessions);
+      const selected = await new picker.DocumentViewPicker(context).save(options);
+      if (!selected[0]) {
+        return false;
+      }
+      await copyBackupFile(temporary, selected[0]);
+      return true;
+    } finally {
+      await fileIo.unlink(temporary).catch(() => {});
     }
-    await writeFile(selected[0], bytes);
-    return true;
   }
 }

@@ -20,6 +20,7 @@ export interface NativeConversationMessage extends NativeStoredMessage {
   thinking?: boolean;
   search?: boolean;
   thinkingSignature?: string;
+  latestReminder?: string;
   sources?: NativeChatSource[];
   citations?: NativeChatCitation[];
   files?: NativeAttachment[];
@@ -106,6 +107,7 @@ function copyMessage(message: NativeConversationMessage): NativeConversationMess
     thinking: message.thinking,
     search: message.search,
     thinkingSignature: message.thinkingSignature,
+    latestReminder: message.latestReminder,
     sources: message.sources,
     citations: message.citations,
     files: message.files,
@@ -140,7 +142,7 @@ function conversationTitle(messages: NativeConversationMessage[]): string {
 }
 
 export function appendBranch(session: NativeConversation, parentId: string | null,
-  messages: NativeConversationMessage[], now: number = Date.now()): NativeConversation {
+  messages: NativeConversationMessage[], now: number = Date.now(), deriveTitle: boolean = true): NativeConversation {
   if (messages.length === 0) {
     return session;
   }
@@ -150,7 +152,9 @@ export function appendBranch(session: NativeConversation, parentId: string | nul
   }
   const next = copyConversation(session);
   next.updatedAt = now;
-  next.title = session.title || conversationTitle(messages);
+  if (deriveTitle && !next.title) {
+    next.title = conversationTitle(messages);
+  }
   const firstId = messages[0].id;
   // Select the new path while preserving the previous versions and their descendants.
   if (parentId === null) {
@@ -219,6 +223,7 @@ export function updateConversationMessage(session: NativeConversation, message: 
   updated.thinking = message.thinking;
   updated.search = message.search;
   updated.thinkingSignature = message.thinkingSignature;
+  updated.latestReminder = message.latestReminder;
   updated.sources = message.sources;
   updated.citations = message.citations;
   updated.files = message.files ?? previous.files;

@@ -4,6 +4,7 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { NativeChatSource, NativeChatCitation } from './NativeChatSources';
 import { fileIo } from '@kit.CoreFileKit';
 import { NativeAttachment } from './NativeChatAttachments';
+import { backupImageIds, pruneBackupImages, removeBackupImage } from './NativeBackupFiles';
 import {
   NativeConversation,
   NativeConversationMessage,
@@ -18,12 +19,21 @@ import {
 const TRANSCRIPT_FILE = 'nuwa-native-chat.json';
 const FILE_NOT_FOUND = 13900002;
 const STORAGE_VERSION = 1;
+const SNAPSHOT_CHUNK_CHARS = 64 * 1024;
 
 interface NativeConversationDocument extends NativeConversationState {
   version: number;
 }
 
+interface SessionImageIds {
+  archiveJson: string;
+  ids: string[];
+}
+
 let pendingStorage: Promise<void> = Promise.resolve();
+const cachedSessionImages = new Map<string, Map<string, SessionImageIds>>();
+const committedImages = new Map<string, Set<string>>();
+const pendingImageWrites = new Map<string, Set<Set<string>>>();
 
 function queueStorageOperation<T>(operation: () => Promise<T>): Promise<T> {
   const result = pendingStorage.then<T>(operation);
@@ -83,6 +93,7 @@ function validateConversation(session: NativeConversation): boolean {
       (message.thinking !== undefined && typeof message.thinking !== 'boolean') ||
       (message.search !== undefined && typeof message.search !== 'boolean') ||
       (message.thinkingSignature !== undefined && typeof message.thinkingSignature !== 'string') ||
+      (message.latestReminder !== undefined && typeof message.latestReminder !== 'string') ||
       (message.sources !== undefined && (!Array.isArray(message.sources) || !message.sources.every(validSource))) ||
       (message.citations !== undefined && (!Array.isArray(message.citations) || !message.citations.every(validCitation))) ||
       (message.files !== undefined && (!Array.isArray(message.files) || !message.files.every(validAttachment)))) {
@@ -136,13 +147,23 @@ async function writeSnapshot(path: string, snapshot: string): Promise<void> {
     const file = await fileIo.open(temporaryPath,
       fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
     try {
-      let remaining = new util.TextEncoder().encodeInto(snapshot).buffer as ArrayBuffer;
-      while (remaining.byteLength > 0) {
-        const written = await fileIo.write(file.fd, remaining);
-        if (written <= 0) {
-          throw new Error('Could not write native conversation history');
+      const encoder = new util.TextEncoder();
+      let start = 0;
+      while (start < snapshot.length) {
+        let end = Math.min(snapshot.length, start + SNAPSHOT_CHUNK_CHARS);
+        const last = snapshot.charCodeAt(end - 1);
+        if (end < snapshot.length && last >= 0xd800 && last <= 0xdbff) {
+          end--;
         }
-        remaining = remaining.slice(written);
+        let remaining = encoder.encodeInto(snapshot.slice(start, end)).buffer as ArrayBuffer;
+        while (remaining.byteLength > 0) {
+          const written = await fileIo.write(file.fd, remaining);
+          if (written <= 0) {
+            throw new Error('Could not write native conversation history');
+          }
+          remaining = remaining.slice(written);
+        }
+        start = end;
       }
       await fileIo.fsync(file.fd);
     } finally {
@@ -153,6 +174,27 @@ async function writeSnapshot(path: string, snapshot: string): Promise<void> {
     await fileIo.unlink(temporaryPath).catch(() => {});
     throw error as Error;
   }
+}
+
+function retainedImageIds(path: string, state: NativeConversationState): Set<string> {
+  const cached = cachedSessionImages.get(path);
+  const next = new Map<string, SessionImageIds>();
+  const ids = new Set<string>();
+  for (const session of state.sessions) {
+    const archive = session.archiveJson;
+    if (!archive) {
+      continue;
+    }
+    const known = cached?.get(session.id);
+    const images: SessionImageIds = known?.archiveJson === archive ?
+      known : { archiveJson: archive, ids: backupImageIds(archive) };
+    next.set(session.id, images);
+    for (const id of images.ids) {
+      ids.add(id);
+    }
+  }
+  cachedSessionImages.set(path, next);
+  return ids;
 }
 
 function migrateTranscript(messages: NativeStoredMessage[], now: number): NativeConversation {
@@ -198,12 +240,40 @@ async function readSnapshot(path: string): Promise<NativeConversationState> {
 export class NativeChatStorage {
   loadConversations(context: common.UIAbilityContext): Promise<NativeConversationState> {
     const path = `${context.filesDir}/${TRANSCRIPT_FILE}`;
-    return queueStorageOperation<NativeConversationState>(() => readSnapshot(path));
+    return queueStorageOperation<NativeConversationState>(async (): Promise<NativeConversationState> => {
+      const state = await readSnapshot(path);
+      const retained = retainedImageIds(path, state);
+      committedImages.set(path, retained);
+      await pruneBackupImages(context, retained).catch(() => {});
+      return state;
+    });
   }
 
   async saveConversations(context: common.UIAbilityContext, state: NativeConversationState): Promise<void> {
     const path = `${context.filesDir}/${TRANSCRIPT_FILE}`;
     const snapshot = serialize(state);
-    await queueStorageOperation<void>(() => writeSnapshot(path, snapshot));
+    const retained = retainedImageIds(path, state);
+    const pending = pendingImageWrites.get(path) ?? new Set<Set<string>>();
+    pending.add(retained);
+    pendingImageWrites.set(path, pending);
+    try {
+      await queueStorageOperation<void>(async (): Promise<void> => {
+        await writeSnapshot(path, snapshot);
+        const prior = committedImages.get(path);
+        committedImages.set(path, retained);
+        if (prior) {
+          for (const id of prior) {
+            if (!retained.has(id) && !Array.from(pending).some((scheduled: Set<string>): boolean => scheduled.has(id))) {
+              await removeBackupImage(context, id).catch(() => {});
+            }
+          }
+        }
+      });
+    } finally {
+      pending.delete(retained);
+      if (pending.size === 0) {
+        pendingImageWrites.delete(path);
+      }
+    }
   }
 }
