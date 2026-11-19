@@ -1,6 +1,7 @@
 import { common } from '@kit.AbilityKit';
 import { util } from '@kit.ArkTS';
 import { BusinessError } from '@kit.BasicServicesKit';
+import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { NativeChatSource, NativeChatCitation } from './NativeChatSources';
 import { fileIo } from '@kit.CoreFileKit';
 import { NativeAttachment } from './NativeChatAttachments';
@@ -20,12 +21,49 @@ import {
 } from './NativeConversation';
 
 const TRANSCRIPT_FILE = 'nuwa-native-chat.json';
+const HISTORY_DIRECTORY = 'nuwa-native-history';
+const INDEX_FILE = 'index.json';
 const FILE_NOT_FOUND = 13900002;
-const STORAGE_VERSION = 1;
+const LEGACY_HISTORY_VERSION = 1;
+const STORAGE_VERSION = 2;
 const SNAPSHOT_CHUNK_CHARS = 64 * 1024;
+const RECORD_FILE = /^session-[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}\.json$/i;
 
-interface NativeConversationDocument extends NativeConversationState {
+interface LegacyConversationDocument extends NativeConversationState {
   version: number;
+}
+
+interface SessionMetadata {
+  id: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  pinnedAt?: number;
+  rootMessageId: string | null;
+  messageCount: number;
+}
+
+interface SessionIndexEntry {
+  metadata: SessionMetadata;
+  file: string;
+  digest: string;
+}
+
+interface SessionIndex {
+  version: number;
+  activeId: string | null;
+  sessions: SessionIndexEntry[];
+}
+
+interface SessionWrite {
+  metadata: SessionMetadata;
+  snapshot?: string;
+}
+
+interface HistoryWrite {
+  activeId: string | null;
+  sessions: SessionWrite[];
+  incremental: boolean;
 }
 
 interface SessionImageIds {
@@ -34,6 +72,7 @@ interface SessionImageIds {
 }
 
 let pendingStorage: Promise<void> = Promise.resolve();
+const committedIndexes = new Map<string, SessionIndex>();
 const cachedSessionImages = new Map<string, Map<string, SessionImageIds>>();
 const committedImages = new Map<string, Set<string>>();
 const pendingImageWrites = new Map<string, Set<Set<string>>>();
@@ -120,8 +159,8 @@ function validateConversation(session: NativeConversation): boolean {
     message.selectedChildId === undefined || byId.get(message.selectedChildId)?.parentId === message.id);
 }
 
-function readDocument(document: NativeConversationDocument): NativeConversationState {
-  if (!document || document.version !== STORAGE_VERSION || !Array.isArray(document.sessions)) {
+function readLegacyDocument(document: LegacyConversationDocument): NativeConversationState {
+  if (!document || document.version !== LEGACY_HISTORY_VERSION || !Array.isArray(document.sessions)) {
     throw new Error('Invalid native conversation history');
   }
   const ids = new Set<string>();
@@ -134,23 +173,107 @@ function readDocument(document: NativeConversationDocument): NativeConversationS
   if (document.activeId !== null && !ids.has(document.activeId)) {
     throw new Error('Invalid active native conversation');
   }
-  for (const session of document.sessions) {
+  return { sessions: document.sessions, activeId: document.activeId };
+}
+
+function recoverInterrupted(state: NativeConversationState): NativeConversationState {
+  for (const session of state.sessions) {
     for (const message of session.messages) {
       if (message.status === 'pending' || message.status === 'streaming') {
         message.status = 'stopped';
       }
     }
   }
-  return { sessions: document.sessions, activeId: document.activeId };
+  return state;
 }
 
-function serialize(state: NativeConversationState): string {
-  const document: NativeConversationDocument = {
-    version: STORAGE_VERSION,
-    sessions: state.sessions,
-    activeId: state.activeId,
+function sessionMetadata(session: NativeConversation): SessionMetadata {
+  return {
+    id: session.id, title: session.title, createdAt: session.createdAt, updatedAt: session.updatedAt,
+    pinnedAt: session.pinnedAt, rootMessageId: session.rootMessageId, messageCount: session.messages.length,
   };
-  return JSON.stringify(document);
+}
+
+function sameMetadata(left: SessionMetadata, right: SessionMetadata): boolean {
+  return left.id === right.id && left.title === right.title && left.createdAt === right.createdAt &&
+    left.updatedAt === right.updatedAt && left.pinnedAt === right.pinnedAt && left.rootMessageId === right.rootMessageId &&
+    left.messageCount === right.messageCount;
+}
+
+function validateIndex(index: SessionIndex): void {
+  if (!index || index.version !== STORAGE_VERSION || !Array.isArray(index.sessions)) {
+    throw new Error('Invalid native conversation index');
+  }
+  const ids = new Set<string>();
+  const files = new Set<string>();
+  for (const entry of index.sessions) {
+    const metadata = entry?.metadata;
+    if (!metadata || typeof metadata.id !== 'string' || !metadata.id || ids.has(metadata.id) ||
+      typeof metadata.title !== 'string' || !isTimestamp(metadata.createdAt) || !isTimestamp(metadata.updatedAt) ||
+      (metadata.pinnedAt !== undefined && !isTimestamp(metadata.pinnedAt)) ||
+      !Number.isSafeInteger(metadata.messageCount) || metadata.messageCount < 0 ||
+      (metadata.rootMessageId !== null && typeof metadata.rootMessageId !== 'string') ||
+      typeof entry.file !== 'string' || !RECORD_FILE.test(entry.file) || files.has(entry.file) ||
+      typeof entry.digest !== 'string' || !/^[\da-f]{64}$/.test(entry.digest)) {
+      throw new Error('Invalid native conversation index entry');
+    }
+    ids.add(metadata.id);
+    files.add(entry.file);
+  }
+  if (index.activeId !== null && !ids.has(index.activeId)) {
+    throw new Error('Invalid active native conversation');
+  }
+}
+
+function captureHistory(state: NativeConversationState, dirtySessionIds?: string[]): HistoryWrite {
+  const dirty = dirtySessionIds === undefined ? undefined : new Set<string>(dirtySessionIds);
+  if (dirty && dirty.size !== dirtySessionIds?.length) {
+    throw new Error('Duplicate dirty native conversation');
+  }
+  const ids = new Set<string>();
+  const sessions = state.sessions.map<SessionWrite>((session: NativeConversation): SessionWrite => {
+    if (ids.has(session.id)) {
+      throw new Error('Duplicate native conversation');
+    }
+    ids.add(session.id);
+    const metadata = sessionMetadata(session);
+    if (dirty && !dirty.has(session.id)) {
+      return { metadata };
+    }
+    if (!validateConversation(session)) {
+      throw new Error('Invalid native conversation');
+    }
+    return { metadata, snapshot: JSON.stringify(session) };
+  });
+  if (state.activeId !== null && !ids.has(state.activeId)) {
+    throw new Error('Invalid active native conversation');
+  }
+  if (dirty && Array.from(dirty).some((id: string): boolean => !ids.has(id))) {
+    throw new Error('Unknown dirty native conversation');
+  }
+  return { activeId: state.activeId, sessions, incremental: dirty !== undefined };
+}
+
+function chunkEnd(value: string, start: number): number {
+  const end = Math.min(value.length, start + SNAPSHOT_CHUNK_CHARS);
+  const last = value.charCodeAt(end - 1);
+  return end < value.length && last >= 0xd800 && last <= 0xdbff ? end - 1 : end;
+}
+
+function sessionDigest(snapshot: string): string {
+  const encoder = new util.TextEncoder();
+  const md = cryptoFramework.createMd('SHA256');
+  let offset = 0;
+  while (offset < snapshot.length) {
+    const end = chunkEnd(snapshot, offset);
+    md.updateSync({ data: encoder.encodeInto(snapshot.slice(offset, end)) });
+    offset = end;
+  }
+  let hash = '';
+  for (const byte of md.digestSync().data) {
+    hash += byte.toString(16).padStart(2, '0');
+  }
+  return hash;
 }
 
 async function writeSnapshot(path: string, snapshot: string): Promise<void> {
@@ -162,11 +285,7 @@ async function writeSnapshot(path: string, snapshot: string): Promise<void> {
       const encoder = new util.TextEncoder();
       let start = 0;
       while (start < snapshot.length) {
-        let end = Math.min(snapshot.length, start + SNAPSHOT_CHUNK_CHARS);
-        const last = snapshot.charCodeAt(end - 1);
-        if (end < snapshot.length && last >= 0xd800 && last <= 0xdbff) {
-          end--;
-        }
+        const end = chunkEnd(snapshot, start);
         let remaining = encoder.encodeInto(snapshot.slice(start, end)).buffer as ArrayBuffer;
         while (remaining.byteLength > 0) {
           const written = await fileIo.write(file.fd, remaining);
@@ -185,6 +304,144 @@ async function writeSnapshot(path: string, snapshot: string): Promise<void> {
   } catch (error) {
     await fileIo.unlink(temporaryPath).catch(() => {});
     throw error as Error;
+  }
+}
+
+async function syncDirectory(path: string): Promise<void> {
+  const directory = await fileIo.open(path, fileIo.OpenMode.READ_ONLY | fileIo.OpenMode.DIR);
+  try {
+    await fileIo.fsync(directory.fd);
+  } finally {
+    await fileIo.close(directory);
+  }
+}
+
+async function readOptionalText(path: string): Promise<string | undefined> {
+  try {
+    return await fileIo.readText(path);
+  } catch (error) {
+    if ((error as BusinessError).code === FILE_NOT_FOUND) {
+      return undefined;
+    }
+    throw error as Error;
+  }
+}
+
+async function readIndex(directory: string): Promise<SessionIndex | undefined> {
+  const value = await readOptionalText(directory + '/' + INDEX_FILE);
+  if (value === undefined) {
+    return undefined;
+  }
+  const index = JSON.parse(value) as SessionIndex;
+  validateIndex(index);
+  return index;
+}
+
+async function loadIndexedHistory(directory: string, index: SessionIndex): Promise<NativeConversationState> {
+  const sessions: NativeConversation[] = [];
+  for (const entry of index.sessions) {
+    const value = await fileIo.readText(directory + '/' + entry.file);
+    if (sessionDigest(value) !== entry.digest) {
+      throw new Error('Native conversation checksum does not match');
+    }
+    const session = JSON.parse(value) as NativeConversation;
+    if (!validateConversation(session) || !sameMetadata(entry.metadata, sessionMetadata(session))) {
+      throw new Error('Invalid native conversation snapshot');
+    }
+    sessions.push(session);
+  }
+  return recoverInterrupted({ sessions, activeId: index.activeId });
+}
+
+function resolveBaseEntries(previous: SessionIndex | undefined, write: HistoryWrite): Map<string, SessionIndexEntry> {
+  const existing = new Map<string, SessionIndexEntry>();
+  for (const entry of previous?.sessions ?? []) {
+    existing.set(entry.metadata.id, entry);
+  }
+  if (!write.incremental) {
+    return existing;
+  }
+  if (!previous || existing.size !== write.sessions.length) {
+    throw new Error('Incremental native history requires the complete committed session list');
+  }
+  for (const session of write.sessions) {
+    const entry = existing.get(session.metadata.id);
+    if (!entry || (session.snapshot === undefined && !sameMetadata(entry.metadata, session.metadata))) {
+      throw new Error('Incremental native history omits a changed session');
+    }
+  }
+  return existing;
+}
+
+async function commitHistory(filesDir: string, directory: string, previous: SessionIndex | undefined,
+  write: HistoryWrite): Promise<SessionIndex> {
+  const existing = resolveBaseEntries(previous, write);
+  const next: SessionIndex = { version: STORAGE_VERSION, activeId: write.activeId, sessions: [] };
+  const created: string[] = [];
+  let published = false;
+  if (!previous) {
+    await fileIo.mkdir(directory, true);
+    await syncDirectory(filesDir);
+  }
+  try {
+    for (const session of write.sessions) {
+      const entry = existing.get(session.metadata.id);
+      if (session.snapshot === undefined) {
+        if (!entry) {
+          throw new Error('Missing native session snapshot');
+        }
+        next.sessions.push(entry);
+        continue;
+      }
+      const digest = sessionDigest(session.snapshot);
+      if (entry?.digest === digest) {
+        next.sessions.push(entry);
+        continue;
+      }
+      const file = 'session-' + util.generateRandomUUID(true) + '.json';
+      await writeSnapshot(directory + '/' + file, session.snapshot);
+      created.push(file);
+      next.sessions.push({ metadata: session.metadata, file, digest });
+    }
+    if (previous && previous.activeId === next.activeId && previous.sessions.length === next.sessions.length &&
+      next.sessions.every((entry: SessionIndexEntry, index: number): boolean =>
+        entry.file === previous.sessions[index].file)) {
+      return previous;
+    }
+    if (created.length > 0) {
+      await syncDirectory(directory);
+    }
+    await writeSnapshot(directory + '/' + INDEX_FILE, JSON.stringify(next));
+    published = true;
+    await syncDirectory(directory);
+  } catch (error) {
+    if (published) {
+      // The rename already published this index, so retain both generations.
+      committedIndexes.delete(directory);
+    } else {
+      for (const file of created) {
+        await fileIo.unlink(directory + '/' + file).catch(() => {});
+      }
+    }
+    throw error as Error;
+  }
+  const retained = new Set<string>(next.sessions.map((entry: SessionIndexEntry): string => entry.file));
+  for (const entry of previous?.sessions ?? []) {
+    if (!retained.has(entry.file)) {
+      await fileIo.unlink(directory + '/' + entry.file).catch(() => {});
+    }
+  }
+  return next;
+}
+
+async function pruneSessionSnapshots(directory: string, index: SessionIndex): Promise<void> {
+  const retained = new Set<string>(index.sessions.map((entry: SessionIndexEntry): string => entry.file));
+  const files = await fileIo.listFile(directory).catch((): string[] => []);
+  for (const file of files) {
+    const candidate = file.endsWith('.tmp') ? file.slice(0, -4) : file;
+    if ((RECORD_FILE.test(candidate) && !retained.has(file)) || file === INDEX_FILE + '.tmp') {
+      await fileIo.unlink(directory + '/' + file).catch(() => {});
+    }
   }
 }
 
@@ -216,20 +473,14 @@ function migrateTranscript(messages: NativeStoredMessage[], now: number): Native
   return appendBranch(createConversation(now), null, nodes, now);
 }
 
-async function readSnapshot(path: string): Promise<NativeConversationState> {
-  let value: string;
-  try {
-    value = await fileIo.readText(path);
-  } catch (error) {
-    if ((error as BusinessError).code === FILE_NOT_FOUND) {
-      return { sessions: [], activeId: null };
-    }
-    throw error as Error;
+async function readLegacySnapshot(path: string): Promise<NativeConversationState | undefined> {
+  const value = await readOptionalText(path);
+  if (value === undefined) {
+    return undefined;
   }
-
-  const parsed = JSON.parse(value) as NativeConversationDocument | NativeStoredMessage[];
+  const parsed = JSON.parse(value) as LegacyConversationDocument | NativeStoredMessage[];
   if (!Array.isArray(parsed)) {
-    return readDocument(parsed as NativeConversationDocument);
+    return recoverInterrupted(readLegacyDocument(parsed as LegacyConversationDocument));
   }
   const messages = parsed as NativeStoredMessage[];
   if (!messages.every(isStoredMessage)) {
@@ -245,33 +496,78 @@ async function readSnapshot(path: string): Promise<NativeConversationState> {
     }
     state = upsertConversation(state, migrateTranscript(messages, timestamp), true);
   }
-  await writeSnapshot(path, serialize(state));
   return state;
 }
 
 export class NativeChatStorage {
   loadConversations(context: common.UIAbilityContext): Promise<NativeConversationState> {
     const path = `${context.filesDir}/${TRANSCRIPT_FILE}`;
+    const directory = `${context.filesDir}/${HISTORY_DIRECTORY}`;
     return queueStorageOperation<NativeConversationState>(async (): Promise<NativeConversationState> => {
-      const state = await readSnapshot(path);
+      let index = await readIndex(directory);
+      let state: NativeConversationState;
+      if (index) {
+        state = await loadIndexedHistory(directory, index);
+        await syncDirectory(directory);
+      } else {
+        const legacy = await readLegacySnapshot(path);
+        state = legacy ?? { sessions: [], activeId: null };
+        if (legacy) {
+          index = await commitHistory(context.filesDir, directory, undefined, captureHistory(legacy));
+        }
+      }
+      if (index) {
+        committedIndexes.set(directory, index);
+        await fileIo.unlink(path).catch(() => {});
+        await pruneSessionSnapshots(directory, index);
+      } else {
+        committedIndexes.delete(directory);
+      }
       const retained = retainedImageIds(path, state);
       committedImages.set(path, retained);
-      await pruneBackupImages(context, retained).catch(() => {});
+      const protectedImages = new Set<string>(retained);
+      for (const scheduled of pendingImageWrites.get(path) ?? []) {
+        for (const id of scheduled) {
+          protectedImages.add(id);
+        }
+      }
+      await pruneBackupImages(context, protectedImages).catch(() => {});
       return state;
     });
   }
 
-  async saveConversations(context: common.UIAbilityContext, state: NativeConversationState): Promise<void> {
+  // Pass every modified session ID for a streaming-only checkpoint of an existing history.
+  // Full saves also persist additions, deletions, and nested changes outside the active requests.
+  async saveConversations(context: common.UIAbilityContext, state: NativeConversationState,
+    dirtySessionIds?: string[]): Promise<void> {
     const path = `${context.filesDir}/${TRANSCRIPT_FILE}`;
-    const snapshot = serialize(state);
+    const directory = `${context.filesDir}/${HISTORY_DIRECTORY}`;
+    const write = captureHistory(state, dirtySessionIds);
     const retained = retainedImageIds(path, state);
     const pending = pendingImageWrites.get(path) ?? new Set<Set<string>>();
     pending.add(retained);
     pendingImageWrites.set(path, pending);
     try {
       await queueStorageOperation<void>(async (): Promise<void> => {
-        await writeSnapshot(path, snapshot);
+        let previous = committedIndexes.get(directory);
+        if (!previous) {
+          previous = await readIndex(directory);
+          if (previous) {
+            await syncDirectory(directory);
+          }
+        }
+        const next = await commitHistory(context.filesDir, directory, previous, write);
+        committedIndexes.set(directory, next);
+        if (!previous) {
+          await fileIo.unlink(path).catch(() => {});
+        }
         const prior = committedImages.get(path);
+        if (write.incremental && prior) {
+          // A partial write can carry older versions of sessions left on disk.
+          for (const id of prior) {
+            retained.add(id);
+          }
+        }
         committedImages.set(path, retained);
         if (prior) {
           for (const id of prior) {

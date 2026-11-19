@@ -4,6 +4,9 @@ import { pasteboard } from '@kit.BasicServicesKit';
 import { url } from '@kit.ArkTS';
 import { NativeLocale } from './NativeLocation';
 import { NativeMathEquation } from './NativeMathEquation';
+import {
+  NativeMathPicture, NativeMathPictureRequest, nativeMathPictureKey, requestNativeMathPicture,
+} from './NativeMathRenderQueue';
 import { NativeMermaidPreview } from './NativeMermaidPreview';
 import {
   findNativeDisplayMath, findNativeInlineMath, NativeMathMatch, NativeMathNode, NativeMathSpan, nativeMathSpans,
@@ -42,6 +45,7 @@ interface InlinePart {
   target?: string;
   citation?: number;
   math?: NativeMathSpan[];
+  formula?: string;
 }
 
 interface CodePart {
@@ -49,22 +53,169 @@ interface CodePart {
   kind: string;
 }
 
+interface NativeRenderedFormula {
+  key: string;
+  picture: NativeMathPicture;
+}
+
 @Component
 export struct NativeMarkdown {
-  @Prop content: string = '';
-  @Prop fontScale: number = 1;
+  @Prop @Watch('scheduleMathPictures') content: string = '';
+  @Prop @Watch('scheduleMathPictures') fontScale: number = 1;
   @Prop hasCitations: boolean = false;
   @Prop locale: NativeLocale = 'zh-CN';
-  @Prop theme: NativeTheme = 'system';
-  @Prop loading: boolean = false;
+  @Prop @Watch('scheduleMathPictures') theme: NativeTheme = 'system';
+  @Prop @Watch('scheduleMathPictures') loading: boolean = false;
   onCitation: (number: number) => void = () => {};
   @State private copiedCodeKey: string = '';
   @State private mermaidCodeIndices: number[] = [];
+  @State private mathPictures: NativeRenderedFormula[] = [];
+  @State private contentWidth: number = 0;
   private cachedCitationMode: boolean = false;
   private cachedContent: string = '\u0000';
   private cachedBlocks: MarkdownBlock[] = [];
   private inlineCache: Map<string, InlinePart[]> = new Map<string, InlinePart[]>();
   private codeCache: Map<string, CodePart[]> = new Map<string, CodePart[]>();
+  private mathMounted: boolean = false;
+  private mathTimer: number = -1;
+  private mathGeneration: number = 0;
+  private mathColor: string = '#0F1115';
+  private mathDensity: number = 1;
+  private mathFontRatio: number = 1;
+
+  aboutToAppear(): void {
+    // Chat List mounts only the displayed rows and its small render cache.
+    this.mathMounted = true;
+    this.scheduleMathPictures();
+  }
+
+  aboutToDisappear(): void {
+    this.mathMounted = false;
+    this.mathGeneration++;
+    clearTimeout(this.mathTimer);
+  }
+
+  private headingSize(level: number): number {
+    return level === 1 ? 24 : level === 2 ? 22 : level === 3 ? 20 : 16;
+  }
+
+  private prepareMathPresentation(): void {
+    const context = this.getUIContext();
+    const density = context.vp2px(1);
+    this.mathDensity = Math.round(Math.min(3.5, Math.max(1, density)) * 100) / 100;
+    this.mathFontRatio = context.fp2px(16) / context.vp2px(16);
+    if (this.theme === 'dark' || this.theme === 'light') {
+      this.mathColor = this.theme === 'dark' ? '#F9FAFB' : '#0F1115';
+      return;
+    }
+    try {
+      const color = context.getHostContext()?.resourceManager.getColorSync($r('app.color.native_chat_primary').id);
+      this.mathColor = '#' + ((color ?? 0x0F1115) & 0xFFFFFF).toString(16).padStart(6, '0');
+    } catch {
+      this.mathColor = '#0F1115';
+    }
+  }
+
+  private mathRequest(source: string, size: number, display: boolean, bold: boolean = false): NativeMathPictureRequest {
+    return {
+      source, fontSize: Math.round(size * this.fontScale * this.mathFontRatio * 100) / 100,
+      display, color: this.mathColor, density: this.mathDensity, bold,
+    };
+  }
+
+  private collectInlinePictures(entries: Map<string, NativeMathPictureRequest>, text: string, size: number): void {
+    for (const part of this.inlineParts(text)) {
+      if (part.formula) {
+        const request = this.mathRequest(part.formula, size, false, part.strong);
+        entries.set(nativeMathPictureKey(request), request);
+      }
+    }
+  }
+
+  private mathRequests(): Map<string, NativeMathPictureRequest> {
+    const entries = new Map<string, NativeMathPictureRequest>();
+    for (const block of this.blocks()) {
+      if (block.kind === 'math') {
+        const request = this.mathRequest(block.text, 16, true);
+        entries.set(nativeMathPictureKey(request), request);
+      } else if (block.kind === 'heading') {
+        this.collectInlinePictures(entries, '**' + block.text + '**', this.headingSize(block.level));
+      } else if (block.kind === 'table') {
+        const rows = block.rows ?? [];
+        for (let index = 0; index < rows.length; index++) {
+          for (const cell of rows[index]) {
+            this.collectInlinePictures(entries, index === 0 && cell ? '**' + cell + '**' : cell, index === 0 ? 14 : 13);
+          }
+        }
+      } else if (block.kind === 'paragraph' || block.kind === 'list' || block.kind === 'quote') {
+        this.collectInlinePictures(entries, block.text, 16);
+      }
+    }
+    return entries;
+  }
+
+  private scheduleMathPictures(): void {
+    const generation = ++this.mathGeneration;
+    clearTimeout(this.mathTimer);
+    if (!this.mathMounted || this.loading) {
+      if (this.mathPictures.length) this.mathPictures = [];
+      return;
+    }
+    this.mathTimer = setTimeout(() => { this.prepareMathPictures(generation); }, 40);
+  }
+
+  private prepareMathPictures(generation: number): void {
+    if (this.mathGeneration !== generation || this.loading || !this.mathMounted) return;
+    this.prepareMathPresentation();
+    const requests = this.mathRequests();
+    this.mathPictures = this.mathPictures.filter((item: NativeRenderedFormula): boolean => requests.has(item.key));
+    let count = 0;
+    for (const key of requests.keys()) {
+      if (count++ >= 48) break;
+      const request = requests.get(key);
+      if (request && !this.mathPictures.some((item: NativeRenderedFormula): boolean => item.key === key)) {
+        void requestNativeMathPicture(request).then((picture: NativeMathPicture | null): void => {
+          if (picture && this.mathMounted && this.mathGeneration === generation) {
+            const received: NativeRenderedFormula = { key, picture };
+            this.mathPictures = [...this.mathPictures, received];
+          }
+        });
+      }
+    }
+  }
+
+  private mathPicture(source: string, size: number, display: boolean, bold: boolean = false): NativeMathPicture | null {
+    if (!this.mathPictures.length) return null;
+    const key = nativeMathPictureKey(this.mathRequest(source, size, display, bold));
+    return this.mathPictures.find((item: NativeRenderedFormula): boolean => item.key === key)?.picture ?? null;
+  }
+
+  private inlinePictureScale(picture: NativeMathPicture, maxWidth: number): number {
+    const available = maxWidth > 0 ? maxWidth : this.contentWidth || 320;
+    return Math.min(1, available / picture.width);
+  }
+
+  private inlineWidth(source: string, size: number, bold: boolean, maxWidth: number): number {
+    const picture = this.mathPicture(source, size, false, bold);
+    return picture ? picture.width * this.inlinePictureScale(picture, maxWidth) : 0;
+  }
+
+  private inlineHeight(source: string, size: number, bold: boolean, maxWidth: number): number {
+    const picture = this.mathPicture(source, size, false, bold);
+    return picture ? picture.height * this.inlinePictureScale(picture, maxWidth) : 0;
+  }
+
+  private inlineDepth(source: string, size: number, bold: boolean, maxWidth: number): number {
+    const picture = this.mathPicture(source, size, false, bold);
+    return picture ? picture.depth * this.inlinePictureScale(picture, maxWidth) : 0;
+  }
+
+  private inlineAccessibilityText(value: string): string {
+    const parts = this.inlineParts(value);
+    if (!this.mathPictures.length || !parts.some((part: InlinePart): boolean => !!part.formula) ||
+      parts.some((part: InlinePart): boolean => !!part.target || !!part.citation || !!part.image)) return '';
+    return parts.map<string>((part: InlinePart): string => part.formula ?? part.text).join('');
+  }
 
   private codeCopyKey(text: string, index: number): string {
     return `${index}:${text}`;
@@ -280,6 +431,7 @@ export struct NativeMarkdown {
     return {
       text: math ? match.formula : value.slice(match.start, match.end),
       strong, italic, code: false, strike: false, math: math ? nativeMathSpans(math) : undefined,
+      formula: match.formula,
     };
   }
 
@@ -600,7 +752,24 @@ export struct NativeMarkdown {
   }
 
   @Builder
-  private inlineText(value: string, size: number) {
+  private displayedFormula(picture: NativeMathPicture, source: string) {
+    Scroll() {
+      Image(picture.png)
+        .width(picture.width)
+        .height(picture.height)
+        .objectFit(ImageFit.Contain)
+        .accessibilityText(source)
+        .draggable(false)
+    }
+    .width('100%')
+    .align(Alignment.Center)
+    .scrollable(ScrollDirection.Horizontal)
+    .scrollBar(BarState.Auto)
+    .padding(4)
+  }
+
+  @Builder
+  private inlineText(value: string, size: number, maxWidth: number = 0) {
     Text() {
       ForEach(this.inlineParts(value), (part: InlinePart) => {
         if (part.image && part.source) {
@@ -613,6 +782,13 @@ export struct NativeMarkdown {
           Span(part.text).fontSize(11 * this.fontScale).fontWeight(FontWeight.Medium)
             .fontColor($r('app.color.native_chat_blue_text')).backgroundColor($r('app.color.native_chat_field'))
             .onClick(() => { this.onCitation(part.citation ?? 0); })
+        } else if (part.formula && this.mathPicture(part.formula, size, false, part.strong)) {
+          ImageSpan(this.mathPicture(part.formula, size, false, part.strong)?.png ?? '')
+            .width(this.inlineWidth(part.formula, size, part.strong, maxWidth))
+            .height(this.inlineHeight(part.formula, size, part.strong, maxWidth))
+            .objectFit(ImageFit.Contain)
+            .verticalAlign(ImageSpanAlignment.BASELINE)
+            .baselineOffset(LengthMetrics.vp(-this.inlineDepth(part.formula, size, part.strong, maxWidth)))
         } else if (part.math) {
           ForEach(part.math, (span: NativeMathSpan) => {
             Span(span.text)
@@ -637,6 +813,7 @@ export struct NativeMarkdown {
     .fontSize(size * this.fontScale)
     .lineHeight(size * this.fontScale * 1.75)
     .width('100%')
+    .accessibilityText(this.inlineAccessibilityText(value))
     .copyOption(CopyOptions.LocalDevice)
   }
 
@@ -727,9 +904,13 @@ export struct NativeMarkdown {
         if (block.kind === 'code') {
           this.codeBlock(block, index)
         } else if (block.kind === 'math') {
-          NativeMathEquation({ expression: block.math ?? null, source: block.text, formulaFontSize: 17 * this.fontScale })
+          if (this.mathPicture(block.text, 16, true)) {
+            this.displayedFormula(this.mathPicture(block.text, 16, true)!, block.text)
+          } else {
+            NativeMathEquation({ expression: block.math ?? null, source: block.text, formulaFontSize: 17 * this.fontScale })
+          }
         } else if (block.kind === 'heading') {
-          this.inlineText(`**${block.text}**`, block.level === 1 ? 24 : (block.level === 2 ? 22 : (block.level === 3 ? 20 : 16)))
+          this.inlineText(`**${block.text}**`, this.headingSize(block.level))
         } else if (block.kind === 'list') {
           Row({ space: 8 }) {
             Text(block.marker).fontSize(16).width(22).fontColor($r('app.color.native_chat_secondary'))
@@ -774,7 +955,7 @@ export struct NativeMarkdown {
                 Row({ space: 0 }) {
                   ForEach(row, (cell: string, cellIndex: number) => {
                     Column() {
-                      this.inlineText(rowIndex === 0 && cell.length > 0 ? `**${cell}**` : cell, rowIndex === 0 ? 14 : 13)
+                      this.inlineText(rowIndex === 0 && cell.length > 0 ? `**${cell}**` : cell, rowIndex === 0 ? 14 : 13, 104)
                     }
                     .width(128)
                     .padding({ left: cellIndex === 0 ? 0 : 12, right: 12, top: 10, bottom: 10 })
@@ -795,5 +976,9 @@ export struct NativeMarkdown {
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
+    .onAreaChange((_old: Area, area: Area) => {
+      const width = Number(area.width);
+      if (width > 0 && width !== this.contentWidth) this.contentWidth = width;
+    })
   }
 }

@@ -30,6 +30,7 @@ export interface NativeSettings {
   speechEngine: HarmonySpeechEngine;
   speechVoice: HarmonySpeechVoice;
   migrationPromptHandled: boolean;
+  desktopSidebarCollapsed: boolean;
 }
 
 const PREFERENCES_NAME: string = 'nuwa_native_settings';
@@ -133,6 +134,7 @@ export class NativeSettingsController {
     const speechEngine = await store.get('speechEngine', 'auto') as string;
     const speechVoice = await store.get('speechVoice', 'stella') as string;
     const migrationPromptHandled = await store.get('migrationPromptHandled', false) as boolean;
+    const desktopSidebarCollapsed = await store.get('desktopSidebarCollapsed', false) as boolean;
     const resolvedProtocol: NativeApiProtocol = protocol === 'anthropic' ? 'anthropic' : 'openai';
     const apiKey = credential && credential.binding === bindingFor(baseUrl, resolvedProtocol)
       ? credential.apiKey : '';
@@ -153,6 +155,7 @@ export class NativeSettingsController {
       speechEngine: speechEngine === 'native' || speechEngine === 'cloud' ? speechEngine : 'auto',
       speechVoice: speechVoice === 'tide' ? 'tide' : 'stella',
       migrationPromptHandled,
+      desktopSidebarCollapsed,
     };
   }
 
@@ -185,6 +188,7 @@ export class NativeSettingsController {
         store.put('speechEngine', settings.speechEngine),
         store.put('speechVoice', settings.speechVoice),
         store.put('migrationPromptHandled', settings.migrationPromptHandled),
+        store.put('desktopSidebarCollapsed', settings.desktopSidebarCollapsed),
       ];
       // Changing other settings must preserve both system defaults and the saved location hierarchy.
       if (manualPreference === 'locale') {

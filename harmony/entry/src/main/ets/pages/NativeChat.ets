@@ -28,6 +28,9 @@ import {
   updateConversationMessage, upsertConversation, visibleMessages,
 } from '../native/NativeConversation';
 import { NativeMarkdown } from '../native/NativeMarkdown';
+import { NativeMathRendererHost } from '../native/NativeMathRendererHost';
+import { NativeDraftStorage, NativeStoredDraft } from '../native/NativeDraftStorage';
+import { CHAT_PAGE_SIZE, nativeMessageRange, NativeMessageList, NativeMessageRange, NativeMessageRow } from '../native/NativeMessageList';
 import { NativeMigrationPrompt } from '../native/NativeMigrationPrompt';
 import { describeNativeReplyFailure, nativeRefusalText, NativeReplyNotice } from '../native/NativeReplyNotice';
 import { isOfficialNativeReadLinkRoute, NativeReadLink, NativeReadLinkCollector, useNativeReadLink } from '../native/NativeReadLinks';
@@ -73,11 +76,14 @@ const EMPTY_TIMELINE: NativeToolTimelineView = { steps: [], answer: '', answerOf
 @Entry
 @Component
 struct NativeChat {
-  @State private history: NativeConversationState = { sessions: [], activeId: null };
+  @State @Watch('syncMessageList') private history: NativeConversationState = { sessions: [], activeId: null };
+  @State private earlierCount: number = 0;
+  @State private laterCount: number = 0;
   @State private settings: NativeSettings = {
     baseUrl: 'https://api.deepseek.com', model: 'deepseek-chat', apiKey: '', protocol: 'openai', authMode: 'api-key',
     theme: 'system', chatFontSize: 16, attachmentBinding: '', thinking: false, search: false, ttsMuted: true,
     speechEngine: 'auto', speechVoice: 'stella', migrationPromptHandled: false,
+    desktopSidebarCollapsed: false,
     locale: defaultNativeLocale(), location: null,
   };
   @State private draft: string = '';
@@ -94,6 +100,7 @@ struct NativeChat {
   @State private settingsVisible: boolean = false;
   @State private migrationPromptVisible: boolean = false;
   @State private transcribing: boolean = false;
+  @State private compactToolsOpen: boolean = false;
   @State private onboardingView: NativeOnboardingView = 'home';
   @State private account: NativeDeepSeekAccount | null = null;
   @State private balance: NativeDeepSeekBalance | null = null;
@@ -132,6 +139,13 @@ struct NativeChat {
   @State private viewportHeight: number = 820;
 
   private readonly storage = new NativeChatStorage();
+  private readonly draftStorage = new NativeDraftStorage();
+  private readonly draftHistoryWrites = new Map<string, string>();
+  private readonly removedDraftFiles = new Map<string, NativeAttachment>();
+  private draftStorageReady: boolean = false;
+  private draftSaving: boolean = false;
+  private draftDirty: boolean = false;
+  private draftSaveTimer: number = -1;
   private readonly settingsStore = new NativeSettingsController();
   private readonly updateSchedule = new NativeUpdateSchedule();
   private updatePreferences: NativeUpdatePreferences = { checkAt: 0, dismissedAt: 0, dismissedVersion: '' };
@@ -147,10 +161,21 @@ struct NativeChat {
   private balanceBinding: string = '';
   private migrationInProgress: boolean = false;
   private readonly scroller = new Scroller();
+  private readonly messageList = new NativeMessageList();
+  private messagePath: NativeConversationMessage[] = [];
+  private visibleSession?: NativeConversation;
+  private messageRange: NativeMessageRange = { start: 0, end: 0 };
+  private messageLimit: number = CHAT_PAGE_SIZE;
+  private rangeFromTop: boolean = false;
+  private firstVisibleRow: number = 0;
+  private listViewportHeight: number = 0;
+  private followLatest: boolean = true;
+  private anchorTimer: number = -1;
   private readonly drafts: Map<string, NativeDraft> = new Map();
   private visible: boolean = false;
   private scrollTimer: number = -1;
   private lastStreamSave: number = 0;
+  private streamFrame: number = -1;
   private touchStart: number = 0;
   private titleTap: number = 0;
   private readonly recognition = new HarmonySpeechRecognition((id: string, state: string, text?: string, code?: string) => {
@@ -164,7 +189,7 @@ struct NativeChat {
       this.recognitionId = '';
     }
     if (state === 'done' && text) {
-      this.draft = this.draft ? `${this.draft} ${text}` : text;
+      this.updateDraftText(this.draft ? `${this.draft} ${text}` : text);
     } else if (state === 'error') {
       this.toast(this.speechError(code, true));
     }
@@ -187,6 +212,7 @@ struct NativeChat {
 
   onPageShow(): void {
     this.visible = true;
+    if (this.replies.length) this.replies = Array.from(this.replies);
     if (this.loaded) {
       void this.refreshBalance();
     }
@@ -205,10 +231,23 @@ struct NativeChat {
     if (this.replies.length && !this.deletingSessions) {
       void this.save();
     }
+    if (this.draftSaveTimer >= 0) {
+      clearTimeout(this.draftSaveTimer);
+      this.draftSaveTimer = -1;
+    }
+    if (this.draftDirty) void this.persistDrafts();
     this.visible = false;
+    if (this.streamFrame >= 0) {
+      clearTimeout(this.streamFrame);
+      this.streamFrame = -1;
+    }
     if (this.scrollTimer >= 0) {
       clearTimeout(this.scrollTimer);
       this.scrollTimer = -1;
+    }
+    if (this.anchorTimer >= 0) {
+      clearTimeout(this.anchorTimer);
+      this.anchorTimer = -1;
     }
   }
 
@@ -279,8 +318,9 @@ struct NativeChat {
         }
         void this.refreshBalance();
       } catch {
-      this.toast(this.label('无法读取已保存的服务设置', 'Unable to load the saved API configuration'));
+        this.toast(this.label('无法读取已保存的服务设置', 'Unable to load the saved API configuration'));
       }
+      await this.loadDrafts(context);
       this.loaded = true;
       this.applyTheme();
       this.scrollToLatest();
@@ -289,12 +329,44 @@ struct NativeChat {
     }
   }
 
-  private async save(context: common.UIAbilityContext = this.host()): Promise<void> {
+  private async save(context: common.UIAbilityContext = this.host(), checkpoint: boolean = false): Promise<void> {
     try {
-      await this.storage.saveConversations(context, this.historyWithPartialReplies());
+      let snapshot = this.historyWithPartialReplies();
+      if (checkpoint) {
+        const dirty = this.replies.map<string>((reply: NativeReply): string => reply.sessionId);
+        try {
+          await this.storage.saveConversations(context, snapshot, dirty);
+        } catch {
+          snapshot = this.historyWithPartialReplies();
+          await this.storage.saveConversations(context, snapshot);
+        }
+      } else {
+        await this.storage.saveConversations(context, snapshot);
+      }
+      this.acknowledgeSentDrafts(snapshot);
     } catch {
       this.status = this.label('本地会话保存失败，请重试', "Unable to save chats locally. Please try again.");
     }
+  }
+
+  private paintLiveReplies(): void {
+    if (!this.visible || this.streamFrame >= 0) return;
+    this.streamFrame = setTimeout(() => {
+      this.streamFrame = -1;
+      this.replies = Array.from(this.replies);
+      if (this.reply() && this.followLatest && this.laterCount === 0) this.scrollToLatest();
+    }, 16);
+  }
+
+  private acknowledgeSentDrafts(snapshot: NativeConversationState): void {
+    if (!this.draftHistoryWrites.size) return;
+    this.draftHistoryWrites.forEach((sessionId: string, replyId: string): void => {
+      const session = snapshot.sessions.find((item: NativeConversation): boolean => item.id === sessionId);
+      if (session?.messages.some((message: NativeConversationMessage): boolean => message.id === replyId)) {
+        this.draftHistoryWrites.delete(replyId);
+      }
+    });
+    if (!this.draftHistoryWrites.size && this.draftDirty) void this.persistDrafts();
   }
 
   private settingsSnapshot(): NativeSettings {
@@ -304,6 +376,7 @@ struct NativeChat {
       ttsMuted: this.settings.ttsMuted, authMode: this.settings.authMode,
       speechEngine: this.settings.speechEngine, speechVoice: this.settings.speechVoice,
       migrationPromptHandled: this.settings.migrationPromptHandled,
+      desktopSidebarCollapsed: this.settings.desktopSidebarCollapsed,
       theme: this.settings.theme, chatFontSize: this.settings.chatFontSize,
       attachmentBinding: this.settings.attachmentBinding,
       locale: this.settings.locale, location: this.settings.location,
@@ -560,7 +633,97 @@ struct NativeChat {
 
   private messages(): NativeConversationMessage[] {
     const session = this.session();
-    return session ? visibleMessages(session) : [];
+    return session === this.visibleSession ? this.messagePath : session ? visibleMessages(session) : [];
+  }
+
+  private syncMessageList(): void {
+    const session = this.session();
+    if (session === this.visibleSession) return;
+    if (session?.id !== this.visibleSession?.id) {
+      this.messageLimit = CHAT_PAGE_SIZE;
+      this.rangeFromTop = false;
+      this.firstVisibleRow = 0;
+      this.followLatest = true;
+    }
+    this.visibleSession = session;
+    this.messagePath = session ? visibleMessages(session) : [];
+    this.updateMessageWindow();
+  }
+
+  private updateMessageWindow(): void {
+    const range = nativeMessageRange(this.messagePath.length, this.messageLimit, this.rangeFromTop);
+    this.messageRange = range;
+    this.earlierCount = range.start;
+    this.laterCount = this.messagePath.length - range.end;
+    this.messageList.update(this.messagePath, range);
+  }
+
+  private nearListEnd(): boolean {
+    if (this.laterCount > 0) return false;
+    if (this.scroller.isAtEnd()) return true;
+    const index = this.messageList.totalCount() - 1 + Number(this.earlierCount > 0);
+    if (index < 0 || this.listViewportHeight <= 0) return index < 0;
+    const frame = this.scroller.getItemRect(index);
+    return frame.height > 0 && frame.y + frame.height - this.listViewportHeight < 40;
+  }
+
+  private restoreListPosition(index: number, top: number): void {
+    if (this.anchorTimer >= 0) clearTimeout(this.anchorTimer);
+    const sessionId = this.history.activeId;
+    this.anchorTimer = setTimeout(() => {
+      this.anchorTimer = -1;
+      if (sessionId === this.history.activeId && this.visible) {
+        this.scroller.scrollToIndex(index, false, ScrollAlign.START, { extraOffset: LengthMetrics.vp(-top) });
+      }
+    }, 0);
+  }
+
+  private loadMoreMessages(earlier: boolean): void {
+    if ((earlier ? this.earlierCount : this.laterCount) <= 0) return;
+    const header = Number(this.earlierCount > 0);
+    const row = Math.max(header, this.firstVisibleRow);
+    const top = this.scroller.getItemRect(row).y;
+    const messageIndex = this.messageRange.start + row - header;
+    this.followLatest = false;
+    this.messageLimit += CHAT_PAGE_SIZE;
+    this.updateMessageWindow();
+    this.restoreListPosition(messageIndex - this.messageRange.start + Number(this.earlierCount > 0), top);
+  }
+
+  private jumpToNewestMessages(): void {
+    if (this.rangeFromTop) {
+      this.rangeFromTop = false;
+      this.messageLimit = CHAT_PAGE_SIZE;
+      this.updateMessageWindow();
+    }
+    this.followLatest = true;
+    this.scrollToLatest();
+  }
+
+  private titlePressed(): void {
+    const now = Date.now();
+    if (now - this.titleTap <= 400) {
+      this.titleTap = 0;
+      this.followLatest = false;
+      this.rangeFromTop = true;
+      this.messageLimit = CHAT_PAGE_SIZE;
+      this.updateMessageWindow();
+      this.restoreListPosition(0, 0);
+    } else {
+      this.titleTap = now;
+    }
+  }
+
+  private observeMessageScroll(offset: number, state: ScrollState): void {
+    if (this.nearListEnd()) this.followLatest = true;
+    if (state === ScrollState.Idle) return;
+    if (offset < 0) {
+      this.followLatest = false;
+      if (this.earlierCount > 0 && this.firstVisibleRow <= 2) this.loadMoreMessages(true);
+    } else if (offset > 0 && this.laterCount > 0) {
+      const footer = this.scroller.getItemRect(this.messageList.totalCount());
+      if (footer.height > 0 && footer.y < this.listViewportHeight + 240) this.loadMoreMessages(false);
+    }
   }
 
   private scrollToLatest(): void {
@@ -579,8 +742,9 @@ struct NativeChat {
       return;
     }
     if (this.history.activeId !== id) {
-      this.drafts.set(this.history.activeId ?? '', { text: this.draft, files: this.draftFiles });
+      this.rememberCurrentDraft();
       this.stopVoice();
+      this.sourcesVisible = false;
       this.history = selectConversation(this.history, id);
       this.restoreDraft(id ?? '');
       this.editId = '';
@@ -681,7 +845,9 @@ struct NativeChat {
       const next = deleteConversations(this.historyWithPartialReplies(), ids);
       await this.storage.saveConversations(context, next);
       this.history = deleteConversations(this.history, ids);
-      await this.save(context);
+      this.draftHistoryWrites.forEach((sessionId: string, replyId: string): void => {
+        if (deleted.has(sessionId)) this.draftHistoryWrites.delete(replyId);
+      });
       for (const id of draftIds) {
         if (deleteAll || deleted.has(id)) {
           this.drafts.delete(id);
@@ -694,9 +860,12 @@ struct NativeChat {
       this.resetSelection();
       for (const file of candidates.values()) {
         if (file.local && !retained.has(file.id)) {
-          await this.attachments.remove(context, file).catch(() => {});
+          this.removedDraftFiles.set(file.id, file);
         }
       }
+      this.draftDirty = true;
+      await this.save(context);
+      await this.persistDrafts();
     } finally {
       this.backupBusy = false;
       this.deletingSessions = false;
@@ -723,6 +892,86 @@ struct NativeChat {
     this.draftFiles = draft?.files ?? [];
   }
 
+  private rememberCurrentDraft(): void {
+    const key = this.history.activeId ?? '';
+    if (this.draft || this.draftFiles.length) {
+      this.drafts.set(key, { text: this.draft, files: this.draftFiles });
+    } else {
+      this.drafts.delete(key);
+    }
+  }
+
+  private async loadDrafts(context: common.UIAbilityContext): Promise<void> {
+    if (this.draftStorageReady) return;
+    try {
+      const items = await this.draftStorage.load(context);
+      for (const item of items) {
+        if (item.sessionId !== null && !this.session(item.sessionId)) continue;
+        const files = item.files.map<NativeDraftAttachment>((file: NativeAttachment): NativeDraftAttachment => {
+          const ready = !!file.serverId && file.serverBinding === this.settings.attachmentBinding;
+          return { item: file, state: ready ? 'ready' : 'failed',
+            error: ready ? '' : this.label('请重试上传', 'Retry this upload') };
+        });
+        this.drafts.set(item.sessionId ?? '', { text: item.text, files });
+      }
+      this.restoreDraft(this.history.activeId ?? '');
+      this.draftStorageReady = true;
+    } catch {
+      this.toast(this.label('无法读取已保存的草稿', 'Unable to read saved drafts'));
+    }
+  }
+
+  private updateDraftText(value: string): void {
+    if (value === this.draft) return;
+    this.draft = value;
+    this.scheduleDraftSave();
+  }
+
+  private scheduleDraftSave(immediate: boolean = false): void {
+    this.draftDirty = true;
+    if (this.draftSaveTimer >= 0) clearTimeout(this.draftSaveTimer);
+    if (immediate) {
+      this.draftSaveTimer = -1;
+      void this.persistDrafts();
+      return;
+    }
+    this.draftSaveTimer = setTimeout(() => {
+      this.draftSaveTimer = -1;
+      void this.persistDrafts();
+    }, 250);
+  }
+
+  private async persistDrafts(): Promise<void> {
+    if (!this.draftStorageReady || this.draftSaving || !this.draftDirty || this.draftHistoryWrites.size > 0) return;
+    this.rememberCurrentDraft();
+    const rows: NativeStoredDraft[] = [];
+    this.drafts.forEach((draft: NativeDraft, id: string): void => {
+      if ((id === '' || this.session(id)) && (draft.text || draft.files.length)) {
+        rows.push({ sessionId: id || null, text: draft.text,
+          files: draft.files.map<NativeAttachment>((file: NativeDraftAttachment): NativeAttachment => file.item) });
+      }
+    });
+    const removed = Array.from(this.removedDraftFiles.values());
+    const context = this.host();
+    this.draftSaving = true;
+    this.draftDirty = false;
+    let saved = false;
+    try {
+      await this.draftStorage.save(context, rows);
+      saved = true;
+      for (const item of removed) {
+        this.removedDraftFiles.delete(item.id);
+        await this.attachments.remove(context, item).catch(() => {});
+      }
+    } catch {
+      this.draftDirty = true;
+      this.toast(this.label('草稿保存失败，请重试', 'Unable to save drafts. Please try again.'));
+    } finally {
+      this.draftSaving = false;
+      if (saved && this.draftDirty) void this.persistDrafts();
+    }
+  }
+
   private draftItems(id: string): NativeDraftAttachment[] {
     return (this.history.activeId ?? '') === id ? this.draftFiles : this.drafts.get(id)?.files ?? [];
   }
@@ -733,6 +982,7 @@ struct NativeChat {
     } else if (this.drafts.has(id) || id === '' || this.session(id)) {
       this.drafts.set(id, { text: this.drafts.get(id)?.text ?? '', files: items });
     }
+    this.scheduleDraftSave(true);
   }
 
   private requestConfig(): NativeChatConfig {
@@ -794,7 +1044,8 @@ struct NativeChat {
   private removeDraftFile(item: NativeAttachment): void {
     const id = this.history.activeId ?? '';
     this.updateDraftItems(id, this.draftItems(id).filter((file: NativeDraftAttachment): boolean => file.item.id !== item.id));
-    void this.attachments.remove(this.host(), item).catch(() => { this.toast(this.label('删除本地附件失败', "Unable to delete local attachment")); });
+    this.removedDraftFiles.set(item.id, item);
+    this.scheduleDraftSave(true);
   }
 
   private canSendDraft(): boolean {
@@ -901,16 +1152,28 @@ struct NativeChat {
     };
     this.replies = [...this.replies, reply];
     if (clearDraft) {
+      void this.persistDrafts();
+      this.draftHistoryWrites.set(message.id, next.id);
       const draftId = this.history.activeId ?? '';
       this.drafts.delete(draftId);
       this.draft = '';
       this.draftFiles = [];
+      this.draftDirty = true;
     }
     this.history = upsertConversation(this.history, next, true);
     this.lastStreamSave = Date.now();
     this.status = '';
-    this.getUIContext().getFocusController().clearFocus();
-    this.scrollToLatest();
+    this.compactToolsOpen = false;
+    if (!this.wide()) {
+      this.getUIContext().getFocusController().clearFocus();
+    } else if (clearDraft) {
+      setTimeout(() => {
+        if (this.visible && this.history.activeId === next.id) {
+          this.getUIContext().getFocusController().requestFocus('nuwa-composer');
+        }
+      }, 0);
+    }
+    this.jumpToNewestMessages();
     void this.receive(this.host(), config, next, reply);
   }
 
@@ -1005,15 +1268,12 @@ struct NativeChat {
       const sourceOffset = reply.message.content.length;
       try {
         return await reply.client.send(config, messages, (content: string, reasoning: string): void => {
-          if (this.history.activeId === session.id && this.visible && this.scroller.isAtEnd()) {
-            this.scrollToLatest();
-          }
           reply.message.content += content;
           reply.message.reasoning += reasoning;
-          this.replies = Array.from(this.replies);
+          this.paintLiveReplies();
           if (!this.deletingSessions && Date.now() - this.lastStreamSave > 1500) {
             this.lastStreamSave = Date.now();
-            void this.save(context);
+            void this.save(context, true);
           }
         }, (event: string): void => {
           const readLink = readLinks.apply(event, reply.message.content.length);
@@ -1032,9 +1292,9 @@ struct NativeChat {
               (citation: NativeChatCitation): NativeChatCitation => ({
                 offset: citation.offset + sourceOffset, sourceIndex: citation.sourceIndex,
               }));
-            this.replies = Array.from(this.replies);
+            this.paintLiveReplies();
           } else if (changed) {
-            this.replies = Array.from(this.replies);
+            this.paintLiveReplies();
           }
         });
       } catch (cause) {
@@ -1208,7 +1468,7 @@ struct NativeChat {
     this.history = upsertConversation(this.history, next);
     this.replies = [...this.replies, reply];
     this.lastStreamSave = Date.now();
-    this.scrollToLatest();
+    this.jumpToNewestMessages();
     void this.receive(this.host(), config, next, reply);
   }
 
@@ -1242,8 +1502,17 @@ struct NativeChat {
   private changeVersion(message: NativeConversationMessage, offset: number): void {
     const session = this.session();
     const sibling = this.versions(message)[this.version(message) + offset];
-    if (session && sibling) {
+    if (session && sibling && !this.reply(session.id)) {
+      const pathIndex = this.messagePath.findIndex((item: NativeConversationMessage): boolean => item.id === message.id);
+      const listIndex = pathIndex - this.messageRange.start + Number(this.earlierCount > 0);
+      const keepPosition = pathIndex >= this.messageRange.start && pathIndex < this.messageRange.end;
+      const top = keepPosition ? this.scroller.getItemRect(listIndex).y : 0;
+      this.followLatest = false;
+      this.sourcesVisible = false;
       this.history = upsertConversation(this.history, selectMessageVersion(session, sibling.id));
+      if (keepPosition && pathIndex >= this.messageRange.start && pathIndex < this.messageRange.end) {
+        this.restoreListPosition(pathIndex - this.messageRange.start + Number(this.earlierCount > 0), top);
+      }
       this.stopVoice();
       void this.save();
     }
@@ -1319,12 +1588,29 @@ struct NativeChat {
     return this.viewportWidth <= 340;
   }
 
+  private wide(): boolean {
+    return this.viewportWidth >= 768;
+  }
+
+  private desktopSourcesWidth(): number {
+    return Math.min(390, this.viewportWidth / 2 - 64);
+  }
+
+  private setDesktopSidebar(collapsed: boolean): void {
+    this.settings.desktopSidebarCollapsed = collapsed;
+    if (collapsed) {
+      this.resetSelection();
+      this.getUIContext().getFocusController().clearFocus();
+    }
+    void this.saveSettings();
+  }
+
   private drawerWidth(): number {
     return Math.min(this.viewportWidth * 0.82, 310);
   }
 
   private drawerProgress(): number {
-    return Math.max(0, Math.min(1, (this.drawerOpen ? 1 : 0) + this.drawerDrag / this.drawerWidth()));
+    return this.wide() ? 0 : Math.max(0, Math.min(1, (this.drawerOpen ? 1 : 0) + this.drawerDrag / this.drawerWidth()));
   }
 
   @Builder
@@ -1339,6 +1625,28 @@ struct NativeChat {
   }
 
   @Builder
+  private desktopHeader() {
+    Row({ space: 8 }) {
+      if (this.settings.desktopSidebarCollapsed) {
+        Row({ space: 4 }) {
+          this.iconButton($r('app.media.native_menu'), this.label('展开侧边栏', 'Open sidebar'),
+            () => { this.setDesktopSidebar(false); }, 38)
+          this.iconButton($r('app.media.native_new_chat'), this.label('开启新对话', 'New chat'),
+            () => { this.activate(null); }, 38)
+        }
+        .width(105).padding({ left: 10 })
+      }
+      if (this.history.activeId !== null) {
+        Text(this.session()?.title || this.label('新对话', 'New chat'))
+          .fontSize(14).fontWeight(FontWeight.Medium).fontColor($r('app.color.native_chat_primary'))
+          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).constraintSize({ maxWidth: 480 })
+          .padding({ left: 12, right: 12, top: 8, bottom: 8 }).onClick(() => { this.titlePressed(); })
+      }
+    }
+    .width('100%').height(60).padding({ left: 18, right: 18, top: 12 })
+  }
+
+  @Builder
   private header() {
     Row({ space: this.compact() ? 6 : 10 }) {
       Row() {
@@ -1350,15 +1658,7 @@ struct NativeChat {
         Text(this.session()?.title || this.label('新对话', "New chat")).fontSize(this.compact() ? 13 : 14).fontWeight(FontWeight.Medium)
           .fontColor($r('app.color.native_chat_primary')).textAlign(TextAlign.Center)
           .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
-          .onClick(() => {
-            const now = Date.now();
-            if (now - this.titleTap < 400) {
-              this.scroller.scrollEdge(Edge.Top);
-              this.titleTap = 0;
-            } else {
-              this.titleTap = now;
-            }
-          })
+          .onClick(() => { this.titlePressed(); })
       } else {
         Blank().layoutWeight(1)
       }
@@ -1376,17 +1676,19 @@ struct NativeChat {
   }
 
   @Builder
-  private welcome() {
+  private welcome(flex: boolean = true) {
     Column({ space: this.compact() ? 6 : 16 }) {
       Image($r('app.media.native_welcome_logo'))
-        .width(this.compact() ? 34 : 52).height(this.compact() ? 34 : 52)
+        .width(this.compact() ? 34 : this.wide() && this.viewportHeight <= 500 ? 42 : 52)
+        .height(this.compact() ? 34 : this.wide() && this.viewportHeight <= 500 ? 42 : 52)
         .borderRadius(this.compact() ? 10 : 14).shadow({ radius: 14, color: '#14000000', offsetY: 4 })
         .draggable(false).accessibilityText('Nuwa')
         Text(this.label('你好，让我们开始聊天吧', "Hi, let's start chatting"))
-          .fontSize(this.compact() ? 14 : 20).fontWeight(FontWeight.Medium)
+          .fontSize(this.compact() ? 14 : this.wide() && this.viewportHeight <= 500 ? 18 : 20)
+          .fontWeight(FontWeight.Medium)
         .fontColor($r('app.color.native_chat_primary'))
     }
-    .width('100%').layoutWeight(1).justifyContent(FlexAlign.Center)
+    .width('100%').layoutWeight(flex ? 1 : 0).justifyContent(FlexAlign.Center)
   }
 
   @Builder
@@ -1537,9 +1839,8 @@ struct NativeChat {
   }
 
   @Builder
-  private composer() {
-    Column({ space: 2 }) {
-      this.draftAttachmentStrip()
+  private composerField(inline: boolean) {
+    Column() {
       if (this.recognitionId) {
         Row({ space: 4 }) {
           if (this.transcribing) {
@@ -1550,45 +1851,102 @@ struct NativeChat {
             }, (_bar: number, index: number): string => index.toString())
           }
         }
-        .width('100%').height(this.viewportWidth < 440 ? 42 : 60).padding({ left: 16 })
+        .width('100%').height(inline || this.viewportWidth < 440 ? 42 : 60).padding({ left: inline ? 6 : 16 })
         .accessibilityText(this.transcribing ? this.label('正在转写…', 'Transcribing…') : this.label('录音中', 'Recording'))
       } else {
           TextArea({ text: this.draft, placeholder: this.label('发消息或语音输入', 'Message or voice input') })
-          .width('100%').constraintSize({ minHeight: this.viewportWidth < 440 ? 42 : 60, maxHeight: 336 })
-          .padding({ top: 12, bottom: 0, left: 16, right: 12 }).borderRadius(0)
-          .fontSize(16).lineHeight(24).placeholderColor($r('app.color.native_chat_caption'))
+          .width('100%').constraintSize({ minHeight: inline || this.viewportWidth < 440 ? 42 : 60,
+            maxHeight: inline ? 110 : 336 })
+          .padding({ top: inline ? 10 : 12, bottom: 0, left: inline ? 4 : 16, right: inline ? 4 : 12 })
+          .borderRadius(0).fontSize(inline ? 14 : 16).lineHeight(inline ? 20 : 24)
+          .placeholderColor($r('app.color.native_chat_caption'))
           .fontColor($r('app.color.native_chat_primary')).caretColor($r('app.color.native_chat_blue_text'))
-          .backgroundColor(Color.Transparent).enterKeyType(EnterKeyType.NEW_LINE).enabled(this.loaded)
-          .onChange((value: string) => { this.draft = value; })
-
+          .backgroundColor(Color.Transparent).enterKeyType(EnterKeyType.NEW_LINE)
+          .enabled(this.loaded && !this.backupBusy).id('nuwa-composer').defaultFocus(this.wide())
+          .onFocus(() => { this.compactToolsOpen = false; })
+          .onChange((value: string) => { this.updateDraftText(value); })
       }
-      Row({ space: this.compact() ? 6 : 9 }) {
-        this.togglePill($r('app.media.native_think'), () => this.label('深度思考', 'DeepThink'), () => this.settings.thinking, () => {
-          this.settings.thinking = !this.settings.thinking;
-          void this.saveSettings();
-        })
-        this.togglePill($r('app.media.native_web_search'), () => this.label('智能搜索', 'Search'), () => this.settings.search, () => {
-          this.settings.search = !this.settings.search;
-          void this.saveSettings();
-        })
-        Blank().layoutWeight(1)
-        Row({ space: this.compact() ? 4 : 6 }) {
-          if (this.reply()) {
-            this.addAttachmentButton()
-            this.iconButton($r('app.media.native_stop'), this.label('停止生成', "Stop generating"), () => { this.stopVoice(); this.cancelReply(); },
-              34, 16, Color.White, $r('app.color.native_chat_blue'))
-          } else if (this.draft.trim() || this.draftFiles.length) {
-            this.voiceButton()
-            this.addAttachmentButton()
-            this.iconButton($r('app.media.native_send'), this.label('发送', "Send"), () => { this.sendDraft(); },
-              34, 16, Color.White, $r('app.color.native_chat_blue'), () => this.loaded && this.canSendDraft())
-          } else {
-            this.addAttachmentButton()
-            this.voiceButton()
-          }
+    }
+    .width(inline ? undefined : '100%').layoutWeight(inline ? 1 : 0)
+  }
+
+  @Builder
+  private composerToggles() {
+    this.togglePill($r('app.media.native_think'), () => this.label('深度思考', 'DeepThink'), () => this.settings.thinking, () => {
+      this.settings.thinking = !this.settings.thinking;
+      void this.saveSettings();
+    })
+    this.togglePill($r('app.media.native_web_search'), () => this.label('智能搜索', 'Search'), () => this.settings.search, () => {
+      this.settings.search = !this.settings.search;
+      void this.saveSettings();
+    })
+  }
+
+  @Builder
+  private composerAction() {
+    if (this.reply()) {
+      this.iconButton($r('app.media.native_stop'), this.label('停止生成', 'Stop generating'),
+        () => { this.stopVoice(); this.cancelReply(); }, 34, 16, Color.White, $r('app.color.native_chat_blue'))
+    } else if (this.draft.trim() || this.draftFiles.length) {
+      this.iconButton($r('app.media.native_send'), this.label('发送', 'Send'), () => { this.sendDraft(); },
+        34, 16, Color.White, $r('app.color.native_chat_blue'), () => this.loaded && this.canSendDraft())
+    } else {
+      this.voiceButton()
+    }
+  }
+
+  @Builder
+  private compactComposer() {
+    if (this.compactToolsOpen) {
+      Row({ space: 6 }) {
+        this.composerToggles()
+        this.iconButton($r('app.media.native_add'), this.label('上传附件', 'Upload attachment'), () => {
+          this.compactToolsOpen = false;
+          void this.pickFiles();
+        }, 34, 22)
+      }
+      .width('100%').padding({ left: 8, right: 8, top: 8 })
+    }
+    Row({ space: 4 }) {
+      Stack({ alignContent: Alignment.TopEnd }) {
+        Button({ type: ButtonType.Circle, buttonStyle: ButtonStyleMode.TEXTUAL }) {
+          Image($r('app.media.native_add')).width(22).height(22)
+            .colorFilter(nativeIconTint($r('app.color.native_chat_primary')))
+            .rotate({ angle: this.compactToolsOpen ? 45 : 0 })
+        }
+        .width(34).height(34).padding(0).accessibilityText(this.label('对话工具', 'Chat tools'))
+        .onClick(() => { this.compactToolsOpen = !this.compactToolsOpen; })
+        if (!this.compactToolsOpen && (this.settings.search || this.settings.thinking)) {
+          Circle().width(6).height(6).fill($r('app.color.native_chat_blue')).margin({ top: 3, right: 3 })
+            .hitTestBehavior(HitTestMode.None)
         }
       }
-      .width('100%').padding({ left: 12, right: 12, top: 8, bottom: 12 })
+      .width(34).height(34)
+      this.composerField(true)
+      this.composerAction()
+    }
+    .width('100%').padding({ left: 6, right: 7, bottom: 4 })
+  }
+
+  @Builder
+  private composer() {
+    Column({ space: 2 }) {
+      this.draftAttachmentStrip()
+      if (this.compact()) {
+        this.compactComposer()
+      } else {
+        this.composerField(false)
+        Row({ space: 9 }) {
+          this.composerToggles()
+          Blank().layoutWeight(1)
+          Row({ space: 6 }) {
+            if (!this.reply() && (this.draft.trim() || this.draftFiles.length)) this.voiceButton()
+            this.addAttachmentButton()
+            this.composerAction()
+          }
+        }
+        .width('100%').padding({ left: 12, right: 12, top: 8, bottom: 12 })
+      }
     }
     .width('100%').borderRadius(24)
     .border({ width: 1, color: this.history.activeId === null ? $r('app.color.native_chat_glass_stroke') :
@@ -1603,12 +1961,13 @@ struct NativeChat {
     if (this.versions(message).length > 1) {
       Row() {
         this.iconButton($r('app.media.native_chevron_left'), this.label('上一个版本', "Previous version"), () => { this.changeVersion(message, -1); },
-          26, 14, $r('app.color.native_chat_secondary'), Color.Transparent, () => this.version(message) > 0)
+          26, 14, $r('app.color.native_chat_secondary'), Color.Transparent,
+          () => !this.reply() && this.version(message) > 0)
         Text(`${this.version(message) + 1}/${this.versions(message).length}`)
           .fontSize(12).fontColor($r('app.color.native_chat_secondary'))
         this.iconButton($r('app.media.native_chevron_right'), this.label('下一个版本', "Next version"), () => { this.changeVersion(message, 1); },
           26, 14, $r('app.color.native_chat_secondary'), Color.Transparent,
-          () => this.version(message) + 1 < this.versions(message).length)
+          () => !this.reply() && this.version(message) + 1 < this.versions(message).length)
       }
     }
   }
@@ -1934,7 +2293,7 @@ struct NativeChat {
       const context = this.host();
       const next = upsertConversation(this.history, imported, true);
       await this.storage.saveConversations(context, next);
-      this.drafts.set(this.history.activeId ?? '', { text: this.draft, files: this.draftFiles });
+      this.rememberCurrentDraft();
       this.history = next;
       this.restoreDraft(imported.id);
       this.shareImportVisible = false;
@@ -2494,8 +2853,28 @@ struct NativeChat {
   }
 
   @Builder
-  private drawer() {
+  private drawer(desktop: boolean = false) {
     Column() {
+      if (desktop && !this.selecting) {
+        Row({ space: 9 }) {
+          Image($r('app.media.native_welcome_logo')).width(28).height(28).borderRadius(8).draggable(false)
+          Text('Nuwa').fontSize(16).fontWeight(FontWeight.Medium).layoutWeight(1)
+            .fontColor($r('app.color.native_chat_primary'))
+          this.iconButton($r('app.media.native_menu'), this.label('收起侧边栏', 'Close sidebar'),
+            () => { this.setDesktopSidebar(true); }, 34)
+        }
+        .width('100%').height(42).padding({ left: 6 }).margin({ bottom: 10 })
+        Button({ type: ButtonType.Capsule }) {
+          Row({ space: 10 }) {
+            Image($r('app.media.native_new_chat')).width(17).height(17)
+              .colorFilter(nativeIconTint($r('app.color.native_chat_blue_text')))
+            Text(this.label('开启新对话', 'New chat')).fontSize(14).fontWeight(FontWeight.Medium)
+              .fontColor($r('app.color.native_chat_blue_text'))
+          }
+        }
+        .width('100%').height(40).margin({ bottom: 8 }).backgroundColor($r('app.color.native_chat_selected'))
+        .onClick(() => { this.activate(null); })
+      }
       if (this.selecting) {
         Row() {
           Button(this.label('取消', "Cancel"), { buttonStyle: ButtonStyleMode.TEXTUAL }).onClick(() => { this.resetSelection(); })
@@ -2581,7 +2960,7 @@ struct NativeChat {
         .onClick(() => { this.setDrawer(false); this.openSettings(); })
       }
     }
-    .width(this.drawerWidth()).height('100%').padding({ left: 16, right: 10, top: 14, bottom: 8 })
+    .width(desktop ? 261 : this.drawerWidth()).height('100%').padding({ left: 16, right: 10, top: 14, bottom: 8 })
   }
 
   @Builder
@@ -2605,9 +2984,44 @@ struct NativeChat {
   }
 
   @Builder
+  private messagePager(earlier: boolean) {
+    Row({ space: 8 }) {
+      Button(earlier ? this.label(`加载更早消息（还有 ${this.earlierCount} 条）`,
+        `Load earlier messages (${this.earlierCount} more)`) :
+        this.label(`加载后续消息（还有 ${this.laterCount} 条）`, `Load later messages (${this.laterCount} more)`),
+        { type: ButtonType.Capsule, buttonStyle: ButtonStyleMode.TEXTUAL })
+        .height(32).fontSize(12).border({ width: 1, color: $r('app.color.native_chat_stroke') })
+        .fontColor($r('app.color.native_chat_secondary')).onClick(() => { this.loadMoreMessages(earlier); })
+      if (!earlier) {
+        Button(this.label('回到底部', 'Back to bottom'), { type: ButtonType.Capsule, buttonStyle: ButtonStyleMode.TEXTUAL })
+          .height(32).fontSize(12).border({ width: 1, color: $r('app.color.native_chat_blue') })
+          .fontColor($r('app.color.native_chat_blue_text')).onClick(() => { this.jumpToNewestMessages(); })
+      }
+    }
+    .width('100%').justifyContent(FlexAlign.Center).padding({ top: 16, bottom: 8 })
+  }
+
+  @Builder
+  private composerContainer() {
+    Column() { this.composer() }
+    .width('100%').constraintSize({ maxWidth: this.wide() ? (this.viewportWidth >= 1024 ? 808 : 680) : 808 })
+    .padding({
+      left: this.wide() ? 16 : this.compact() ? 6 : 14,
+      right: this.wide() ? 16 : this.compact() ? 6 : 14,
+      bottom: this.wide() && this.viewportHeight <= 500 ? 16 : this.compact() ? 6 : 14,
+    })
+  }
+
+  private centeredComposer(): boolean {
+    return this.wide() && this.loaded && this.history.activeId === null;
+  }
+
+  @Builder
   private chatPage() {
     Column() {
-      if (this.viewportHeight > 180) {
+      if (this.wide() && (this.history.activeId !== null || this.settings.desktopSidebarCollapsed)) {
+        this.desktopHeader()
+      } else if (!this.wide() && this.viewportHeight > 180) {
         this.header()
       }
       if (!this.loaded) {
@@ -2621,29 +3035,53 @@ struct NativeChat {
         }
         .layoutWeight(1).width('100%').justifyContent(FlexAlign.Center)
       } else if (this.history.activeId === null) {
-        this.welcome()
+        if (this.centeredComposer()) {
+          Column({ space: this.viewportHeight <= 500 ? 18 : 26 }) {
+            this.welcome(false)
+            this.composerContainer()
+          }
+          .width('100%').layoutWeight(1).justifyContent(FlexAlign.Center)
+        } else {
+          this.welcome()
+        }
       } else {
         List({ scroller: this.scroller }) {
-          ForEach(this.messages(), (message: NativeConversationMessage, index: number) => {
+          if (this.earlierCount > 0) {
+            ListItem() { this.messagePager(true) }
+          }
+          LazyForEach(this.messageList, (row: NativeMessageRow) => {
             ListItem() {
-              if (message.role === 'user') {
-                this.userMessage(message, index)
+              if (row.message.role === 'user') {
+                this.userMessage(row.message, row.index)
               } else {
-                this.assistantMessage(message)
+                this.assistantMessage(row.message)
               }
             }
-          }, (message: NativeConversationMessage): string => `${message.id}:${message.status ?? ''}`)
+          }, (row: NativeMessageRow): string => row.key.toString())
+          if (this.laterCount > 0) {
+            ListItem() { this.messagePager(false) }
+          }
         }
-        .width('100%').constraintSize({ maxWidth: 840 }).layoutWeight(1).scrollBar(BarState.Auto)
+        .width('100%').constraintSize({ maxWidth: this.wide() ? (this.viewportWidth >= 1024 ? 792 : 680) : 840 })
+        .layoutWeight(1).scrollBar(BarState.Auto)
+        .cachedCount(4).onScrollIndex((start: number) => { this.firstVisibleRow = start; })
+        .onScroll((offset: number, state: ScrollState) => { this.observeMessageScroll(offset, state); })
+        .onAreaChange((_old: Area, area: Area) => {
+          const height = Number(area.height);
+          if (height !== this.listViewportHeight) {
+            this.listViewportHeight = height;
+            if (this.followLatest && this.laterCount === 0) this.scrollToLatest();
+          }
+        })
         .padding({ left: this.compact() ? 10 : 20, right: this.compact() ? 10 : 20, bottom: 16 })
       }
       if (this.loaded && this.status) {
         Text(this.status).fontSize(13).fontColor($r('app.color.native_chat_error'))
           .width('100%').padding({ left: 16, right: 16, bottom: 4 })
       }
-      Column() { this.composer() }
-      .width('100%').constraintSize({ maxWidth: 808 })
-      .padding({ left: this.compact() ? 6 : 14, right: this.compact() ? 6 : 14, bottom: this.compact() ? 6 : 14 })
+      if (!this.centeredComposer()) {
+        this.composerContainer()
+      }
     }
     .width('100%').height('100%').backgroundColor($r('app.color.native_chat_bg'))
     .bindSheet($$this.settingsVisible, this.settingsPage(),
@@ -2663,28 +3101,45 @@ struct NativeChat {
       if (this.drawerProgress() > 0) {
         this.drawer()
       }
-      Stack() {
-        if (this.loaded && !this.authenticated()) {
-          NativeOnboarding({
-            locale: this.settings.locale,
-            compact: this.compact(), busy: this.authorizing, view: this.$onboardingView,
-            initialUrl: this.settings.baseUrl, initialModel: this.settings.model, initialProtocol: this.settings.protocol,
-            onAccount: () => { void this.startAuthorization(); },
-            onConnect: (credential: NativeApiCredential): Promise<void> => this.connectKey(credential),
-            onHelp: () => { void this.openLink('https://api-docs.deepseek.com/zh-cn/'); },
-            onPlatformKeys: () => { void this.openLink('https://platform.deepseek.com/api_keys'); },
-          })
-        } else {
-          this.chatPage()
+      Row() {
+        if (this.wide() && this.loaded && this.authenticated() && !this.settings.desktopSidebarCollapsed) {
+          this.drawer(true)
         }
-        if (this.drawerProgress() > 0) {
-          Column().width('100%').height('100%').backgroundColor(Color.Transparent)
-            .onClick(() => { this.setDrawer(false); })
+        Stack() {
+          if (this.loaded && !this.authenticated()) {
+            NativeOnboarding({
+              locale: this.settings.locale,
+              compact: this.compact(), busy: this.authorizing, view: this.$onboardingView,
+              initialUrl: this.settings.baseUrl, initialModel: this.settings.model, initialProtocol: this.settings.protocol,
+              onAccount: () => { void this.startAuthorization(); },
+              onConnect: (credential: NativeApiCredential): Promise<void> => this.connectKey(credential),
+              onHelp: () => { void this.openLink('https://api-docs.deepseek.com/zh-cn/'); },
+              onPlatformKeys: () => { void this.openLink('https://platform.deepseek.com/api_keys'); },
+            })
+          } else {
+            this.chatPage()
+          }
+          if (this.drawerProgress() > 0) {
+            Column().width('100%').height('100%').backgroundColor(Color.Transparent)
+              .onClick(() => { this.setDrawer(false); })
+          }
+        }
+        .height('100%').layoutWeight(1)
+        if (this.wide() && this.sourcesVisible) {
+          Column() { this.sourcesSheet() }
+          .width(this.desktopSourcesWidth()).height('100%')
+          .backgroundColor($r('app.color.native_chat_bg'))
+          .border({ width: { left: 1 }, color: $r('app.color.native_chat_stroke') })
         }
       }
       .width('100%').height('100%').translate({ x: this.drawerProgress() * this.drawerWidth() })
       .scale({ x: 1 - this.drawerProgress() * 0.05, y: 1 - this.drawerProgress() * 0.05, centerX: '0%' })
       .borderRadius(this.drawerProgress() > 0 ? 24 : 0).clip(this.drawerProgress() > 0)
+      NativeMathRendererHost()
+      if (!this.wide() && this.sourcesVisible) {
+        Column() { this.sourcesSheet() }
+        .width('100%').height('100%').backgroundColor($r('app.color.native_chat_bg'))
+      }
       if (this.authorizing) {
         this.authorizationPage()
       }
@@ -2731,17 +3186,19 @@ struct NativeChat {
       }
     }
     .width('100%').height('100%').backgroundColor($r('app.color.native_chat_sidebar')).clip(true)
-    .bindSheet($$this.sourcesVisible, this.sourcesSheet(),
-      { height: SheetSize.LARGE, blurStyle: BlurStyle.Thick, showClose: false })
     .onAreaChange((_old: Area, area: Area): void => {
       this.viewportWidth = Number(area.width);
       this.viewportHeight = Number(area.height);
+      if (this.wide() && (this.drawerOpen || this.drawerDrag !== 0)) {
+        this.drawerOpen = false;
+        this.drawerDrag = 0;
+      }
     })
     .parallelGesture(
       PanGesture({ direction: PanDirection.Horizontal, distance: 14 })
         .onActionStart((event: GestureEvent) => { this.touchStart = event.fingerList[0]?.globalX ?? this.viewportWidth; })
         .onActionUpdate((event: GestureEvent) => {
-          if (this.authenticated() && !this.settingsVisible && !this.renamingId && !this.authorizing &&
+          if (!this.wide() && this.authenticated() && !this.settingsVisible && !this.renamingId && !this.authorizing &&
             !this.imagePreview && !this.shareImportVisible && !this.sourcesVisible && !this.migrationPromptVisible &&
             (this.drawerOpen || this.touchStart < 160)) {
             this.drawerDrag = event.offsetX;
