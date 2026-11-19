@@ -246,6 +246,23 @@ export function updateConversationMessage(session: NativeConversation, message: 
   return next;
 }
 
+export function replaceConversationAttachment(session: NativeConversation, attachmentId: string,
+  replacement: NativeAttachment): NativeConversation {
+  let changed = false;
+  const updated = session.messages.map((message: NativeConversationMessage): NativeConversationMessage => {
+    if (!message.files?.some((item: NativeAttachment): boolean => item.id === attachmentId)) return message;
+    const next = copyMessage(message);
+    next.files = message.files.map((item: NativeAttachment): NativeAttachment =>
+      item.id === attachmentId ? replacement : item);
+    changed = true;
+    return next;
+  });
+  if (!changed) return session;
+  const next = copyConversation(session);
+  next.messages = updated;
+  return next;
+}
+
 export function selectConversation(state: NativeConversationState, id: string | null): NativeConversationState {
   if (id === state.activeId || (id !== null && !state.sessions.some((session: NativeConversation): boolean =>
     session.id === id))) {

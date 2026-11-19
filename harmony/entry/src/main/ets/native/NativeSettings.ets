@@ -19,6 +19,7 @@ export interface NativeSettings {
   model: string;
   protocol: NativeApiProtocol;
   authMode: NativeAuthMode;
+  signedOut: boolean;
   locale: NativeLocale;
   location: NativeUserLocation | null;
   theme: NativeTheme;
@@ -118,7 +119,9 @@ export class NativeSettingsController {
   async load(context: common.UIAbilityContext): Promise<NativeSettings> {
     await serializedWrites;
     const store = await preferences.getPreferences(context, PREFERENCES_NAME);
-    const credential = await readCredential();
+    const signedOut = await store.get('signedOut', false) === true;
+    const credential = signedOut ? null : await readCredential();
+    if (signedOut) await writeApiKey('', '').catch(() => {});
     const baseUrl = await store.get('baseUrl', DEFAULT_BASE_URL) as string;
     const model = await store.get('model', DEFAULT_MODEL) as string;
     const protocol = await store.get('protocol', 'openai') as string;
@@ -144,6 +147,7 @@ export class NativeSettingsController {
       model,
       protocol: resolvedProtocol,
       authMode: authMode === 'deepseek-account' ? 'deepseek-account' : 'api-key',
+      signedOut,
       locale: locale === 'zh-CN' || locale === 'en-US' ? locale : defaultNativeLocale(),
       location,
       theme: theme === 'dark' || theme === 'light' ? theme : 'system',
@@ -157,6 +161,17 @@ export class NativeSettingsController {
       migrationPromptHandled,
       desktopSidebarCollapsed,
     };
+  }
+
+  /** Commit the disconnected state before removing credentials from separate stores. */
+  async markSignedOut(context: common.UIAbilityContext): Promise<void> {
+    const operation = serializedWrites.then(async (): Promise<void> => {
+      const store = await preferences.getPreferences(context, PREFERENCES_NAME);
+      await store.put('signedOut', true);
+      await store.flush();
+    });
+    serializedWrites = operation.catch(() => {});
+    return operation;
   }
 
   async save(context: common.UIAbilityContext, settings: NativeSettings,
@@ -179,6 +194,7 @@ export class NativeSettingsController {
         store.put('model', settings.model),
         store.put('protocol', settings.protocol),
         store.put('authMode', settings.authMode),
+        store.put('signedOut', settings.signedOut),
         store.put('theme', settings.theme),
         store.put('chatFontSize', settings.chatFontSize),
         store.put('attachmentBinding', settings.attachmentBinding),

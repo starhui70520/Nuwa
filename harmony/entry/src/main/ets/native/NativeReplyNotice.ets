@@ -2,10 +2,18 @@ import { NativeLocale } from './NativeLocation';
 
 export type NativeReplyFailureKind = 'network' | 'upload' | 'response' | 'unsupported-image';
 
+export interface NativeFailedUpload {
+  id: string;
+  detail: string;
+  retryable: boolean;
+  status?: number;
+}
+
 export interface NativeReplyFailure {
   kind: NativeReplyFailureKind;
   detail: string;
   status?: number;
+  uploadFiles?: NativeFailedUpload[];
 }
 
 export interface NativeReplyNotice {

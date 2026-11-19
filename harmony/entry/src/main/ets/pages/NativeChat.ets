@@ -13,9 +13,11 @@ import {
 import { loadNativeAccount, saveNativeAccount } from '../native/NativeAccountStore';
 import { allowsKeylessNativeApi, NativeApiCredential, verifyNativeApiCredential } from '../native/NativeApiCredential';
 import { NativeDataSettings, NativeMigrationChoices } from '../native/NativeDataSettings';
+import { NativeFeedbackReport } from '../native/NativeFeedbackReport';
+import { recordNativeFeedbackLog } from '../native/NativeFeedbackService';
 import { NativeDeepSeekAccount, NativeDeepSeekAccountController, NativeDeepSeekBalance } from '../native/NativeDeepSeekAccount';
 import { NativeOnboarding, NativeOnboardingView } from '../native/NativeOnboarding';
-import { NativeAttachment, NativeChatAttachments } from '../native/NativeChatAttachments';
+import { NativeAttachment, NativeAttachmentUploadError, NativeChatAttachments } from '../native/NativeChatAttachments';
 import {
   hydrateImportedAttachment, importedAttachmentPreview, NativeChatBackup, mergeChatBackup, nativeArchivedReplyTemplate,
 } from '../native/NativeChatBackup';
@@ -27,7 +29,8 @@ import { NativeChatStorage } from '../native/NativeChatStorage';
 import {
   appendBranch, createConversation, createConversationMessage, deleteConversations, groupConversations,
   messageVersions, NativeConversation, NativeConversationGroup, NativeConversationMessage, NativeConversationState,
-  renameConversation, selectConversation, selectMessageVersion, setConversationsPinned, toggleConversationPin,
+  renameConversation, replaceConversationAttachment, selectConversation, selectMessageVersion,
+  setConversationsPinned, toggleConversationPin,
   updateConversationMessage, upsertConversation, visibleMessages,
 } from '../native/NativeConversation';
 import { NativeMarkdown } from '../native/NativeMarkdown';
@@ -37,13 +40,19 @@ import { CHAT_PAGE_SIZE, nativeMessageRange, NativeMessageList, NativeMessageRan
 import { NativeMigrationPrompt } from '../native/NativeMigrationPrompt';
 import { NativeMigrationIntent } from '../native/NativeMigrationStrategy';
 import { hasPendingNativeMigration } from '../native/NativePendingMigration';
-import { describeNativeReplyFailure, nativeRefusalText, NativeReplyNotice } from '../native/NativeReplyNotice';
+import {
+  describeNativeReplyFailure, nativeRefusalText, NativeFailedUpload, NativeReplyNotice,
+} from '../native/NativeReplyNotice';
 import { isOfficialNativeReadLinkRoute, NativeReadLink, NativeReadLinkCollector, useNativeReadLink } from '../native/NativeReadLinks';
 import {
   createNativeLatestReminder, defaultNativeLocale, nativeCityOptions, NativeLocationOption,
   nativeProvinceOptions, nativeRegionOptions, NativeUserLocation, usesChineseLocationPicker,
 } from '../native/NativeLocation';
 import { NativeSettings, NativeSettingsController, NATIVE_CHAT_FONT_SIZES } from '../native/NativeSettings';
+import {
+  createSidebarRows, filterSidebarGroups, NativeSidebarRow, NativeSidebarSearch, NativeSidebarSession,
+  normalizeSidebarQuery, SIDEBAR_HISTORY_PAGE_SIZE,
+} from '../native/NativeSidebarHistory';
 import { fetchNativeProviderBalance } from '../native/NativeProviderBalance';
 import {
   checkNativeUpdate, fetchNativeReleaseHistory, getNativeCurrentVersion, isUpdateSnoozed, NativeReleaseHistoryItem,
@@ -65,6 +74,11 @@ interface NativeReply {
   resumeRetry?: () => void;
 }
 
+interface NativePreparedReplyFile {
+  file?: NativeChatFileRef;
+  failure?: NativeFailedUpload;
+}
+
 interface NativeDraftAttachment {
   item: NativeAttachment;
   state: 'uploading' | 'ready' | 'failed';
@@ -79,15 +93,17 @@ interface NativeDraft {
 const EMPTY_TIMELINE: NativeToolTimelineView = { steps: [], answer: '', answerOffset: 0 };
 const MIGRATION_PREFERENCES = 'nuwa_native_migration';
 const MIGRATION_USED_KEY = 'one_click_used';
+const DEEPSEEK_DOCS_URL = 'https://api-docs.deepseek.com/zh-cn/';
 
 @Entry
 @Component
 struct NativeChat {
-  @State @Watch('syncMessageList') private history: NativeConversationState = { sessions: [], activeId: null };
+  @State @Watch('syncHistoryViews') private history: NativeConversationState = { sessions: [], activeId: null };
   @State private earlierCount: number = 0;
   @State private laterCount: number = 0;
   @State private settings: NativeSettings = {
     baseUrl: 'https://api.deepseek.com', model: 'deepseek-chat', apiKey: '', protocol: 'openai', authMode: 'api-key',
+    signedOut: false,
     theme: 'system', chatFontSize: 16, attachmentBinding: '', thinking: false, search: false, ttsMuted: true,
     speechEngine: 'auto', speechVoice: 'stella', migrationPromptHandled: false,
     desktopSidebarCollapsed: false,
@@ -102,6 +118,7 @@ struct NativeChat {
   @State private drawerOpen: boolean = false;
   @State private drawerDrag: number = 0;
   @State private searchText: string = '';
+  @State private sidebarRows: NativeSidebarRow[] = [];
   @State private selectedIds: string[] = [];
   @State private selecting: boolean = false;
   @State private settingsVisible: boolean = false;
@@ -122,6 +139,7 @@ struct NativeChat {
   @State private settingsModel: string = '';
   @State private settingsProtocol: 'openai' | 'anthropic' = 'openai';
   @State private settingsVerifying: boolean = false;
+  @State private signingOut: boolean = false;
   @State private settingsError: string = '';
   @State private backupBusy: boolean = false;
   @State private shareImportVisible: boolean = false;
@@ -171,6 +189,15 @@ struct NativeChat {
   private migrationUsed: boolean = false;
   private coldMigrationChecked: boolean = false;
   private readonly scroller = new Scroller();
+  private readonly sidebarScroller = new Scroller();
+  private readonly sidebarSearch = new NativeSidebarSearch();
+  private sidebarSessions?: NativeConversation[];
+  private sidebarGroups: NativeConversationGroup[] = [];
+  private filteredSidebarGroups: NativeConversationGroup[] = [];
+  private sidebarMatches: Set<string> = new Set<string>();
+  private sidebarQuery: string = '';
+  private sidebarLimit: number = SIDEBAR_HISTORY_PAGE_SIZE;
+  private sidebarResultCount: number = 0;
   private readonly messageList = new NativeMessageList();
   private messagePath: NativeConversationMessage[] = [];
   private visibleSession?: NativeConversation;
@@ -185,6 +212,8 @@ struct NativeChat {
   private visible: boolean = false;
   private scrollTimer: number = -1;
   private lastStreamSave: number = 0;
+  private rejectedImageBinding: string = '';
+  private rejectedHistoryImages: Set<string> = new Set();
   private streamFrame: number = -1;
   private touchStart: number = 0;
   private titleTap: number = 0;
@@ -201,6 +230,7 @@ struct NativeChat {
     if (state === 'done' && text) {
       this.updateDraftText(this.draft ? `${this.draft} ${text}` : text);
     } else if (state === 'error') {
+      void recordNativeFeedbackLog(this.host(), 'warn', 'speech', 'Voice input unavailable', code);
       this.toast(this.speechError(code, true));
     }
   });
@@ -208,6 +238,7 @@ struct NativeChat {
     if (id === this.readingId && state !== 'playing') {
       this.readingId = '';
       if (state === 'error' || state === 'unavailable') {
+        void recordNativeFeedbackLog(this.host(), 'warn', 'speech', 'Read-aloud unavailable', code);
         this.toast(this.speechError(code, false));
       }
     }
@@ -222,6 +253,7 @@ struct NativeChat {
 
   onPageShow(): void {
     this.visible = true;
+    this.refreshSidebarHistory();
     if (this.replies.length) this.replies = Array.from(this.replies);
     if (this.loaded) {
       void this.refreshBalance();
@@ -238,6 +270,7 @@ struct NativeChat {
   }
 
   onPageHide(): void {
+    this.sidebarSearch.cancel();
     if (this.replies.length && !this.deletingSessions) {
       void this.save();
     }
@@ -274,6 +307,7 @@ struct NativeChat {
   }
 
   onBackPress(): boolean {
+    if (this.signingOut) return true;
     if (this.imagePreview) {
       this.imagePreview = '';
     } else if (this.authorizing) {
@@ -323,7 +357,12 @@ struct NativeChat {
       this.history = await this.storage.loadConversations(context);
       try {
         this.settings = await this.settingsStore.load(context);
-        this.account = await loadNativeAccount();
+        if (this.settings.signedOut) {
+          this.account = null;
+          await saveNativeAccount(null).catch(() => {});
+        } else {
+          this.account = await loadNativeAccount();
+        }
         if (this.account && !this.settings.apiKey &&
           !allowsKeylessNativeApi(this.settings.baseUrl, this.settings.protocol)) {
           this.settings.authMode = 'deepseek-account';
@@ -391,6 +430,7 @@ struct NativeChat {
       baseUrl: this.settings.baseUrl, apiKey: this.settings.apiKey, model: this.settings.model,
       protocol: this.settings.protocol, thinking: this.settings.thinking, search: this.settings.search,
       ttsMuted: this.settings.ttsMuted, authMode: this.settings.authMode,
+      signedOut: this.settings.signedOut,
       speechEngine: this.settings.speechEngine, speechVoice: this.settings.speechVoice,
       migrationPromptHandled: this.settings.migrationPromptHandled,
       desktopSidebarCollapsed: this.settings.desktopSidebarCollapsed,
@@ -404,9 +444,9 @@ struct NativeChat {
     return this.settings.locale === 'en-US' ? english : chinese;
   }
 
-  private historyGroupLabel(group: NativeConversationGroup): string {
+  private historyGroupLabel(key: string, label: string): string {
     if (this.settings.locale === 'en-US') {
-      switch (group.key) {
+      switch (key) {
         case 'pinned': return 'Pinned';
         case 'today': return 'Today';
         case 'yesterday': return 'Yesterday';
@@ -414,7 +454,7 @@ struct NativeChat {
         case 'month': return '30 Days';
       }
     }
-    return group.label;
+    return label;
   }
 
   private async saveSettings(manualPreference?: 'locale' | 'location'): Promise<void> {
@@ -437,12 +477,12 @@ struct NativeChat {
   }
 
   private accountToken(): string {
-    return this.settings.authMode === 'deepseek-account' ? this.account?.token ?? '' : '';
+    return !this.settings.signedOut && this.settings.authMode === 'deepseek-account' ? this.account?.token ?? '' : '';
   }
 
   private authenticated(): boolean {
-    return !!this.settings.apiKey || !!this.accountToken() || (!!this.settings.model.trim() &&
-      allowsKeylessNativeApi(this.settings.baseUrl, this.settings.protocol));
+    return !this.settings.signedOut && (!!this.settings.apiKey || !!this.accountToken() ||
+      (!!this.settings.model.trim() && allowsKeylessNativeApi(this.settings.baseUrl, this.settings.protocol)));
   }
 
   private async refreshBalance(): Promise<void> {
@@ -468,12 +508,14 @@ struct NativeChat {
   }
 
   private async connectKey(credential: NativeApiCredential): Promise<void> {
+    if (this.signingOut) throw new Error(this.label('正在退出登录，请稍候', 'Signing out. Please wait.'));
     const settings = this.settingsSnapshot();
     settings.apiKey = credential.apiKey;
     settings.baseUrl = credential.baseUrl;
     settings.model = credential.model;
     settings.protocol = credential.protocol;
     settings.authMode = 'api-key';
+    settings.signedOut = false;
     settings.attachmentBinding = util.generateRandomUUID(true);
     await this.settingsStore.save(this.host(), settings);
     this.settings = settings;
@@ -521,7 +563,7 @@ struct NativeChat {
   }
 
   private async startAuthorization(): Promise<void> {
-    if (this.authorizing) {
+    if (this.authorizing || this.signingOut) {
       return;
     }
     this.authorizing = true;
@@ -574,20 +616,21 @@ struct NativeChat {
       if (!account || attempt !== this.authAttempt) {
         return;
       }
+      const settings = this.settingsSnapshot();
+      settings.authMode = 'deepseek-account';
+      settings.signedOut = false;
+      settings.attachmentBinding = util.generateRandomUUID(true);
       this.storingAccount = true;
       try {
         await saveNativeAccount(account);
+        await this.settingsStore.save(this.host(), settings);
       } finally {
         this.storingAccount = false;
       }
-      const settings = this.settingsSnapshot();
-      settings.authMode = 'deepseek-account';
-      settings.attachmentBinding = util.generateRandomUUID(true);
       this.account = account;
       this.settings = settings;
       this.onboardingView = 'home';
       this.cancelAuthorization();
-      void this.saveSettings();
       this.offerMigrationPrompt();
       void this.refreshBalance();
     } catch (error) {
@@ -632,6 +675,43 @@ struct NativeChat {
     }
   }
 
+  private async signOutAll(): Promise<void> {
+    if (this.signingOut || this.settingsVerifying || this.authorizing || this.backupBusy) return;
+    this.signingOut = true;
+    const context = this.host();
+    const account = this.account;
+    const settings = this.settingsSnapshot();
+    settings.apiKey = '';
+    settings.authMode = 'api-key';
+    settings.signedOut = true;
+    settings.attachmentBinding = util.generateRandomUUID(true);
+    try {
+      await this.settingsStore.markSignedOut(context);
+      const locale = settings.locale === 'en-US' ? 'en_US' : 'zh_CN';
+      this.settings = settings;
+      this.account = null;
+      this.balance = null;
+      this.balanceRequest++;
+      this.stopVoice();
+      this.replies.forEach((reply: NativeReply) => { this.cancelReply(reply.sessionId); });
+      this.onboardingView = 'home';
+      this.settingsKey = '';
+      this.settingsVisible = false;
+      this.migrationPromptVisible = false;
+      this.setDrawer(false);
+      void this.accountController.logout(account?.token ?? '', locale);
+      const results = await Promise.allSettled([saveNativeAccount(null), this.settingsStore.save(context, settings)]);
+      if (results.some((result: PromiseSettledResult<void>): boolean => result.status === 'rejected')) {
+        this.toast(this.label('已退出登录，本地凭据清理将在下次启动时重试',
+          'Signed out. Local credential cleanup will retry at next launch.'));
+      }
+    } catch {
+      this.toast(this.label('退出登录失败，请重试', "Couldn't sign out. Please try again."));
+    } finally {
+      this.signingOut = false;
+    }
+  }
+
   private async openLink(target: string): Promise<void> {
     try {
       await this.host().openLink(target, { appLinkingOnly: false });
@@ -651,6 +731,11 @@ struct NativeChat {
   private messages(): NativeConversationMessage[] {
     const session = this.session();
     return session === this.visibleSession ? this.messagePath : session ? visibleMessages(session) : [];
+  }
+
+  private syncHistoryViews(): void {
+    this.syncMessageList();
+    if (this.sidebarSessions !== this.history.sessions) this.refreshSidebarHistory();
   }
 
   private syncMessageList(): void {
@@ -776,9 +861,10 @@ struct NativeChat {
   private setDrawer(open: boolean): void {
     if (open) {
       this.getUIContext().getFocusController().clearFocus();
-    } else {
-      this.searchText = '';
+      this.refreshSidebarHistory();
+    } else if (!this.wide()) {
       this.resetSelection();
+      this.resetSidebarWindow();
     }
     this.getUIContext().animateTo({ duration: 260, curve: Curve.EaseOut }, () => {
       this.drawerOpen = open;
@@ -796,12 +882,58 @@ struct NativeChat {
       this.selectedIds.filter((item: string): boolean => item !== id) : [...this.selectedIds, id];
   }
 
-  private groups(): NativeConversationGroup[] {
-    const query = this.searchText.trim().toLowerCase();
-    return groupConversations(query ? this.history.sessions.filter((session: NativeConversation): boolean =>
-      (session.title || this.label('新对话', 'New chat')).toLowerCase().includes(query) ||
-      session.messages.some((message: NativeConversationMessage): boolean =>
-        message.content.toLowerCase().includes(query) || message.reasoning.toLowerCase().includes(query))) : this.history.sessions);
+  private refreshSidebarHistory(): void {
+    this.sidebarSessions = this.history.sessions;
+    this.sidebarGroups = groupConversations(this.history.sessions);
+    this.refreshSidebarResults();
+    this.scheduleSidebarSearch();
+  }
+
+  private changeSidebarQuery(value: string): void {
+    this.searchText = value;
+    const query = normalizeSidebarQuery(value);
+    if (query === this.sidebarQuery) return;
+    this.sidebarQuery = query;
+    this.sidebarMatches = new Set<string>();
+    this.sidebarLimit = SIDEBAR_HISTORY_PAGE_SIZE;
+    this.refreshSidebarResults();
+    this.sidebarScroller.scrollEdge(Edge.Top);
+    this.scheduleSidebarSearch();
+  }
+
+  private scheduleSidebarSearch(): void {
+    this.sidebarSearch.schedule(this.history.sessions, this.sidebarQuery, (matches: Set<string>): void => {
+      this.sidebarMatches = matches;
+      this.refreshSidebarResults();
+    });
+  }
+
+  private refreshSidebarResults(): void {
+    this.filteredSidebarGroups = filterSidebarGroups(this.sidebarGroups, this.sidebarQuery,
+      this.label('新对话', 'New chat'), this.sidebarMatches);
+    this.sidebarResultCount = 0;
+    for (const group of this.filteredSidebarGroups) this.sidebarResultCount += group.sessions.length;
+    this.updateSidebarRows();
+  }
+
+  private updateSidebarRows(): void {
+    this.sidebarRows = createSidebarRows(this.filteredSidebarGroups, this.sidebarLimit);
+  }
+
+  private resetSidebarWindow(): void {
+    if (this.sidebarLimit !== SIDEBAR_HISTORY_PAGE_SIZE) {
+      this.sidebarLimit = SIDEBAR_HISTORY_PAGE_SIZE;
+      this.updateSidebarRows();
+    }
+  }
+
+  private maybeLoadSidebarPage(lastIndex: number): void {
+    // A 44 vp item plus list spacing makes seven rows about 320 vp from the end.
+    if ((this.wide() || this.drawerOpen) && lastIndex >= this.sidebarRows.length - 8 &&
+      this.sidebarLimit < this.sidebarResultCount) {
+      this.sidebarLimit += SIDEBAR_HISTORY_PAGE_SIZE;
+      this.updateSidebarRows();
+    }
   }
 
   private async deleteSessions(ids: string[], deleteAll: boolean = false): Promise<void> {
@@ -1073,8 +1205,15 @@ struct NativeChat {
   private async prepareMessages(context: common.UIAbilityContext, session: NativeConversation, config: NativeChatConfig,
     reply: NativeReply, rejectedImages: Set<string>): Promise<NativeChatMessage[]> {
     const messages: NativeChatMessage[] = [];
-    const path = visibleMessages(session);
+    const current = this.session(session.id) ?? session;
+    const path = visibleMessages(current);
     const prompt = path[path.length - 2];
+    const usesFiles = !!config.accountToken || config.protocol === 'anthropic';
+    const prepared = new Map<string, NativeChatFileRef>();
+    if (usesFiles) {
+      await this.prepareReplyFiles(context, current, config, reply, path, prepared);
+    }
+    if (reply.stopped) return [];
     let previousReminder: string | undefined;
     for (let index = 0; index < path.length - 1; index++) {
       const message = path[index];
@@ -1088,56 +1227,120 @@ struct NativeChat {
         continue;
       }
       const files: NativeChatFileRef[] = [];
-      if (config.accountToken || config.protocol === 'anthropic') {
-        const attachments = message.files?.slice() ?? [];
-        for (let index = 0; index < attachments.length; index++) {
-          if (reply.stopped) {
-            return [];
-          }
-          let file = attachments[index];
-          if (!file.local) {
-            const hydrated = await hydrateImportedAttachment(context, session, file);
-            if (!hydrated) {
-              continue;
-            }
-            const current = this.session(session.id);
-            if (!current || reply.stopped) {
-              await this.attachments.remove(context, hydrated).catch(() => {});
-              return [];
-            }
-            file = hydrated;
-            attachments[index] = file;
-            message.files = attachments;
-            this.history = upsertConversation(this.history, updateConversationMessage(current, message));
-          }
-          if (file.serverBinding !== reply.attachmentBinding || !file.serverId) {
-            reply.uploadingIds.push(file.id);
-            try {
-              file.serverId = await this.attachments.upload(context, config, file);
-              file.serverBinding = reply.attachmentBinding;
-            } finally {
-              reply.uploadingIds = reply.uploadingIds.filter((id: string): boolean => id !== file.id);
-            }
-          }
-          if (file.serverId && !rejectedImages.has(file.serverId)) {
-            files.push({ serverId: file.serverId, isImage: file.isImage });
+      if (message.role === 'user') {
+        for (const item of message.files ?? []) {
+          const file = prepared.get(item.id);
+          if (file && !rejectedImages.has(file.serverId)) {
+            files.push(file);
           }
         }
       }
       if (message.content || files.length) {
         const reminder = message.id === prompt?.id ? reply.message.latestReminder : next?.latestReminder;
-        if (message.role === 'user' && reminder && reminder !== previousReminder &&
-          (config.accountToken || config.protocol === 'anthropic')) {
+        if (message.role === 'user' && reminder && reminder !== previousReminder && usesFiles) {
           messages.push({ role: 'latest_reminder', content: reminder });
           previousReminder = reminder;
         }
-        const readLinks = message.role === 'assistant' && (config.accountToken || config.protocol === 'anthropic') ?
+        const readLinks = message.role === 'assistant' && usesFiles ?
           message.readLinks?.filter((link: NativeReadLink): boolean =>
             useNativeReadLink(link, reply.attachmentBinding, config.baseUrl, !!config.accountToken)) : undefined;
         messages.push({ role: message.role, content: message.content, files, readLinks });
       }
     }
     return messages;
+  }
+
+  private async prepareReplyFiles(context: common.UIAbilityContext, session: NativeConversation, config: NativeChatConfig,
+    reply: NativeReply, path: NativeConversationMessage[], prepared: Map<string, NativeChatFileRef>): Promise<void> {
+    const attempts = new Map<string, Promise<NativePreparedReplyFile>>();
+    const prepare = (item: NativeAttachment): Promise<NativePreparedReplyFile> => {
+      const previous = attempts.get(item.id);
+      if (previous) return previous;
+      const attempt = this.prepareReplyFile(context, session, config, reply, item).then(
+        (result: NativePreparedReplyFile): NativePreparedReplyFile => {
+          if (result.file) prepared.set(item.id, result.file);
+          return result;
+        });
+      attempts.set(item.id, attempt);
+      return attempt;
+    };
+    const prompt = path[path.length - 2];
+    const currentFiles = await Promise.all((prompt?.files ?? []).map(prepare));
+    if (reply.stopped) return;
+    const failures: NativeFailedUpload[] = [];
+    for (const result of currentFiles) {
+      if (result.failure && !failures.some((file: NativeFailedUpload): boolean => file.id === result.failure?.id)) {
+        failures.push(result.failure);
+      }
+    }
+    if (failures.length > 0) {
+      reply.message.failure = {
+        kind: 'upload', detail: failures[0].detail, status: failures[0].status, uploadFiles: failures,
+      };
+      throw new Error(failures[0].detail);
+    }
+    // Older rounds use available attachments, and an isolated historical upload failure does not block a new reply.
+    for (let index = path.length - 3; index >= 0 && !reply.stopped; index--) {
+      const message = path[index];
+      if (message.role === 'user' && this.usableContextReply(path[index + 1])) {
+        for (const item of message.files ?? []) {
+          if (reply.stopped) return;
+          await prepare(item);
+        }
+      }
+    }
+  }
+
+  private async prepareReplyFile(context: common.UIAbilityContext, session: NativeConversation, config: NativeChatConfig,
+    reply: NativeReply, original: NativeAttachment): Promise<NativePreparedReplyFile> {
+    let file = original;
+    try {
+      if (!file.local) {
+        const hydrated = await hydrateImportedAttachment(context, session, file);
+        if (!hydrated) return {};
+        if (reply.stopped || !this.updatePreparedAttachment(session.id, file.id, hydrated)) {
+          await this.attachments.remove(context, hydrated).catch(() => {});
+          return {};
+        }
+        file = hydrated;
+      }
+      if (reply.stopped) return {};
+      if (file.serverId && file.serverBinding === reply.attachmentBinding) {
+        return { file: { serverId: file.serverId, isImage: file.isImage } };
+      }
+      reply.uploadingIds.push(file.id);
+      this.paintLiveReplies();
+      try {
+        const serverId = await this.attachments.upload(context, config, file);
+        const ready: NativeAttachment = {
+          id: file.id, name: file.name, size: file.size, isImage: file.isImage, mimeType: file.mimeType,
+          purpose: file.purpose, createdAt: file.createdAt, serverId, serverBinding: reply.attachmentBinding,
+          archiveId: file.archiveId, local: file.local,
+        };
+        if (this.settings.attachmentBinding === reply.attachmentBinding) {
+          this.updatePreparedAttachment(session.id, file.id, ready);
+        }
+        return { file: { serverId, isImage: file.isImage } };
+      } finally {
+        reply.uploadingIds = reply.uploadingIds.filter((id: string): boolean => id !== file.id);
+        this.paintLiveReplies();
+      }
+    } catch (cause) {
+      if (reply.stopped) return {};
+      const detail = (cause as Error)?.message || '';
+      const error = cause instanceof NativeAttachmentUploadError ? cause : undefined;
+      return { failure: { id: file.id, detail: detail.slice(0, 512), retryable: error?.retryable ?? true,
+        status: error?.status } };
+    }
+  }
+
+  private updatePreparedAttachment(sessionId: string, originalId: string, file: NativeAttachment): boolean {
+    const current = this.session(sessionId);
+    if (!current || this.deletingSessions) return false;
+    const next = replaceConversationAttachment(current, originalId, file);
+    if (next === current) return false;
+    this.history = upsertConversation(this.history, next);
+    return true;
   }
 
   private usableContextReply(message: NativeConversationMessage | undefined): boolean {
@@ -1261,7 +1464,8 @@ struct NativeChat {
 
   private async requestReply(context: common.UIAbilityContext, config: NativeChatConfig,
     session: NativeConversation, reply: NativeReply): Promise<NativeReplyOutcome | undefined> {
-    const rejectedImages = new Set<string>();
+    const rejectedImages = this.historyImageRejections(reply.attachmentBinding);
+    let skippedBadImages = 0;
     let fileRetries = 0;
     while (!reply.stopped) {
       let messages: NativeChatMessage[];
@@ -1269,7 +1473,7 @@ struct NativeChat {
         messages = await this.prepareMessages(context, session, config, reply, rejectedImages);
       } catch (cause) {
         const detail = cause instanceof Error ? cause.message : '';
-        if (!reply.stopped) {
+        if (!reply.stopped && !reply.message.failure) {
           reply.message.failure = { kind: 'upload', detail: detail.slice(0, 512) };
         }
         throw new Error(detail);
@@ -1329,12 +1533,15 @@ struct NativeChat {
           const target = messages[cause.imageMessageIndex];
           const image = target.files?.[cause.imageBlockIndex];
           if (target.role === 'user' && image?.isImage) {
-            if (cause.imageMessageIndex === messages.length - 1) {
+            let lastUserIndex = messages.length - 1;
+            while (lastUserIndex > cause.imageMessageIndex && messages[lastUserIndex].role !== 'user') lastUserIndex--;
+            if (cause.imageMessageIndex === lastUserIndex) {
               reply.message.failure = { kind: 'unsupported-image', detail: '' };
               throw cause;
             }
-            if (rejectedImages.size < 10) {
+            if (skippedBadImages < 10 && !rejectedImages.has(image.serverId)) {
               rejectedImages.add(image.serverId);
+              skippedBadImages++;
               continue;
             }
           }
@@ -1353,6 +1560,14 @@ struct NativeChat {
       }
     }
     return undefined;
+  }
+
+  private historyImageRejections(binding: string): Set<string> {
+    if (this.rejectedImageBinding !== binding) {
+      this.rejectedImageBinding = binding;
+      this.rejectedHistoryImages = new Set<string>();
+    }
+    return this.rejectedHistoryImages;
   }
 
   private mergeReplyTimeline(prefix: string, previous: NativeToolTimelineView | undefined,
@@ -1418,6 +1633,11 @@ struct NativeChat {
         };
       }
     } finally {
+      const failure = reply.message.failure;
+      if (error && failure) {
+        void recordNativeFeedbackLog(context, 'error', 'chat', 'Model request failed',
+          failure.status === undefined ? failure.kind : `${failure.kind} (HTTP ${failure.status})`);
+      }
       const current = this.session(session.id);
       if (current) {
         const message = this.streamMessage(reply, error ? 'error' : reply.stopped ? 'stopped' : 'done');
@@ -1468,12 +1688,17 @@ struct NativeChat {
     config.prefill = {
       text: message.content, reasoning: message.reasoning, thinkingSignature: message.thinkingSignature ?? '',
     };
+    this.resumeReplyInPlace(session, message, config);
+  }
+
+  private resumeReplyInPlace(session: NativeConversation, message: NativeConversationMessage, config: NativeChatConfig): void {
     const reply: NativeReply = {
       sessionId: session.id, message, client: new NativeChatClient(), stopped: false, uploadingIds: [],
       attachmentBinding: this.settings.attachmentBinding,
     };
     const pending = this.streamMessage(reply, 'pending');
     pending.stopReason = undefined;
+    pending.failure = undefined;
     const next = updateConversationMessage(session, pending, Date.now());
     const current = next.messages.find((item: NativeConversationMessage): boolean => item.id === pending.id);
     if (!current) {
@@ -1487,6 +1712,48 @@ struct NativeChat {
     this.lastStreamSave = Date.now();
     this.jumpToNewestMessages();
     void this.receive(this.host(), config, next, reply);
+  }
+
+  private failedUploadReply(promptId: string): NativeConversationMessage | undefined {
+    const path = this.messages();
+    const tail = path[path.length - 1];
+    return path[path.length - 2]?.id === promptId && tail?.role === 'assistant' && tail.status === 'error' &&
+      tail.failure?.kind === 'upload' ? tail : undefined;
+  }
+
+  private messageUploadFailure(prompt: NativeConversationMessage, item: NativeAttachment): NativeFailedUpload | undefined {
+    const failure = this.failedUploadReply(prompt.id)?.failure;
+    if (!failure || (item.serverId && item.serverBinding === this.settings.attachmentBinding)) return undefined;
+    if (failure.uploadFiles) return failure.uploadFiles.find((file: NativeFailedUpload): boolean => file.id === item.id);
+    // Earlier native releases only persisted a reply-level error. Associate it only when one original can match.
+    const unbound = prompt.files?.filter((file: NativeAttachment): boolean => file.local &&
+      (!file.serverId || file.serverBinding !== this.settings.attachmentBinding)) ?? [];
+    if (unbound.length !== 1 || unbound[0].id !== item.id) return undefined;
+    const status = failure.status ?? Number(/HTTP\s+(\d{3})\b/.exec(failure.detail)?.[1] ?? 0);
+    return { id: item.id, detail: failure.detail, retryable: status === 0 || status === 429 || status >= 500 };
+  }
+
+  private canRetryMessageUpload(prompt: NativeConversationMessage, item: NativeAttachment): boolean {
+    if (!this.loaded || this.backupBusy || this.reply()) return false;
+    const failure = this.failedUploadReply(prompt.id)?.failure;
+    return !!failure && (failure.uploadFiles?.[0]?.retryable ?? true) &&
+      this.messageUploadFailure(prompt, item)?.retryable === true;
+  }
+
+  private retryMessageUpload(prompt: NativeConversationMessage, file: NativeAttachment): void {
+    const session = this.session();
+    const failed = this.failedUploadReply(prompt.id);
+    if (!session || !failed || !this.canRetryMessageUpload(prompt, file)) return;
+    const config = this.requestConfig();
+    if (!config.accountToken && (config.protocol !== 'anthropic' || !config.baseUrl || !config.apiKey)) {
+      this.openSettings('account');
+      return;
+    }
+    config.model = failed.model || config.model;
+    config.thinking = failed.thinking ?? config.thinking;
+    config.search = failed.search ?? config.search;
+    config.requestTitle = !session.title;
+    this.resumeReplyInPlace(session, failed, config);
   }
 
   private retry(message: NativeConversationMessage): void {
@@ -1618,6 +1885,8 @@ struct NativeChat {
   private setDesktopSidebar(collapsed: boolean): void {
     this.settings.desktopSidebarCollapsed = collapsed;
     if (collapsed) {
+      this.changeSidebarQuery('');
+      this.resetSidebarWindow();
       this.resetSelection();
       this.getUIContext().getFocusController().clearFocus();
     }
@@ -1797,9 +2066,9 @@ struct NativeChat {
   }
 
   @Builder
-  private attachmentTile(item: NativeAttachment, size: number) {
-    if (this.attachmentPreview(item)) {
-      Image(this.attachmentPreview(item)).width(size).height(size).objectFit(ImageFit.Cover)
+  private attachmentTile(item: NativeAttachment, size: number, preview: string) {
+    if (preview) {
+      Image(preview).width(size).height(size).objectFit(ImageFit.Cover)
         .borderRadius(12).draggable(false).accessibilityText(item.name)
         .onClick(() => { void this.openAttachment(item); })
     } else {
@@ -1819,13 +2088,46 @@ struct NativeChat {
   }
 
   @Builder
+  private messageAttachmentTile(prompt: NativeConversationMessage, item: NativeAttachment, preview: string) {
+    Stack() {
+      this.attachmentTile(item, this.messageImageSize(prompt), preview)
+      if (this.reply()?.uploadingIds.includes(item.id)) {
+        Row() { LoadingProgress().width(20).height(20).color(Color.White) }
+        .width('100%').height('100%').justifyContent(FlexAlign.Center)
+        .backgroundColor('#55000000').borderRadius(12).accessibilityText(this.label('正在上传', "Uploading"))
+      } else if (this.messageUploadFailure(prompt, item)) {
+        if (this.canRetryMessageUpload(prompt, item)) {
+          Button({ type: ButtonType.Normal }) {
+            Column({ space: 2 }) {
+              Image($r('app.media.native_retry')).width(18).height(18).colorFilter(nativeIconTint(Color.White))
+              Text(this.label('重试上传', "Retry upload")).fontSize(11).fontColor(Color.White).maxLines(1)
+            }
+          }
+          .width('100%').height('100%').padding(0).backgroundColor('#88000000')
+          .border({ width: 1, color: $r('app.color.native_chat_error') }).borderRadius(12)
+          .accessibilityText(this.label('重试上传', "Retry upload") + ': ' + item.name)
+          .accessibilityDescription(this.messageUploadFailure(prompt, item)?.detail ?? '')
+          .onClick(() => { this.retryMessageUpload(prompt, item); })
+        } else {
+          Text(this.messageUploadFailure(prompt, item)?.detail || this.label('上传失败', "Upload failed"))
+            .width('100%').height('100%').textAlign(TextAlign.Center).fontSize(11).maxLines(2)
+            .textOverflow({ overflow: TextOverflow.Ellipsis }).fontColor(Color.White).padding(6)
+            .backgroundColor('#88000000').borderRadius(12)
+        }
+      }
+    }
+    .width(preview ? this.messageImageSize(prompt) : 148)
+    .height(preview ? this.messageImageSize(prompt) : 62)
+  }
+
+  @Builder
   private draftAttachmentStrip() {
     if (this.draftFiles.length) {
       Scroll() {
         Row({ space: 8 }) {
           ForEach(this.draftFiles, (file: NativeDraftAttachment) => {
             Stack({ alignContent: Alignment.TopEnd }) {
-              this.attachmentTile(file.item, 62)
+              this.attachmentTile(file.item, 62, this.attachmentPreview(file.item))
               if (file.state === 'uploading') {
                 Row() { LoadingProgress().width(20).height(20).color(Color.White) }
                 .width('100%').height('100%').justifyContent(FlexAlign.Center)
@@ -2008,7 +2310,9 @@ struct NativeChat {
       } else {
         if (message.files?.length) {
           Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.End, space: { main: LengthMetrics.vp(8), cross: LengthMetrics.vp(8) } }) {
-            ForEach(message.files, (file: NativeAttachment) => { this.attachmentTile(file, this.messageImageSize(message)) },
+            ForEach(message.files, (file: NativeAttachment) => {
+              this.messageAttachmentTile(message, file, this.attachmentPreview(file))
+            },
               (file: NativeAttachment): string => file.id)
           }
           .width('100%')
@@ -2537,6 +2841,7 @@ struct NativeChat {
       case 'key': return this.label('更换 API Key', "Change API Key");
       case 'data': return this.label('数据管理', "Data management");
       case 'notes': return this.label('更新日志', "Release notes");
+      case 'feedback': return this.label('日志上报与问题反馈', 'Issue Feedback and Diagnostics');
       default: return this.label('设置', "Settings");
     }
   }
@@ -2748,8 +3053,20 @@ struct NativeChat {
       Divider().color($r('app.color.native_chat_stroke')).margin({ left: 14 })
       this.settingsRow(() => this.label('更新日志', 'Release notes'), () => '',
         () => { this.settingsSection = 'notes'; void this.loadReleaseNotes(); })
+      Divider().color($r('app.color.native_chat_stroke')).margin({ left: 14 })
+      this.settingsRow(() => this.label('问题反馈与日志上报', 'Feedback & Diagnostics'), () => '',
+        () => { this.settingsSection = 'feedback'; })
+      Divider().color($r('app.color.native_chat_stroke')).margin({ left: 14 })
+      this.settingsRow(() => this.label('API 文档与帮助', 'API Docs & Help'), () => '',
+        () => { void this.openLink(DEEPSEEK_DOCS_URL); })
     }
     .width('100%').borderRadius(16).clip(true).backgroundColor($r('app.color.native_chat_surface'))
+    Button({ type: ButtonType.Normal }) {
+      Text(this.label('退出登录', 'Sign Out')).width('100%').textAlign(TextAlign.Start)
+        .fontSize(15).fontColor($r('app.color.native_chat_primary')).padding({ left: 15, right: 12 })
+    }
+    .width('100%').height(48).borderRadius(16).padding(0).backgroundColor($r('app.color.native_chat_surface'))
+    .enabled(!this.signingOut).onClick(() => { void this.signOutAll(); })
   }
 
   @Builder
@@ -2843,6 +3160,11 @@ struct NativeChat {
             })
           } else if (this.settingsSection === 'notes') {
             this.releaseNotesPage()
+          } else if (this.settingsSection === 'feedback') {
+            NativeFeedbackReport({
+              locale: this.settings.locale, appVersion: this.appVersion, apiProtocol: this.settings.protocol,
+              authMode: this.settings.authMode, viewportWidth: this.viewportWidth, viewportHeight: this.viewportHeight,
+            })
           } else {
             this.settingsRoot()
           }
@@ -2851,7 +3173,7 @@ struct NativeChat {
       }
       .width('100%').layoutWeight(1).scrollBar(BarState.Off)
     }
-    .width('100%').height('100%').backgroundColor($r('app.color.native_chat_sidebar'))
+    .width('100%').height('100%').backgroundColor($r('app.color.native_chat_sidebar')).enabled(!this.signingOut)
   }
 
   @Builder
@@ -2877,7 +3199,7 @@ struct NativeChat {
   }
 
   @Builder
-  private sessionMenu(session: NativeConversation) {
+  private sessionMenu(session: NativeSidebarSession) {
     Menu() {
       MenuItem({ content: this.label('重命名', "Rename") }).onClick(() => {
         this.renamingId = session.id;
@@ -2892,7 +3214,7 @@ struct NativeChat {
   }
 
   @Builder
-  private drawerItem(session: NativeConversation) {
+  private drawerItem(session: NativeSidebarSession) {
     Row({ space: 8 }) {
       if (this.selecting) {
         Checkbox({ name: session.id }).select(this.selectedIds.includes(session.id))
@@ -2954,7 +3276,7 @@ struct NativeChat {
             .fontSize(15).fontWeight(FontWeight.Medium).layoutWeight(1)
             .textAlign(TextAlign.Center).fontColor($r('app.color.native_chat_primary'))
           Button(this.label('全选', "Select all"), { buttonStyle: ButtonStyleMode.TEXTUAL }).onClick(() => {
-            this.selectedIds = this.groups().flatMap<string>((group: NativeConversationGroup): string[] =>
+            this.selectedIds = this.filteredSidebarGroups.flatMap<string>((group: NativeConversationGroup): string[] =>
               group.sessions.map<string>((session: NativeConversation): string => session.id));
           })
         }
@@ -2963,11 +3285,12 @@ struct NativeChat {
         Row({ space: 8 }) {
           Image($r('app.media.native_search')).height(16).width(16).colorFilter(nativeIconTint($r('app.color.native_chat_secondary')))
           TextInput({ text: this.searchText, placeholder: this.label('搜索对话内容...', "Search chats…") }).fontSize(15).height(44).layoutWeight(1)
-            .backgroundColor(Color.Transparent).padding(0).onChange((value: string) => { this.searchText = value; })
+            .backgroundColor(Color.Transparent).padding(0).cancelButton({ style: CancelButtonStyle.INPUT })
+            .onChange((value: string) => { this.changeSidebarQuery(value); })
         }
         .width('100%').borderRadius(14).padding({ left: 14, right: 12 }).backgroundColor($r('app.color.native_chat_field'))
       }
-      List({ space: 2 }) {
+      List({ space: 2, scroller: this.sidebarScroller }) {
         if (this.history.sessions.length === 0) {
           ListItem() {
             Column({ space: 8 }) {
@@ -2979,28 +3302,25 @@ struct NativeChat {
             }
             .width('100%').padding({ top: 28 })
           }
-        } else if (!this.groups().length) {
+        } else if (!this.sidebarRows.length) {
           ListItem() {
             Text(this.label('未找到匹配的对话', "No matching chats")).fontSize(14).fontColor($r('app.color.native_chat_secondary')).padding(14)
           }
         }
-        ForEach(this.groups(), (group: NativeConversationGroup) => {
-          ListItemGroup() {
-            ListItem() {
-              Text(this.historyGroupLabel(group)).fontSize(13).width('100%')
+        ForEach(this.sidebarRows, (row: NativeSidebarRow) => {
+          ListItem() {
+            if (row.session) {
+              this.drawerItem(row.session)
+            } else {
+              Text(this.historyGroupLabel(row.groupKey, row.groupLabel)).fontSize(13).width('100%')
                 .fontColor($r('app.color.native_chat_secondary'))
                 .padding({ top: 8, left: 10, bottom: 3 })
             }
-            ForEach(group.sessions, (session: NativeConversation) => {
-              ListItem() {
-                this.drawerItem(session)
-              }
-            }, (session: NativeConversation): string => `${session.id}:${session.title}:${session.pinnedAt ?? 0}`)
           }
-        }, (group: NativeConversationGroup): string => group.key + group.sessions.map<string>(
-          (session: NativeConversation): string => `${session.id}:${session.title}:${session.pinnedAt ?? 0}`).join('|'))
+        }, (row: NativeSidebarRow): string => row.key)
       }
       .layoutWeight(1).width('100%').padding({ top: 8 }).scrollBar(BarState.Off)
+      .onScrollIndex((_first: number, last: number) => { this.maybeLoadSidebarPage(last); })
       if (this.selecting) {
         Row() {
           Button(this.allPinned() ? this.label('取消置顶', "Unpin") : this.label('置顶', "Pin"), { buttonStyle: ButtonStyleMode.TEXTUAL })
@@ -3181,11 +3501,11 @@ struct NativeChat {
           if (this.loaded && !this.authenticated()) {
             NativeOnboarding({
               locale: this.settings.locale,
-              compact: this.compact(), busy: this.authorizing, view: this.$onboardingView,
+              compact: this.compact(), busy: this.authorizing || this.signingOut, view: this.$onboardingView,
               initialUrl: this.settings.baseUrl, initialModel: this.settings.model, initialProtocol: this.settings.protocol,
               onAccount: () => { void this.startAuthorization(); },
               onConnect: (credential: NativeApiCredential): Promise<void> => this.connectKey(credential),
-              onHelp: () => { void this.openLink('https://api-docs.deepseek.com/zh-cn/'); },
+              onHelp: () => { void this.openLink(DEEPSEEK_DOCS_URL); },
               onPlatformKeys: () => { void this.openLink('https://platform.deepseek.com/api_keys'); },
             })
           } else {

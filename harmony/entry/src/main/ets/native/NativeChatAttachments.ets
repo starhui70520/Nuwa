@@ -20,6 +20,17 @@ export interface NativeAttachment {
   local: boolean;
 }
 
+export class NativeAttachmentUploadError extends Error {
+  readonly retryable: boolean;
+  readonly status?: number;
+
+  constructor(detail: string, retryable: boolean, status?: number) {
+    super(detail);
+    this.retryable = retryable;
+    this.status = status;
+  }
+}
+
 interface UploadFile {
   localPath: string;
   mimeType: string;
@@ -508,7 +519,7 @@ export class NativeChatAttachments {
 
   upload(context: common.UIAbilityContext, config: NativeChatConfig, item: NativeAttachment): Promise<string> {
     if (!item.local) {
-      return Promise.reject(new Error('找不到附件原件。'));
+      return Promise.reject(new NativeAttachmentUploadError('找不到附件原件。', false));
     }
     const previous = this.transfers.get(item.id);
     if (previous?.result && !previous.canceled && sameDestination(previous.config, config)) {
@@ -566,10 +577,10 @@ export class NativeChatAttachments {
     const account = config.accountToken?.trim() ?? '';
     const apiKey = config.apiKey.trim();
     if (!account && (!apiKey || config.protocol !== 'anthropic')) {
-      throw new Error('请登录 DeepSeek 账号或配置支持 Anthropic 文件接口的服务。');
+      throw new NativeAttachmentUploadError('请登录 DeepSeek 账号或配置支持 Anthropic 文件接口的服务。', false);
     }
     if (/[\r\n]/.test(account || apiKey)) {
-      throw new Error('凭据不能包含换行。');
+      throw new NativeAttachmentUploadError('凭据不能包含换行。', false);
     }
     const endpoint = filesEndpoint(config);
     let file: UploadFile = {
@@ -604,17 +615,19 @@ export class NativeChatAttachments {
         connectTimeout: 15000, readTimeout: 300000,
       });
       rejectCanceled(transfer);
-      if (response.responseCode < 200 || response.responseCode >= 300 || typeof response.result !== 'string') {
-        throw new Error('附件上传失败（HTTP ' + response.responseCode.toString() + '）。');
+      const status = response.responseCode;
+      if (status < 200 || status >= 300) {
+        throw new NativeAttachmentUploadError('附件上传失败（HTTP ' + status.toString() + '）。',
+          status === 429 || status >= 500, status >= 100 && status <= 599 ? status : undefined);
       }
       let payload: UploadData;
       try {
-        payload = JSON.parse(response.result) as UploadData;
+        payload = JSON.parse(typeof response.result === 'string' ? response.result : '') as UploadData;
       } catch {
-        throw new Error('附件服务返回的响应格式无效。');
+        throw new NativeAttachmentUploadError('附件服务返回的响应格式无效。', false);
       }
       if (typeof payload?.id !== 'string' || !payload.id) {
-        throw new Error('附件服务未返回文件 ID。');
+        throw new NativeAttachmentUploadError('附件服务未返回文件 ID。', false);
       }
       return payload.id;
     } catch (error) {

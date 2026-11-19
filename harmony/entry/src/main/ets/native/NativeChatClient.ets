@@ -79,6 +79,8 @@ interface AnthropicEventDelta {
   signature?: string;
   stop_reason?: string | null;
   title?: string;
+  partial_json?: string;
+  citation?: AnthropicCitation;
 }
 
 interface AnthropicEventError {
@@ -90,14 +92,46 @@ interface AnthropicStartedBlock {
   text?: string;
   thinking?: string;
   signature?: string;
+  id?: string;
+  name?: string;
+  kind?: string;
+  input?: AnthropicToolInput;
+  content?: Object;
+  tool_use_id?: string;
+}
+
+interface AnthropicToolInput {
+  action?: string;
+  queries?: string[];
+  url?: string;
+  pattern?: string;
+}
+
+interface AnthropicFetchResultBlock {
+  type?: string;
+  error_code?: string;
+  url?: string;
+  content?: AnthropicFetchDocument;
+  published_at?: string | null;
+}
+
+interface AnthropicFetchDocument {
+  title?: string | null;
+}
+
+interface AnthropicCitation {
+  type?: string;
+  url?: string;
+  title?: string | null;
 }
 
 interface AnthropicDeltaEvent {
   type?: string;
+  index?: number;
   delta?: AnthropicEventDelta;
   content_block?: AnthropicStartedBlock;
   error?: AnthropicEventError;
-  message?: string;
+  message?: Object;
 }
 
 interface AnthropicThinking {
@@ -191,6 +225,9 @@ interface AnthropicTitle {
 const DEEPSEEK_ACCOUNT_ORIGIN: string = 'https://api.deepseek.com';
 const DEFAULT_DEEPSEEK_SYSTEM: string = '该助手为DeepSeek，由深度求索公司创造。';
 const MAX_ERROR_BODY_BYTES: number = 8192;
+const MAX_BYTES_AWAITING_HEADERS: number = 1024 * 1024;
+const ANTHROPIC_STOP_REASONS: Set<string> = new Set<string>(['end_turn', 'max_tokens', 'tool_use', 'refusal']);
+const ANTHROPIC_SEARCH_KINDS: Set<string> = new Set<string>(['search', 'deep_search', 'image_search', 'deep_image_search']);
 
 export class NativeModelError extends Error {
   readonly status: number;
@@ -223,18 +260,102 @@ export function usesExtendedNativeRequest(config: NativeChatConfig, messages: Na
     !config.search && !/https?:\/\//i.test(prompt.content));
 }
 
-function httpErrorMessage(bytes: Uint8Array, status: number): string {
+function httpErrorMessage(bytes: Uint8Array, fallback: string): string {
+  const response = util.TextDecoder.create('utf-8').decodeToString(bytes).trim();
   try {
-    const response = util.TextDecoder.create('utf-8').decodeToString(bytes);
     const body = JSON.parse(response) as ChatChunk;
     const message = body?.error?.message ?? body?.message;
     if (typeof message === 'string' && message.trim()) {
       return message;
     }
   } catch {
-    // A gateway can send an HTML page instead of a structured API error.
+    // Plain text error bodies from compatible providers are meaningful as well.
   }
-  return `服务端请求失败 (HTTP ${status})`;
+  return response || fallback;
+}
+
+interface StreamResponseHead {
+  status: number;
+  stream: boolean;
+  interim: boolean;
+}
+
+function streamResponseHead(header: Object): StreamResponseHead {
+  const fields = header as Record<string, string>;
+  let status = 0;
+  let stream = false;
+  let interim = false;
+  for (const key of Object.keys(fields)) {
+    const name = key.toLowerCase();
+    if (name === 'content-type') {
+      stream = typeof fields[key] === 'string' && fields[key].split(';')[0].trim().toLowerCase() === 'text/event-stream';
+      continue;
+    }
+    // NetStack inserts the HTTP status line as a key. Some versions report it as Status-Line instead.
+    const line = name === 'status-line' ? fields[key] : key;
+    const match = /^HTTP\/[\d.]+\s+(\d{3})\b/i.exec(line);
+    if (!match) continue;
+    const code = Number(match[1]);
+    if (code < 200 || /\bconnection established\b/i.test(line)) {
+      interim = true;
+    } else {
+      status = code;
+    }
+  }
+  return { status, stream, interim: interim && !status };
+}
+
+function isRecord(value: Object | null | undefined): boolean {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function nullableString(value?: string | null): boolean {
+  return value == null || typeof value === 'string';
+}
+
+function validAnthropicToolInput(input?: AnthropicToolInput): boolean {
+  if (!input || !isRecord(input)) return false;
+  switch (input.action) {
+    case 'search':
+      return Array.isArray(input.queries) && input.queries.every((query: string): boolean => typeof query === 'string');
+    case 'open_page':
+    case 'read_link':
+      return typeof input.url === 'string';
+    case 'find_in_page':
+      return typeof input.url === 'string' && typeof input.pattern === 'string';
+    default:
+      // The timeline also handles input_json_delta when a provider starts with an empty input object.
+      return Object.keys(input).length === 0;
+  }
+}
+
+function validAnthropicFetchResult(content?: Object): boolean {
+  if (!isRecord(content)) return false;
+  const result = content as AnthropicFetchResultBlock;
+  if (result.type === 'web_fetch_tool_result_error') return typeof result.error_code === 'string';
+  return result.type === 'web_fetch_result' && typeof result.url === 'string' &&
+    isRecord(result.content) && nullableString(result.content?.title) && nullableString(result.published_at);
+}
+
+function validAnthropicStart(block: AnthropicStartedBlock): boolean {
+  if (!isRecord(block)) return false;
+  switch (block.type) {
+    case 'text': return typeof block.text === 'string';
+    case 'thinking': return typeof block.thinking === 'string';
+    case 'tool_use': return true;
+    case 'server_tool_use':
+      return typeof block.id === 'string' &&
+        (block.kind === 'read_link' || ANTHROPIC_SEARCH_KINDS.has(block.kind ?? '')) &&
+        (block.name === 'deepseek_web_search' || block.name === 'deepseek_read_url') &&
+        validAnthropicToolInput(block.input);
+    case 'web_search_tool_result':
+      return typeof block.tool_use_id === 'string' && ANTHROPIC_SEARCH_KINDS.has(block.kind ?? '') &&
+        Array.isArray(block.content);
+    case 'web_fetch_tool_result':
+      return typeof block.tool_use_id === 'string' && (block.kind === 'read_link' || block.kind === 'deep_search') &&
+        validAnthropicFetchResult(block.content);
+    default: return false;
+  }
 }
 
 function redactCredentials(message: string, apiKey: string, accountToken: string): string {
@@ -296,9 +417,11 @@ function resolveChatEndpoint(baseUrl: string, authenticated: boolean): string {
 class ChatStream {
   private readonly decoder: util.TextDecoder = util.TextDecoder.create('utf-8', { ignoreBOM: true });
   private readonly lineBreak: RegExp = /\r\n|\r|\n/g;
+  private firstText: boolean = true;
   private pendingLine: string = '';
   private eventName: string = '';
   private dataLines: string[] = [];
+  private readonly openBlocks = new Map<number, string>();
   private done: boolean = false;
   private hasReply: boolean = false;
   receivedContent: boolean = false;
@@ -323,8 +446,11 @@ class ChatStream {
     if (this.pendingLine.endsWith('\r')) {
       this.readLine(this.pendingLine.slice(0, -1));
     }
-    if (this.protocol === 'anthropic' && this.receivedContent && !this.done && !this.outcome.stopReason) {
-      throw new Error('模型回复已中断');
+    if (this.protocol === 'anthropic') {
+      if (!this.done && !this.outcome.stopReason) {
+        throw new Error('模型回复已中断');
+      }
+      return this.outcome;
     }
     if (!this.hasReply && !this.outcome.stopReason) {
       throw new Error('模型未返回可读取的回复，请检查服务器地址和模型名称');
@@ -336,8 +462,16 @@ class ChatStream {
     return this.outcome;
   }
 
+  completed(): boolean {
+    return this.done;
+  }
+
   // Match the Web client's SSE framing, including a CRLF split across chunks.
   private appendText(text: string): void {
+    if (this.firstText && text) {
+      text = text.replace(/^\uFEFF/, '');
+      this.firstText = false;
+    }
     this.pendingLine += text;
     let lineStart = 0;
     this.lineBreak.lastIndex = 0;
@@ -355,12 +489,12 @@ class ChatStream {
 
   private readLine(line: string): void {
     if (!line) {
-      const data = this.dataLines.join('\n');
+      const lines = this.dataLines;
       const eventName = this.eventName;
       this.dataLines = [];
       this.eventName = '';
-      if (data) {
-        this.dispatch(data, eventName);
+      if (lines.length) {
+        this.dispatch(lines.join('\n'), eventName);
       }
       return;
     }
@@ -378,13 +512,12 @@ class ChatStream {
   }
 
   private dispatch(data: string, eventName: string): void {
-    if (data.trim() === '[DONE]') {
-      this.done = true;
+    if (this.protocol === 'anthropic') {
+      this.dispatchAnthropic(data, eventName);
       return;
     }
-    if (this.protocol === 'anthropic') {
-      this.onAnthropicEvent?.(data);
-      this.dispatchAnthropic(data, eventName);
+    if (data.trim() === '[DONE]') {
+      this.done = true;
       return;
     }
     let chunk: ChatChunk;
@@ -392,11 +525,11 @@ class ChatStream {
       chunk = JSON.parse(data) as ChatChunk;
     } catch {
       if (eventName === 'error') {
-        throw new Error('服务端报告了流式错误');
+        throw new Error(data || '服务端报告了流式错误');
       }
       return;
     }
-    if (!chunk || typeof chunk !== 'object') {
+    if (!isRecord(chunk)) {
       return;
     }
     if (chunk.error || eventName === 'error') {
@@ -425,43 +558,95 @@ class ChatStream {
     try {
       event = JSON.parse(data) as AnthropicDeltaEvent;
     } catch {
-      if (eventName === 'error') throw new Error('服务端报告了流式错误');
+      if (eventName === 'error') throw new Error(data || '服务端报告了流式错误');
       return;
     }
-    if (event.type === 'error' || eventName === 'error') {
-      throw new Error(event.error?.message ?? event.message ?? '服务端报告了流式错误');
+    if (typeof event?.error?.message === 'string') {
+      throw new Error(event.error.message || '服务端报告了流式错误');
+    }
+    if (eventName === 'error') {
+      throw new Error(data || '服务端报告了流式错误');
+    }
+    if (!isRecord(event)) return;
+    if (event.type === 'error') {
+      throw new Error(typeof event.message === 'string' && event.message ? event.message : '服务端报告了流式错误');
     }
     if (event.type === 'message_stop') {
+      this.onAnthropicEvent?.(data);
       this.done = true;
+      this.openBlocks.clear();
       return;
     }
     const delta = event.delta;
-    const block = event.type === 'content_block_start' ? event.content_block : undefined;
-    if (event.type === 'content_block_start') {
-      this.receivedContent = true;
+    if (event.type === 'message_delta') {
+      const reason = delta?.stop_reason;
+      if (typeof reason === 'string' && ANTHROPIC_STOP_REASONS.has(reason)) {
+        this.outcome.stopReason = reason;
+        if ((reason === 'end_turn' || reason === 'max_tokens') && typeof delta?.title === 'string') {
+          this.outcome.title = delta.title.trim();
+        }
+        this.onAnthropicEvent?.(data);
+      }
+      return;
     }
-    if (block && ['tool_use', 'server_tool_use', 'web_search_tool_result', 'web_fetch_tool_result'].includes(block.type ?? '')) {
+    if (event.type === 'message_start') {
+      if (isRecord(event.message)) this.onAnthropicEvent?.(data);
+      return;
+    }
+    const index = event.index ?? -1;
+    if (!Number.isSafeInteger(index) || index < 0) return;
+    switch (event.type) {
+      case 'content_block_start': {
+        const block = event.content_block;
+        if (block && validAnthropicStart(block)) {
+          this.openBlocks.set(index, block.type ?? '');
+          this.startAnthropicBlock(block, data);
+        }
+        break;
+      }
+      case 'content_block_delta':
+        if (delta) this.applyAnthropicDelta(index, delta, data);
+        break;
+      case 'content_block_stop':
+        if (this.openBlocks.delete(index)) this.onAnthropicEvent?.(data);
+        break;
+    }
+  }
+
+  private startAnthropicBlock(block: AnthropicStartedBlock, data: string): void {
+    this.receivedContent = true;
+    this.onAnthropicEvent?.(data);
+    if (block.type === 'text') {
+      if (block.text) this.onDelta(block.text, '');
+    } else if (block.type === 'thinking') {
+      this.outcome.thinkingSignature = typeof block.signature === 'string' ? block.signature : '';
+      if (block.thinking) this.onDelta('', block.thinking);
+    } else {
       this.outcome.canPrefill = false;
     }
-    if (event.type === 'message_delta' && delta?.stop_reason) {
-      this.outcome.stopReason = delta.stop_reason;
-      if ((delta.stop_reason === 'end_turn' || delta.stop_reason === 'max_tokens') && typeof delta.title === 'string') {
-        this.outcome.title = delta.title.trim();
+  }
+
+  private applyAnthropicDelta(index: number, delta: AnthropicEventDelta, data: string): void {
+    const kind = this.openBlocks.get(index);
+    if (kind === 'text') {
+      if (delta.type === 'text_delta' && typeof delta.text === 'string') {
+        this.onAnthropicEvent?.(data);
+        if (delta.text) this.onDelta(delta.text, '');
+      } else if (delta.type === 'citations_delta' && delta.citation?.type === 'web_search_result_location' &&
+        typeof delta.citation.url === 'string' &&
+        nullableString(delta.citation.title)) {
+        this.onAnthropicEvent?.(data);
       }
-    }
-    if (block?.type === 'thinking') {
-      this.outcome.thinkingSignature = block.signature ?? '';
-    }
-    if (delta?.type === 'signature_delta') {
-      this.outcome.thinkingSignature += delta.signature ?? '';
-    }
-    const content = delta?.type === 'text_delta' && typeof delta.text === 'string' ? delta.text :
-      block?.type === 'text' ? block.text ?? '' : '';
-    const reasoning = delta?.type === 'thinking_delta' && typeof delta.thinking === 'string' ? delta.thinking :
-      block?.type === 'thinking' ? block.thinking ?? '' : '';
-    if (content || reasoning) {
-      this.hasReply = true;
-      this.onDelta(content, reasoning);
+    } else if (kind === 'thinking') {
+      if (delta.type === 'thinking_delta' && typeof delta.thinking === 'string') {
+        this.onAnthropicEvent?.(data);
+        if (delta.thinking) this.onDelta('', delta.thinking);
+      } else if (delta.type === 'signature_delta' && typeof delta.signature === 'string') {
+        this.outcome.thinkingSignature += delta.signature;
+        this.onAnthropicEvent?.(data);
+      }
+    } else if (kind === 'server_tool_use' && delta.type === 'input_json_delta' && typeof delta.partial_json === 'string') {
+      this.onAnthropicEvent?.(data);
     }
   }
 }
@@ -562,9 +747,7 @@ export class NativeChatClient {
       if (config.search) {
         tools.push({ type: 'deepseek_web_search', name: 'deepseek_web_search' });
       }
-      const withImages = messages.some((message: NativeChatMessage): boolean =>
-        message.files?.some((file: NativeChatFileRef): boolean => file.isImage) ?? false);
-      if (withImages) {
+      if (messages.some((message: NativeChatMessage): boolean => message.role === 'user' && !!message.files?.length)) {
         headers['anthropic-beta'] = 'files-api-2025-04-14';
       }
       const extended = usesExtendedNativeRequest(config, messages);
@@ -598,6 +781,10 @@ export class NativeChatClient {
         .map<NativeChatMessage>((message: NativeChatMessage): NativeChatMessage => ({
           role: message.role, content: message.content,
         }));
+      const system = config.system ?? DEFAULT_DEEPSEEK_SYSTEM;
+      if (system.trim()) {
+        textMessages.unshift({ role: 'system', content: system });
+      }
       if (config.prefill?.text) {
         textMessages.push({ role: 'assistant', content: config.prefill.text });
       }
@@ -639,8 +826,41 @@ export class NativeChatClient {
       const errorBody = new Uint8Array(MAX_ERROR_BODY_BYTES);
       let errorBodyLength = 0;
       let streamError: string = '';
+      let responseHead: StreamResponseHead | undefined;
+      let pendingChunks: ArrayBuffer[] = [];
+      let pendingBytes = 0;
+      let overflowed = false;
+      const consume = (bytes: ArrayBuffer): void => {
+        if (this.settleRequest !== settle || streamError || !responseHead?.stream ||
+          (responseHead.status !== 0 && (responseHead.status < 200 || responseHead.status >= 300))) {
+          return;
+        }
+        try {
+          stream.push(bytes);
+          if (stream.completed() && responseHead.status >= 200 && responseHead.status < 300) {
+            settle();
+          }
+        } catch (error) {
+          streamError = error instanceof Error ? error.message : '无法读取模型回复';
+          if (responseHead.status >= 200 && responseHead.status < 300) {
+            settle(new NativeModelError(streamError, responseHead.status, stream.receivedContent, apiKey, accountToken));
+          }
+        }
+      };
       this.settleRequest = settle;
       try {
+        request.on('headersReceive', (headers: Object): void => {
+          if (this.settleRequest !== settle || !isRecord(headers)) return;
+          const head = streamResponseHead(headers);
+          if (head.interim) return;
+          responseHead = head;
+          if (head.stream && overflowed) {
+            streamError = '无法读取模型回复';
+          }
+          for (const bytes of pendingChunks) consume(bytes);
+          pendingChunks = [];
+          pendingBytes = 0;
+        });
         request.on('dataReceive', (bytes: ArrayBuffer): void => {
           if (this.settleRequest !== settle) {
             return;
@@ -650,13 +870,16 @@ export class NativeChatClient {
             errorBody.set(new Uint8Array(bytes, 0, copied), errorBodyLength);
             errorBodyLength += copied;
           }
-          if (streamError) {
-            return;
-          }
-          try {
-            stream.push(bytes);
-          } catch (error) {
-            streamError = error instanceof Error ? error.message : '无法读取模型回复';
+          if (responseHead) {
+            consume(bytes);
+          } else if (!overflowed) {
+            pendingBytes += bytes.byteLength;
+            if (pendingBytes <= MAX_BYTES_AWAITING_HEADERS) {
+              pendingChunks.push(bytes);
+            } else {
+              overflowed = true;
+              pendingChunks = [];
+            }
           }
         });
         request.requestInStream(endpoint, options).then((status: number): void => {
@@ -664,8 +887,13 @@ export class NativeChatClient {
             return;
           }
           if (status < 200 || status >= 300) {
-            const message = streamError || httpErrorMessage(errorBody.subarray(0, errorBodyLength), status);
-            settle(new NativeModelError(message, status, stream.receivedContent, apiKey, accountToken));
+            const message = httpErrorMessage(errorBody.subarray(0, errorBodyLength), `服务端请求失败 (HTTP ${status})`);
+            settle(new NativeModelError(message, status, false, apiKey, accountToken));
+            return;
+          }
+          if (!responseHead?.stream) {
+            const message = httpErrorMessage(errorBody.subarray(0, errorBodyLength), '服务器未返回流式回复');
+            settle(new NativeModelError(message, status, false, apiKey, accountToken));
             return;
           }
           if (streamError) {

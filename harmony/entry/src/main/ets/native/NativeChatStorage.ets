@@ -5,7 +5,7 @@ import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { NativeChatSource, NativeChatCitation } from './NativeChatSources';
 import { fileIo } from '@kit.CoreFileKit';
 import { NativeAttachment } from './NativeChatAttachments';
-import { NativeReplyFailure } from './NativeReplyNotice';
+import { NativeFailedUpload, NativeReplyFailure } from './NativeReplyNotice';
 import { validNativeReadLinks } from './NativeReadLinks';
 import { isValidNativeToolTimeline } from './NativeToolTimeline';
 import { backupImageIds, pruneBackupImages, removeBackupImage } from './NativeBackupFiles';
@@ -117,10 +117,20 @@ function validCitation(citation: NativeChatCitation): boolean {
     Number.isSafeInteger(citation.sourceIndex) && citation.sourceIndex > 0;
 }
 
+function validFailureStatus(status: number | undefined): boolean {
+  return status === undefined || (Number.isSafeInteger(status) && status >= 100 && status <= 599);
+}
+
+function validFailedUpload(file: NativeFailedUpload): boolean {
+  return !!file && typeof file.id === 'string' && !!file.id && typeof file.detail === 'string' && file.detail.length <= 512 &&
+    typeof file.retryable === 'boolean' && validFailureStatus(file.status);
+}
+
 function validReplyFailure(failure: NativeReplyFailure): boolean {
   return !!failure && ['network', 'upload', 'response', 'unsupported-image'].includes(failure.kind) &&
-    typeof failure.detail === 'string' && failure.detail.length <= 512 &&
-    (failure.status === undefined || (Number.isSafeInteger(failure.status) && failure.status >= 100 && failure.status <= 599));
+    typeof failure.detail === 'string' && failure.detail.length <= 512 && validFailureStatus(failure.status) &&
+    (failure.uploadFiles === undefined ||
+      (failure.kind === 'upload' && Array.isArray(failure.uploadFiles) && failure.uploadFiles.every(validFailedUpload)));
 }
 
 function validateConversation(session: NativeConversation): boolean {
