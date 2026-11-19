@@ -185,24 +185,27 @@ jobs:
         if: steps.signing.outputs.can_sign == 'true'
         working-directory: chat-demo
         shell: bash
+        env:
+          TEAM_ID: ${{ steps.apple_cert.outputs.team_id }}
+          PROFILE_NAME: ${{ steps.apple_cert.outputs.profile_name }}
+          BUNDLE_ID: ${{ steps.apple_cert.outputs.bundle_id }}
         run: |
-          TEAM_ID="${{ steps.apple_cert.outputs.team_id }}"
-          PROFILE_NAME="${{ steps.apple_cert.outputs.profile_name }}"
-          BUNDLE_ID="${{ steps.apple_cert.outputs.bundle_id }}"
-
           # Patch only the App target's Release configuration for manual distribution signing
           # so SPM targets (CapApp-SPM) are not forced to use a provisioning profile.
-          python3 - <<PYEOF
-          from pathlib import Path
+          python3 - <<'PYEOF'
+          import os
           import re
+          from pathlib import Path
+          team_id = os.environ["TEAM_ID"]
+          profile_name = os.environ["PROFILE_NAME"]
           p = Path("ios/App/App.xcodeproj/project.pbxproj")
           text = p.read_text(encoding="utf-8")
           pattern = r'(504EC3181FED79650016851F /\* Release \*/ = \{[\s\S]*?buildSettings = \{[\s\S]*?)CODE_SIGN_STYLE = Automatic;'
           replacement = (
               r'\1CODE_SIGN_STYLE = Manual;\n'
               f'\t\t\t\tCODE_SIGN_IDENTITY = "Apple Distribution";\n'
-              f'\t\t\t\tDEVELOPMENT_TEAM = {TEAM_ID};\n'
-              f'\t\t\t\tPROVISIONING_PROFILE_SPECIFIER = "{PROFILE_NAME}";'
+              f'\t\t\t\tDEVELOPMENT_TEAM = {team_id};\n'
+              f'\t\t\t\tPROVISIONING_PROFILE_SPECIFIER = "{profile_name}";'
           )
           new_text, count = re.subn(pattern, replacement, text, count=1)
           if count != 1:
