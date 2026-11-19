@@ -11,6 +11,8 @@ import { NativeDeepSeekAccount, NativeDeepSeekAccountController, NativeDeepSeekB
 import { NativeOnboarding, NativeOnboardingView } from '../native/NativeOnboarding';
 import { NativeAttachment, NativeChatAttachments } from '../native/NativeChatAttachments';
 import { hydrateImportedAttachment, importedAttachmentPreview, NativeChatBackup, mergeChatBackup } from '../native/NativeChatBackup';
+import { NativeChatCitation, NativeChatSource, NativeChatSources } from '../native/NativeChatSources';
+import { NativeSourcesPanel } from '../native/NativeSourcesPanel';
 import { NativeChatStorage } from '../native/NativeChatStorage';
 import {
   appendBranch, createConversation, createConversationMessage, deleteConversations, groupConversations,
@@ -86,6 +88,8 @@ struct NativeChat {
   @State private settingsError: string = '';
   @State private backupBusy: boolean = false;
   @State private shareImportVisible: boolean = false;
+  @State private sourcesVisible: boolean = false;
+  @State private panelSources: NativeChatSource[] = [];
   @State private appVersion: string = '';
   @State private checkingUpdate: boolean = false;
   @State private releaseNotes: NativeReleaseHistoryItem[] = [];
@@ -200,6 +204,8 @@ struct NativeChat {
       this.imagePreview = '';
     } else if (this.authorizing) {
       this.cancelAuthorization();
+    } else if (this.sourcesVisible) {
+      this.sourcesVisible = false;
     } else if (this.shareImportVisible) {
       this.closeShareImport();
     } else if (this.settingsVisible) {
@@ -839,6 +845,7 @@ struct NativeChat {
       model: reply.message.model, status,
       stopReason: reply.message.stopReason, canPrefill: reply.message.canPrefill,
       thinking: reply.message.thinking, search: reply.message.search, thinkingSignature: reply.message.thinkingSignature,
+      sources: reply.message.sources, citations: reply.message.citations,
     };
   }
 
@@ -863,6 +870,8 @@ struct NativeChat {
       if (reply.stopped) {
         return;
       }
+      const sources = new NativeChatSources();
+      const sourceOffset = reply.message.content.length;
       const outcome: NativeReplyOutcome = await reply.client.send(config, messages, (content: string, reasoning: string) => {
         if (this.history.activeId === session.id && this.visible && this.scroller.isAtEnd()) {
           this.scrollToLatest();
@@ -873,6 +882,15 @@ struct NativeChat {
         if (!this.deletingSessions && Date.now() - this.lastStreamSave > 1500) {
           this.lastStreamSave = Date.now();
           void this.save(context);
+        }
+      }, (event: string): void => {
+        if (sources.apply(event)) {
+          reply.message.sources = sources.snapshot();
+          reply.message.citations = sources.citationSnapshot().map<NativeChatCitation>(
+            (citation: NativeChatCitation): NativeChatCitation => ({
+              offset: citation.offset + sourceOffset, sourceIndex: citation.sourceIndex,
+            }));
+          this.replies = Array.from(this.replies);
         }
       });
       reply.message.stopReason = outcome.stopReason;
@@ -917,7 +935,7 @@ struct NativeChat {
   private canContinue(message: NativeConversationMessage): boolean {
     const path = this.messages();
     return path[path.length - 1]?.id === message.id && path[path.length - 2]?.role === 'user' &&
-      message.canPrefill === true && message.stopReason !== 'refusal' && message.stopReason !== 'tool_use' &&
+      message.canPrefill === true && !message.sources?.length && message.stopReason !== 'refusal' && message.stopReason !== 'tool_use' &&
       (message.status === 'stopped' || (message.status === 'done' && message.stopReason === 'max_tokens'));
   }
 
@@ -1322,30 +1340,73 @@ struct NativeChat {
     .width('100%').alignItems(HorizontalAlign.End).padding({ top: index === 0 ? 34 : 0, bottom: 16 })
   }
 
+  private openSources(sources: NativeChatSource[]): void {
+    if (sources.length) {
+      this.panelSources = sources;
+      this.sourcesVisible = true;
+    }
+  }
+
   @Builder
-  private replyContent(id: string, text: string, reasoning: string, thinking: boolean) {
-    if (reasoning) {
+  private sourcesSummary(sources: NativeChatSource[]) {
+    if (sources.length) {
+      Button({ type: ButtonType.Capsule, buttonStyle: ButtonStyleMode.TEXTUAL }) {
+        Row({ space: 6 }) {
+          Image($r('app.media.native_web_search')).width(14).height(14).fillColor($r('app.color.native_chat_blue_text'))
+          Text(`${sources.length} 个网页`).fontSize(13).fontColor($r('app.color.native_chat_secondary'))
+          Image($r('app.media.native_chevron_right')).width(14).height(14).fillColor($r('app.color.native_chat_secondary'))
+        }
+      }
+      .height(34).padding({ left: 12, right: 10 }).backgroundColor($r('app.color.native_chat_field'))
+      .onClick(() => { this.openSources(sources); })
+    }
+  }
+
+  private withCitationMarkers(text: string, citations: NativeChatCitation[]): string {
+    const ordered = citations.slice().sort((left: NativeChatCitation, right: NativeChatCitation): number =>
+      left.offset - right.offset || left.sourceIndex - right.sourceIndex);
+    let result = '';
+    let cursor = 0;
+    for (const citation of ordered) {
+      const offset = Math.max(cursor, Math.min(text.length, citation.offset));
+      result += `${text.slice(cursor, offset)}[citation:${citation.sourceIndex}]`;
+      cursor = offset;
+    }
+    return result + text.slice(cursor);
+  }
+
+  @Builder
+  private replyContent(message: NativeConversationMessage, thinking: boolean) {
+    if (message.reasoning) {
       Button({ type: ButtonType.Normal }) {
         Row({ space: 6 }) {
           Image($r('app.media.native_think')).width(16).height(16).fillColor($r('app.color.native_chat_blue_text'))
           Text(thinking ? '正在思考' : '已思考').fontSize(15).fontColor($r('app.color.native_chat_secondary'))
-          Image(this.collapsedThoughts.includes(id) ? $r('app.media.native_chevron_right') :
+          Image(this.collapsedThoughts.includes(message.id) ? $r('app.media.native_chevron_right') :
             $r('app.media.native_chevron_down')).width(14).height(14).fillColor($r('app.color.native_chat_secondary'))
         }
       }
       .height(34).padding(0).backgroundColor(Color.Transparent)
       .onClick(() => {
-        this.collapsedThoughts = this.collapsedThoughts.includes(id) ?
-          this.collapsedThoughts.filter((messageId: string): boolean => messageId !== id) : [...this.collapsedThoughts, id];
+        this.collapsedThoughts = this.collapsedThoughts.includes(message.id) ?
+          this.collapsedThoughts.filter((messageId: string): boolean => messageId !== message.id) : [...this.collapsedThoughts, message.id];
       })
-      if (!this.collapsedThoughts.includes(id)) {
-        Text(reasoning).fontSize(14).lineHeight(22).width('100%').fontColor($r('app.color.native_chat_secondary'))
+      if (!this.collapsedThoughts.includes(message.id)) {
+        Text(message.reasoning).fontSize(14).lineHeight(22).width('100%').fontColor($r('app.color.native_chat_secondary'))
           .padding({ left: 12 }).copyOption(CopyOptions.LocalDevice)
           .border({ width: { left: 2 }, color: $r('app.color.native_chat_stroke') })
       }
     }
-    if (text) {
-      NativeMarkdown({ content: text, fontScale: this.settings.chatFontSize / 16 })
+    if (message.content) {
+      NativeMarkdown({
+        content: this.withCitationMarkers(message.content, message.citations ?? []),
+        fontScale: this.settings.chatFontSize / 16, hasCitations: !!message.citations?.length,
+        onCitation: (index: number) => {
+          const sources = message.sources ?? [];
+          const source = sources.find((item: NativeChatSource): boolean => item.index === index);
+          this.openSources(source ? [source] : sources);
+        },
+      })
     }
   }
 
@@ -1354,8 +1415,7 @@ struct NativeChat {
     Column({ space: 7 }) {
       if (this.reply()?.message.id === message.id) {
         if (this.reply()?.message.content || this.reply()?.message.reasoning) {
-          this.replyContent(message.id, this.reply()?.message.content ?? '', this.reply()?.message.reasoning ?? '',
-            !this.reply()?.message.content)
+          this.replyContent(this.reply()?.message ?? message, !this.reply()?.message.content)
         } else {
           Row({ space: 6 }) {
             ForEach([0.45, 0.7, 1], (opacity: number) => {
@@ -1365,10 +1425,11 @@ struct NativeChat {
           .height(34).accessibilityText('正在等待回复')
         }
       } else {
-        this.replyContent(message.id, message.content, message.reasoning, false)
+        this.replyContent(message, false)
         if (this.shareTemplate(message)) {
           NativeMarkdown({ content: this.shareTemplate(message), fontScale: this.settings.chatFontSize / 16 })
         }
+        this.sourcesSummary(message.sources ?? [])
         if (message.status === 'error') {
           Text('回复失败，请重试').fontSize(14).fontColor($r('app.color.native_chat_error'))
         } else if (message.status === 'stopped') {
@@ -2075,6 +2136,11 @@ struct NativeChat {
     .bindSheet($$this.settingsVisible, this.settingsPage(), { height: SheetSize.LARGE, blurStyle: BlurStyle.Thick })
   }
 
+  @Builder
+  private sourcesSheet() {
+    NativeSourcesPanel({ sources: this.panelSources, title: '搜索结果', onClose: () => { this.sourcesVisible = false; } })
+  }
+
   build() {
     Stack({ alignContent: Alignment.Start }) {
       if (this.drawerProgress() > 0) {
@@ -2133,6 +2199,7 @@ struct NativeChat {
       }
     }
     .width('100%').height('100%').backgroundColor($r('app.color.native_chat_sidebar')).clip(true)
+    .bindSheet($$this.sourcesVisible, this.sourcesSheet(), { height: SheetSize.LARGE, blurStyle: BlurStyle.Thick })
     .onAreaChange((_old: Area, area: Area): void => {
       this.viewportWidth = Number(area.width);
       this.viewportHeight = Number(area.height);
@@ -2141,7 +2208,7 @@ struct NativeChat {
       PanGesture({ direction: PanDirection.Horizontal, distance: 14 })
         .onActionStart((event: GestureEvent) => { this.touchStart = event.fingerList[0]?.globalX ?? this.viewportWidth; })
         .onActionUpdate((event: GestureEvent) => {
-          if (this.authenticated() && !this.settingsVisible && !this.renamingId && !this.authorizing && !this.imagePreview && !this.shareImportVisible &&
+          if (this.authenticated() && !this.settingsVisible && !this.renamingId && !this.authorizing && !this.imagePreview && !this.shareImportVisible && !this.sourcesVisible &&
             (this.drawerOpen || this.touchStart < 160)) {
             this.drawerDrag = event.offsetX;
           }

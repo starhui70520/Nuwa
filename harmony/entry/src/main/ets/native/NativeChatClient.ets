@@ -204,9 +204,11 @@ class ChatStream {
   private outcome: NativeReplyOutcome = { stopReason: '', canPrefill: true, thinkingSignature: '' };
   private readonly onDelta: (content: string, reasoning: string) => void;
   private readonly protocol: 'openai' | 'anthropic';
+  private readonly onAnthropicEvent?: (data: string) => void;
 
   constructor(onDelta: (content: string, reasoning: string) => void,
-    protocol: 'openai' | 'anthropic' = 'openai') {
+    protocol: 'openai' | 'anthropic' = 'openai', onAnthropicEvent?: (data: string) => void) {
+    this.onAnthropicEvent = onAnthropicEvent;
     this.onDelta = onDelta;
     this.protocol = protocol;
   }
@@ -277,6 +279,7 @@ class ChatStream {
       return;
     }
     if (this.protocol === 'anthropic') {
+      this.onAnthropicEvent?.(data);
       this.dispatchAnthropic(data, eventName);
       return;
     }
@@ -374,7 +377,8 @@ export class NativeChatClient {
   }
 
   async send(config: NativeChatConfig, messages: NativeChatMessage[],
-    onDelta: (content: string, reasoning: string) => void): Promise<NativeReplyOutcome> {
+    onDelta: (content: string, reasoning: string) => void,
+    onAnthropicEvent?: (data: string) => void): Promise<NativeReplyOutcome> {
     this.cancel();
     const apiKey = config.apiKey.trim();
     const accountToken = config.accountToken?.trim() ?? '';
@@ -485,7 +489,7 @@ export class NativeChatClient {
         if (this.settleRequest === settle) {
           onDelta(content, reasoning);
         }
-      }, protocol);
+      }, protocol, onAnthropicEvent);
       this.settleRequest = settle;
       try {
         request.on('dataReceive', (bytes: ArrayBuffer): void => {

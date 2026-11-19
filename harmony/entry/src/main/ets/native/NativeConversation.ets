@@ -1,4 +1,5 @@
 import { util } from '@kit.ArkTS';
+import { NativeChatSource, NativeChatCitation } from './NativeChatSources';
 import { NativeAttachment } from './NativeChatAttachments';
 
 export interface NativeStoredMessage {
@@ -19,6 +20,8 @@ export interface NativeConversationMessage extends NativeStoredMessage {
   thinking?: boolean;
   search?: boolean;
   thinkingSignature?: string;
+  sources?: NativeChatSource[];
+  citations?: NativeChatCitation[];
   files?: NativeAttachment[];
 }
 
@@ -103,6 +106,8 @@ function copyMessage(message: NativeConversationMessage): NativeConversationMess
     thinking: message.thinking,
     search: message.search,
     thinkingSignature: message.thinkingSignature,
+    sources: message.sources,
+    citations: message.citations,
     files: message.files,
   };
 }
@@ -214,6 +219,8 @@ export function updateConversationMessage(session: NativeConversation, message: 
   updated.thinking = message.thinking;
   updated.search = message.search;
   updated.thinkingSignature = message.thinkingSignature;
+  updated.sources = message.sources;
+  updated.citations = message.citations;
   updated.files = message.files ?? previous.files;
   const next = copyConversation(session);
   next.updatedAt = updatedAt;

@@ -1,6 +1,7 @@
 import { common } from '@kit.AbilityKit';
 import { util } from '@kit.ArkTS';
 import { BusinessError } from '@kit.BasicServicesKit';
+import { NativeChatSource, NativeChatCitation } from './NativeChatSources';
 import { fileIo } from '@kit.CoreFileKit';
 import { NativeAttachment } from './NativeChatAttachments';
 import {
@@ -50,6 +51,20 @@ function validAttachment(item: NativeAttachment): boolean {
     (!item.local || /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(item.id));
 }
 
+function validSource(source: NativeChatSource): boolean {
+  return !!source && Number.isSafeInteger(source.index) && source.index > 0 &&
+    typeof source.url === 'string' && /^https?:\/\//i.test(source.url) &&
+    typeof source.title === 'string' && typeof source.siteName === 'string' &&
+    (source.snippet === null || typeof source.snippet === 'string') &&
+    (source.publishedAt === null || typeof source.publishedAt === 'string') &&
+    (source.siteIcon === null || typeof source.siteIcon === 'string') && typeof source.searchResult === 'boolean';
+}
+
+function validCitation(citation: NativeChatCitation): boolean {
+  return !!citation && Number.isSafeInteger(citation.offset) && citation.offset >= 0 &&
+    Number.isSafeInteger(citation.sourceIndex) && citation.sourceIndex > 0;
+}
+
 function validateConversation(session: NativeConversation): boolean {
   if (!session || typeof session.id !== 'string' || !session.id || typeof session.title !== 'string' ||
     !isTimestamp(session.createdAt) || !isTimestamp(session.updatedAt) ||
@@ -68,6 +83,8 @@ function validateConversation(session: NativeConversation): boolean {
       (message.thinking !== undefined && typeof message.thinking !== 'boolean') ||
       (message.search !== undefined && typeof message.search !== 'boolean') ||
       (message.thinkingSignature !== undefined && typeof message.thinkingSignature !== 'string') ||
+      (message.sources !== undefined && (!Array.isArray(message.sources) || !message.sources.every(validSource))) ||
+      (message.citations !== undefined && (!Array.isArray(message.citations) || !message.citations.every(validCitation))) ||
       (message.files !== undefined && (!Array.isArray(message.files) || !message.files.every(validAttachment)))) {
       return false;
     }

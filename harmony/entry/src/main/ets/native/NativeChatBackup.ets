@@ -1,9 +1,10 @@
 import { common } from '@kit.AbilityKit';
-import { util } from '@kit.ArkTS';
+import { url, util } from '@kit.ArkTS';
 import { fileIo, picker } from '@kit.CoreFileKit';
 import {
   attachmentMime, attachmentPurpose, attachmentRasterMime, NativeAttachment, NativeChatAttachments,
 } from './NativeChatAttachments';
+import { NativeChatCitation, NativeChatSource, safeNativeSourceUrl } from './NativeChatSources';
 import { NativeConversation, NativeConversationMessage, NativeConversationState, visibleMessages } from './NativeConversation';
 import {
   backupPath, backupText, backupUtf8, MAX_BACKUP_BYTES, NativeBackupZipEntry, readBackupZip, writeBackupZip,
@@ -16,6 +17,8 @@ const VERSION = 3;
 const IO_CHUNK = 256 * 1024;
 const MAX_IMAGE_BYTES = 16 * 1024 * 1024;
 const MAX_PREVIEW_BYTES = 1024 * 1024;
+const MAX_PORTABLE_SOURCES = 256;
+const MAX_PORTABLE_CITATIONS = 4_096;
 const base64 = new util.Base64Helper();
 
 interface ArchiveManifest {
@@ -39,6 +42,29 @@ interface ArchiveFragment {
   content?: string;
   elapsed_secs?: number | null;
   files?: ArchiveFile[];
+  queries?: string[];
+  results?: ArchiveSearchResult[];
+  status?: string;
+  url?: string | null;
+  title?: string | null;
+  snippet?: string | null;
+  site_name?: string | null;
+  published_at?: string | null;
+}
+
+interface ArchiveSearchResult {
+  url: string;
+  title: string;
+  snippet: string;
+  site_name: string | null;
+  site_icon: string | null;
+  published_at: string | null;
+}
+
+interface ArchiveSourceMetadata {
+  version: number;
+  sources: NativeChatSource[];
+  citations: NativeChatCitation[];
 }
 
 interface ArchiveMessage {
@@ -51,6 +77,7 @@ interface ArchiveMessage {
   accumulated_token_usage: number;
   inserted_at: string;
   fragments: ArchiveFragment[];
+  nuwa_harmony_sources?: ArchiveSourceMetadata;
 }
 
 interface ArchiveSummary {
@@ -220,6 +247,137 @@ function textFragments(message: ArchiveMessage, type: string): string {
     .map((fragment: ArchiveFragment): string => fragment.content ?? '').join('\n');
 }
 
+function sourceString(value: string | null | undefined, limit: number): string {
+  return typeof value === 'string' ? value.trim().slice(0, limit) : '';
+}
+
+function sourceHost(address: string): string {
+  return url.URL.parseURL(address).hostname.replace(/^www\./i, '');
+}
+
+function readSourceMetadata(value: ArchiveSourceMetadata | undefined, contentLength: number): ArchiveSourceMetadata | undefined {
+  if (!value || value.version !== 1 || !Array.isArray(value.sources) || !Array.isArray(value.citations)) {
+    return undefined;
+  }
+  const sources: NativeChatSource[] = [];
+  const indexes = new Set<number>();
+  const addresses = new Set<string>();
+  for (const item of value.sources.slice(0, MAX_PORTABLE_SOURCES)) {
+    const address = safeNativeSourceUrl(item?.url);
+    if (!address || !count(item.index) || item.index === 0 || indexes.has(item.index) || addresses.has(address)) {
+      continue;
+    }
+    indexes.add(item.index);
+    addresses.add(address);
+    sources.push({
+      index: item.index,
+      url: address,
+      title: sourceString(item.title, 320) || address,
+      siteName: sourceString(item.siteName, 120) || sourceHost(address),
+      snippet: sourceString(item.snippet, 1_600) || null,
+      publishedAt: sourceString(item.publishedAt, 120) || null,
+      siteIcon: safeNativeSourceUrl(item.siteIcon) || null,
+      searchResult: item.searchResult === true,
+    });
+  }
+  const citations = value.citations.slice(0, MAX_PORTABLE_CITATIONS)
+    .filter((item: NativeChatCitation): boolean =>
+      !!item && count(item.offset) && item.offset <= contentLength && indexes.has(item.sourceIndex))
+    .map((item: NativeChatCitation): NativeChatCitation => ({ offset: item.offset, sourceIndex: item.sourceIndex }));
+  return sources.length ? { version: 1, sources: sources, citations: citations } : undefined;
+}
+
+function addPortableSource(sources: NativeChatSource[], seen: Map<string, NativeChatSource>,
+  item: ArchiveSearchResult, searchResult: boolean): void {
+  const address = safeNativeSourceUrl(item?.url);
+  if (!address) {
+    return;
+  }
+  const host = sourceHost(address);
+  const title = sourceString(item.title, 320) || address;
+  const siteName = sourceString(item.site_name, 120) || host;
+  const snippet = sourceString(item.snippet, 1_600) || null;
+  const publishedAt = sourceString(item.published_at, 120) || null;
+  const siteIcon = safeNativeSourceUrl(item.site_icon) || null;
+  const cached = seen.get(address);
+  if (cached) {
+    if (cached.title === address) {
+      cached.title = title;
+    }
+    if (cached.siteName === host) {
+      cached.siteName = siteName;
+    }
+    cached.snippet = cached.snippet ?? snippet;
+    cached.publishedAt = cached.publishedAt ?? publishedAt;
+    cached.siteIcon = cached.siteIcon ?? siteIcon;
+    cached.searchResult = cached.searchResult || searchResult;
+    return;
+  }
+  if (sources.length < MAX_PORTABLE_SOURCES) {
+    const source: NativeChatSource = {
+      index: sources.length + 1, url: address, title: title, siteName: siteName, snippet: snippet,
+      publishedAt: publishedAt, siteIcon: siteIcon, searchResult: searchResult,
+    };
+    sources.push(source);
+    seen.set(address, source);
+  }
+}
+
+function portableSources(message: ArchiveMessage, contentLength: number): ArchiveSourceMetadata | undefined {
+  const native = readSourceMetadata(message.nuwa_harmony_sources, contentLength);
+  if (native) {
+    return native;
+  }
+  const sources: NativeChatSource[] = [];
+  const seen = new Map<string, NativeChatSource>();
+  for (const fragment of message.fragments) {
+    if (fragment.type === 'TOOL_SEARCH' && Array.isArray(fragment.results)) {
+      for (const result of fragment.results) {
+        addPortableSource(sources, seen, result, true);
+      }
+    } else if (fragment.type === 'TOOL_OPEN' && fragment.status === 'FINISHED' && fragment.url) {
+      addPortableSource(sources, seen, {
+        url: fragment.url, title: fragment.title ?? '', snippet: fragment.snippet ?? '',
+        site_name: fragment.site_name ?? null, site_icon: null, published_at: fragment.published_at ?? null,
+      }, false);
+    }
+  }
+  return sources.length ? { version: 1, sources: sources, citations: [] } : undefined;
+}
+
+function portableSourceDate(value: string | null): string | null {
+  const parsed = value ? Date.parse(value) : NaN;
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 253_402_300_799_999) {
+    return null;
+  }
+  return new Date(parsed).toISOString();
+}
+
+function appendPortableSources(message: ArchiveMessage, item: NativeConversationMessage): void {
+  const metadata: ArchiveSourceMetadata = { version: 1, sources: item.sources ?? [], citations: item.citations ?? [] };
+  const validated = readSourceMetadata(metadata, item.content.length);
+  message.nuwa_harmony_sources = validated;
+  if (!validated || message.fragments.some((fragment: ArchiveFragment): boolean => fragment.type === 'TOOL_SEARCH')) {
+    return;
+  }
+  const results = validated.sources.filter((source: NativeChatSource): boolean => source.searchResult)
+    .map((source: NativeChatSource): ArchiveSearchResult => ({
+      url: source.url, title: source.title, snippet: source.snippet ?? '', site_name: source.siteName || null,
+      site_icon: source.siteIcon, published_at: portableSourceDate(source.publishedAt),
+    }));
+  if (!results.length) {
+    return;
+  }
+  // The v3 schema has source rows but no inline citation offsets.
+  const fragment: ArchiveFragment = { type: 'TOOL_SEARCH', queries: [], results: results, status: 'FINISHED' };
+  const responseIndex = message.fragments.findIndex((row: ArchiveFragment): boolean => row.type === 'RESPONSE');
+  if (responseIndex < 0) {
+    message.fragments.push(fragment);
+  } else {
+    message.fragments.splice(responseIndex, 0, fragment);
+  }
+}
+
 function original(session: NativeConversation): ArchiveOrigin | undefined {
   return session.archiveJson ? JSON.parse(session.archiveJson) as ArchiveOrigin : undefined;
 }
@@ -316,14 +474,20 @@ function nativeSession(source: ArchiveSession, entries: Map<string, Uint8Array>)
     if (byId.has(id) || (parentId === null ? role !== 'user' : !parent || parent.role === role)) {
       return invalidTree();
     }
+    const body = textFragments(raw, role === 'user' ? 'REQUEST' : 'RESPONSE');
+    const sources = role === 'assistant' ? portableSources(raw, body.length) : undefined;
     const message: NativeConversationMessage = {
       id: id,
       parentId: parentId,
       role: role,
-      content: textFragments(raw, role === 'user' ? 'REQUEST' : 'RESPONSE'),
+      content: body,
       reasoning: textFragments(raw, 'THINK'),
       createdAt: timestamp(raw.inserted_at),
       status: role === 'user' ? undefined : nativeStatus(raw.status),
+      thinking: role === 'assistant' ? raw.thinking_enabled : undefined,
+      search: role === 'assistant' ? raw.search_enabled : undefined,
+      sources: sources?.sources,
+      citations: sources?.citations,
       files: nativeFiles(raw),
     };
     if (parent) {
@@ -537,6 +701,12 @@ function archiveSession(session: NativeConversation, images: Map<string, Uint8Ar
   }
   const ids = new Map<string, number>();
   const roles = new Map<string, string>();
+  const firstReplies = new Map<string, NativeConversationMessage>();
+  for (const item of session.messages) {
+    if (item.role === 'assistant' && item.parentId !== null && !firstReplies.has(item.parentId)) {
+      firstReplies.set(item.parentId, item);
+    }
+  }
   const messages = session.messages.map((item: NativeConversationMessage, index: number): ArchiveMessage => {
     const role = item.role === 'user' ? 'USER' : 'ASSISTANT';
     const parent = item.parentId === null ? null : ids.get(item.parentId);
@@ -547,13 +717,14 @@ function archiveSession(session: NativeConversation, images: Map<string, Uint8Ar
     const preexisting = rawById.get(item.id);
     let message = preexisting;
     if (!message) {
+      const request = role === 'ASSISTANT' ? item : firstReplies.get(item.id);
       message = {
         id: index + 1,
         parent_id: parent ?? null,
         role: role,
         status: archiveStatus(item.status),
-        thinking_enabled: !!item.reasoning,
-        search_enabled: false,
+        thinking_enabled: request?.thinking ?? !!request?.reasoning,
+        search_enabled: request?.search ?? false,
         accumulated_token_usage: 0,
         inserted_at: archiveDate(item.createdAt),
         fragments: [],
@@ -580,9 +751,14 @@ function archiveSession(session: NativeConversation, images: Map<string, Uint8Ar
       }
     }
     if (role === 'ASSISTANT') {
+      message.thinking_enabled = item.thinking ?? message.thinking_enabled;
+      message.search_enabled = item.search ?? message.search_enabled;
       updateText(message, 'THINK', item.reasoning);
     }
     updateText(message, role === 'USER' ? 'REQUEST' : 'RESPONSE', item.content);
+    if (role === 'ASSISTANT') {
+      appendPortableSources(message, item);
+    }
     if (!preexisting && item.files?.length) {
       const files = item.files.map((file: NativeAttachment): ArchiveFile =>
         outgoingFile(file, session.id, originalFiles, sourceId, images, liveImages));
