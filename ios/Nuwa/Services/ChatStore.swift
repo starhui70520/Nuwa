@@ -56,7 +56,7 @@ final class DraftStore: ObservableObject {
         onToast: @escaping (String) -> Void
     ) {
         let k = key(for: sessionId)
-        var entry = drafts[k] ?? DraftEntry()
+        let entry = drafts[k] ?? DraftEntry()
         guard entry.attachments.count < AttachmentStore.maxCount else {
             onToast("上传文件最多支持 \(AttachmentStore.maxCount) 个")
             return
@@ -691,6 +691,7 @@ final class ChatStore: ObservableObject {
                     var lastFlushTime = ContinuousClock.now
                     var hasDirtyDelta = false
 
+                    @MainActor
                     func flushWorking(force: Bool = false) {
                         guard force || hasDirtyDelta else { return }
                         guard let sIdx = sessions.firstIndex(where: { $0.id == sessionId }),
