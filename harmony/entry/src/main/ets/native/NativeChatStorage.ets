@@ -4,6 +4,9 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { NativeChatSource, NativeChatCitation } from './NativeChatSources';
 import { fileIo } from '@kit.CoreFileKit';
 import { NativeAttachment } from './NativeChatAttachments';
+import { NativeReplyFailure } from './NativeReplyNotice';
+import { validNativeReadLinks } from './NativeReadLinks';
+import { isValidNativeToolTimeline } from './NativeToolTimeline';
 import { backupImageIds, pruneBackupImages, removeBackupImage } from './NativeBackupFiles';
 import {
   NativeConversation,
@@ -75,6 +78,12 @@ function validCitation(citation: NativeChatCitation): boolean {
     Number.isSafeInteger(citation.sourceIndex) && citation.sourceIndex > 0;
 }
 
+function validReplyFailure(failure: NativeReplyFailure): boolean {
+  return !!failure && ['network', 'upload', 'response', 'unsupported-image'].includes(failure.kind) &&
+    typeof failure.detail === 'string' && failure.detail.length <= 512 &&
+    (failure.status === undefined || (Number.isSafeInteger(failure.status) && failure.status >= 100 && failure.status <= 599));
+}
+
 function validateConversation(session: NativeConversation): boolean {
   if (!session || typeof session.id !== 'string' || !session.id || typeof session.title !== 'string' ||
     !isTimestamp(session.createdAt) || !isTimestamp(session.updatedAt) ||
@@ -87,6 +96,9 @@ function validateConversation(session: NativeConversation): boolean {
     if (!isStoredMessage(message) || typeof message.id !== 'string' || !message.id || byId.has(message.id) ||
       !isTimestamp(message.createdAt) || (message.parentId !== null && !byId.has(message.parentId)) ||
       (message.status !== undefined && typeof message.status !== 'string') ||
+      (message.failure !== undefined && !validReplyFailure(message.failure)) ||
+      (message.readLinks !== undefined && !validNativeReadLinks(message.readLinks, message.content.length)) ||
+      (message.toolTimeline !== undefined && !isValidNativeToolTimeline(message.toolTimeline)) ||
       (message.model !== undefined && typeof message.model !== 'string') ||
       (message.stopReason !== undefined && typeof message.stopReason !== 'string') ||
       (message.canPrefill !== undefined && typeof message.canPrefill !== 'boolean') ||

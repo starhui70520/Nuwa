@@ -4,6 +4,7 @@ import { asset } from '@kit.AssetStoreKit';
 import { util } from '@kit.ArkTS';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { defaultNativeLocale, NativeLocale, NativeUserLocation, restoreNativeLocation } from './NativeLocation';
+import { HarmonySpeechEngine, HarmonySpeechVoice } from '../speech/HarmonySpeechOptions';
 
 export type NativeApiProtocol = 'openai' | 'anthropic';
 export type NativeAuthMode = 'api-key' | 'deepseek-account';
@@ -26,6 +27,9 @@ export interface NativeSettings {
   thinking: boolean;
   search: boolean;
   ttsMuted: boolean;
+  speechEngine: HarmonySpeechEngine;
+  speechVoice: HarmonySpeechVoice;
+  migrationPromptHandled: boolean;
 }
 
 const PREFERENCES_NAME: string = 'nuwa_native_settings';
@@ -126,6 +130,9 @@ export class NativeSettingsController {
     const thinking = await store.get('thinking', false) as boolean;
     const search = await store.get('search', false) as boolean;
     const ttsMuted = await store.get('ttsMuted', true) as boolean;
+    const speechEngine = await store.get('speechEngine', 'auto') as string;
+    const speechVoice = await store.get('speechVoice', 'stella') as string;
+    const migrationPromptHandled = await store.get('migrationPromptHandled', false) as boolean;
     const resolvedProtocol: NativeApiProtocol = protocol === 'anthropic' ? 'anthropic' : 'openai';
     const apiKey = credential && credential.binding === bindingFor(baseUrl, resolvedProtocol)
       ? credential.apiKey : '';
@@ -143,6 +150,9 @@ export class NativeSettingsController {
       thinking,
       search,
       ttsMuted,
+      speechEngine: speechEngine === 'native' || speechEngine === 'cloud' ? speechEngine : 'auto',
+      speechVoice: speechVoice === 'tide' ? 'tide' : 'stella',
+      migrationPromptHandled,
     };
   }
 
@@ -172,6 +182,9 @@ export class NativeSettingsController {
         store.put('thinking', settings.thinking),
         store.put('search', settings.search),
         store.put('ttsMuted', settings.ttsMuted),
+        store.put('speechEngine', settings.speechEngine),
+        store.put('speechVoice', settings.speechVoice),
+        store.put('migrationPromptHandled', settings.migrationPromptHandled),
       ];
       // Changing other settings must preserve both system defaults and the saved location hierarchy.
       if (manualPreference === 'locale') {

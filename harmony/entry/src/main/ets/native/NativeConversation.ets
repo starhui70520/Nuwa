@@ -1,6 +1,9 @@
 import { util } from '@kit.ArkTS';
 import { NativeChatSource, NativeChatCitation } from './NativeChatSources';
 import { NativeAttachment } from './NativeChatAttachments';
+import { NativeReplyFailure } from './NativeReplyNotice';
+import { NativeToolTimelineView } from './NativeToolTimeline';
+import { NativeReadLink } from './NativeReadLinks';
 
 export interface NativeStoredMessage {
   role: string;
@@ -14,6 +17,7 @@ export interface NativeConversationMessage extends NativeStoredMessage {
   parentId: string | null;
   selectedChildId?: string;
   status?: string;
+  failure?: NativeReplyFailure;
   model?: string;
   stopReason?: string;
   canPrefill?: boolean;
@@ -22,6 +26,8 @@ export interface NativeConversationMessage extends NativeStoredMessage {
   thinkingSignature?: string;
   latestReminder?: string;
   sources?: NativeChatSource[];
+  toolTimeline?: NativeToolTimelineView;
+  readLinks?: NativeReadLink[];
   citations?: NativeChatCitation[];
   files?: NativeAttachment[];
 }
@@ -101,6 +107,7 @@ function copyMessage(message: NativeConversationMessage): NativeConversationMess
     parentId: message.parentId,
     selectedChildId: message.selectedChildId,
     status: message.status,
+    failure: message.failure,
     model: message.model,
     stopReason: message.stopReason,
     canPrefill: message.canPrefill,
@@ -109,6 +116,8 @@ function copyMessage(message: NativeConversationMessage): NativeConversationMess
     thinkingSignature: message.thinkingSignature,
     latestReminder: message.latestReminder,
     sources: message.sources,
+    toolTimeline: message.toolTimeline,
+    readLinks: message.readLinks,
     citations: message.citations,
     files: message.files,
   };
@@ -217,6 +226,7 @@ export function updateConversationMessage(session: NativeConversation, message: 
   updated.content = message.content;
   updated.reasoning = message.reasoning;
   updated.status = message.status;
+  updated.failure = message.failure;
   updated.model = message.model;
   updated.stopReason = message.stopReason;
   updated.canPrefill = message.canPrefill;
@@ -225,6 +235,8 @@ export function updateConversationMessage(session: NativeConversation, message: 
   updated.thinkingSignature = message.thinkingSignature;
   updated.latestReminder = message.latestReminder;
   updated.sources = message.sources;
+  updated.toolTimeline = message.toolTimeline;
+  updated.readLinks = message.readLinks;
   updated.citations = message.citations;
   updated.files = message.files ?? previous.files;
   const next = copyConversation(session);

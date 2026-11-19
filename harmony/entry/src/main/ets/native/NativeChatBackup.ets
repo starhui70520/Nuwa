@@ -6,6 +6,13 @@ import {
 } from './NativeChatAttachments';
 import { NativeChatCitation, NativeChatSource, safeNativeSourceUrl } from './NativeChatSources';
 import { NativeConversation, NativeConversationMessage, NativeConversationState, visibleMessages } from './NativeConversation';
+import { NativeLocale } from './NativeLocation';
+import { describeNativeReplyFailure, nativeRefusalText } from './NativeReplyNotice';
+import {
+  buildArchivedNativeTimeline, NativeArchiveTimelineFragment, NativeArchiveTimelineResult,
+  NativeTimelinePage, NativeTimelinePattern, NativeToolStatus, NativeToolTimelineView,
+} from './NativeToolTimeline';
+import { NativeReadLink, validNativeReadLinks } from './NativeReadLinks';
 import {
   backupPath, backupText, backupUtf8, backupZipChecksum, MAX_BACKUP_BYTES, MAX_BACKUP_ENTRY_BYTES, memoryBackupInput,
   NativeBackupZipEntry, NativeBackupZipInput, NativeBackupZipStreamEntry, NativeBackupZipWriter, readBackupZipEntries,
@@ -55,15 +62,18 @@ interface ArchiveFragment {
   snippet?: string | null;
   site_name?: string | null;
   published_at?: string | null;
+  pattern?: string;
 }
 
 interface ArchiveSearchResult {
-  url: string;
-  title: string;
-  snippet: string;
-  site_name: string | null;
-  site_icon: string | null;
-  published_at: string | null;
+  url?: string;
+  title?: string | null;
+  snippet?: string;
+  site_name?: string | null;
+  site_icon?: string | null;
+  published_at?: string | null;
+  signature?: string;
+  nuwa_harmony_binding?: string;
 }
 
 interface ArchiveSourceMetadata {
@@ -203,10 +213,10 @@ function validateMessage(message: ArchiveMessage): void {
 
 function nativeStatus(status: string): string {
   switch (status) {
-    case 'FINISHED': return 'done';
+    case 'FINISHED':
+    case 'CONTENT_FILTER': return 'done';
     case 'INCOMPLETE':
     case 'WIP': return 'stopped';
-    case 'CONTENT_FILTER':
     case 'FAILED':
     case 'CONTEXT_LENGTH_EXCEEDED':
     case 'TIMEOUT': return 'error';
@@ -214,13 +224,14 @@ function nativeStatus(status: string): string {
   }
 }
 
-function archiveStatus(status: string | undefined): string {
+function archiveStatus(status: string | undefined, stopReason?: string): string {
+  if (stopReason === 'refusal') return 'CONTENT_FILTER';
   switch (status) {
     case 'pending':
-    case 'streaming':
+    case 'streaming': return 'WIP';
     case 'stopped': return 'INCOMPLETE';
     case 'error': return 'FAILED';
-    default: return 'FINISHED';
+    default: return stopReason === 'max_tokens' ? 'INCOMPLETE' : 'FINISHED';
   }
 }
 
@@ -258,7 +269,43 @@ function validateFragment(fragment: ArchiveFragment, sessionId: string, imagePat
 
 function textFragments(message: ArchiveMessage, type: string): string {
   return message.fragments.filter((fragment: ArchiveFragment): boolean => fragment.type === type)
-    .map((fragment: ArchiveFragment): string => fragment.content ?? '').join('\n');
+    .map((fragment: ArchiveFragment): string => fragment.content ?? '').join(type === 'RESPONSE' ? '' : '\n');
+}
+
+function importedTimeline(message: ArchiveMessage): NativeToolTimelineView | undefined {
+  const fragments = message.fragments.map<NativeArchiveTimelineFragment>((fragment: ArchiveFragment): NativeArchiveTimelineFragment => ({
+    type: fragment.type, content: fragment.content, elapsed_secs: fragment.elapsed_secs, status: fragment.status,
+    queries: fragment.queries, url: fragment.url, title: fragment.title, pattern: fragment.pattern,
+    results: Array.isArray(fragment.results) ? fragment.results.map<NativeArchiveTimelineResult>(
+      (result: ArchiveSearchResult): NativeArchiveTimelineResult => ({
+        url: result?.url, title: result?.title, signature: result?.signature,
+      })) : undefined,
+  }));
+  const view = buildArchivedNativeTimeline(fragments, message.id.toString());
+  return view.steps.length ? { steps: view.steps, answer: '', answerOffset: view.answerOffset,
+    thinkingSeconds: view.thinkingSeconds } : undefined;
+}
+
+function importedReadLinks(message: ArchiveMessage, textLength: number): NativeReadLink[] | undefined {
+  const links: NativeReadLink[] = [];
+  let offset = 0;
+  for (let index = 0; index < message.fragments.length; index++) {
+    const fragment = message.fragments[index];
+    if (fragment.type === 'RESPONSE') {
+      offset += fragment.content?.length ?? 0;
+    }
+    if (fragment.type !== 'READ_LINK' || !Array.isArray(fragment.results)) continue;
+    for (let resultIndex = 0; resultIndex < fragment.results.length; resultIndex++) {
+      const result = fragment.results[resultIndex];
+      if (typeof result?.signature !== 'string' || !result.signature.trim()) continue;
+      links.push({
+        id: `history-${message.id}-${index}-${resultIndex}`, url: safeNativeSourceUrl(result.url),
+        title: typeof result.title === 'string' ? result.title.slice(0, 512) : null,
+        signature: result.signature, offset, binding: result.nuwa_harmony_binding,
+      });
+    }
+  }
+  return links.length > 0 && validNativeReadLinks(links, textLength) ? links : undefined;
 }
 
 function sourceString(value: string | null | undefined, limit: number): string {
@@ -392,6 +439,97 @@ function appendPortableSources(message: ArchiveMessage, item: NativeConversation
   }
 }
 
+function searchArchiveRow(source: NativeChatSource): ArchiveSearchResult {
+  return {
+    url: source.url, title: source.title, snippet: source.snippet ?? '',
+    site_name: source.siteName || null, site_icon: source.siteIcon, published_at: portableSourceDate(source.publishedAt),
+  };
+}
+
+function portableToolStatus(status?: NativeToolStatus): string {
+  return status === 'done' ? 'FINISHED' : status === 'failed' ? 'FAILED' : 'WIP';
+}
+
+function exportTimeline(message: ArchiveMessage, item: NativeConversationMessage, view: NativeToolTimelineView): void {
+  let written = 0;
+  let firstThinking = true;
+  const appendResponse = (end: number): void => {
+    const next = Math.min(item.content.length, Math.max(written, end));
+    if (next > written) {
+      message.fragments.push({ type: 'RESPONSE', content: item.content.slice(written, next) });
+      written = next;
+    }
+  };
+  const sources = new Map<string, NativeChatSource>();
+  (item.sources ?? []).forEach((source: NativeChatSource): void => { sources.set(source.url, source); });
+  for (const step of view.steps) {
+    if (step.type === 'text') {
+      appendResponse((step.startOffset ?? written) + (step.text?.length ?? 0));
+    } else if (step.type === 'thinking' && step.text) {
+      message.fragments.push({ type: 'THINK', content: step.text,
+        elapsed_secs: view.thinkingSeconds === undefined ? null : firstThinking ? view.thinkingSeconds : 0 });
+      firstThinking = false;
+    } else if (step.type === 'search') {
+      const results: ArchiveSearchResult[] = [];
+      for (const address of step.resultUrls ?? []) {
+        const source = sources.get(address);
+        if (source) results.push(searchArchiveRow(source));
+      }
+      message.fragments.push({
+        type: 'TOOL_SEARCH', queries: step.queries ?? [], status: portableToolStatus(step.status), results,
+      });
+    } else if (step.type === 'open') {
+      (step.pages ?? []).forEach((page: NativeTimelinePage): void => {
+        const site = sources.get(page.url);
+        message.fragments.push({
+          type: 'TOOL_OPEN', url: page.url || null, title: page.title || null, status: portableToolStatus(page.status),
+          snippet: site?.snippet ?? null, site_name: site?.siteName ?? null,
+          published_at: portableSourceDate(site?.publishedAt ?? null),
+        });
+      });
+    } else if (step.type === 'find') {
+      (step.patterns ?? []).forEach((item: NativeTimelinePattern): void => {
+        message.fragments.push({ type: 'TOOL_FIND', pattern: item.pattern, status: portableToolStatus(item.status) });
+      });
+    }
+  }
+  appendResponse(item.content.length);
+}
+
+function exportReadLinks(message: ArchiveMessage, item: NativeConversationMessage): void {
+  const links = item.readLinks ?? [];
+  if (!links.length || !validNativeReadLinks(links, item.content.length) ||
+    message.fragments.some((fragment: ArchiveFragment): boolean => fragment.type === 'READ_LINK')) {
+    return;
+  }
+  const output: ArchiveFragment[] = [];
+  let index = 0;
+  let position = 0;
+  const writeLink = (link: NativeReadLink): void => {
+    output.push({ type: 'READ_LINK', results: [{
+      url: link.url || undefined, title: link.title, signature: link.signature, nuwa_harmony_binding: link.binding,
+    }] });
+  };
+  for (const fragment of message.fragments) {
+    if (fragment.type !== 'RESPONSE') {
+      output.push(fragment);
+      continue;
+    }
+    const text = fragment.content ?? '';
+    let cursor = 0;
+    while (index < links.length && links[index].offset <= position + text.length) {
+      const end = Math.max(cursor, links[index].offset - position);
+      if (end > cursor) output.push({ type: 'RESPONSE', content: text.slice(cursor, end) });
+      writeLink(links[index++]);
+      cursor = end;
+    }
+    if (cursor < text.length) output.push({ type: 'RESPONSE', content: text.slice(cursor) });
+    position += text.length;
+  }
+  while (index < links.length) writeLink(links[index++]);
+  message.fragments = output;
+}
+
 function original(session: NativeConversation): ArchiveOrigin | undefined {
   return session.archiveJson ? JSON.parse(session.archiveJson) as ArchiveOrigin : undefined;
 }
@@ -518,20 +656,24 @@ function nativeSession(source: ArchiveSession): PreparedSession {
     if (byId.has(id) || (parentId === null ? role !== 'user' : !parent || parent.role === role)) {
       return invalidTree();
     }
-    const body = textFragments(raw, role === 'user' ? 'REQUEST' : 'RESPONSE');
+    const refused = role === 'assistant' && raw.status === 'CONTENT_FILTER';
+    const body = refused ? '' : textFragments(raw, role === 'user' ? 'REQUEST' : 'RESPONSE');
     const sources = role === 'assistant' ? portableSources(raw, body.length) : undefined;
     const message: NativeConversationMessage = {
       id: id,
       parentId: parentId,
       role: role,
       content: body,
-      reasoning: textFragments(raw, 'THINK'),
+      reasoning: refused ? '' : textFragments(raw, 'THINK'),
       createdAt: timestamp(raw.inserted_at),
       status: role === 'user' ? undefined : nativeStatus(raw.status),
+      stopReason: refused ? 'refusal' : undefined,
       thinking: role === 'assistant' ? raw.thinking_enabled : undefined,
       search: role === 'assistant' ? raw.search_enabled : undefined,
       sources: sources?.sources,
       citations: sources?.citations,
+      toolTimeline: role === 'assistant' && !refused ? importedTimeline(raw) : undefined,
+      readLinks: role === 'assistant' && !refused ? importedReadLinks(raw, body.length) : undefined,
       files: nativeFiles(raw),
     };
     if (parent) {
@@ -742,7 +884,8 @@ function outgoingFile(item: NativeAttachment, sessionId: string, originalFiles: 
   };
 }
 
-function archiveSession(session: NativeConversation, images: Map<string, BackupImageSource>): ArchiveSession {
+function archiveSession(session: NativeConversation, images: Map<string, BackupImageSource>,
+  locale: NativeLocale = 'zh-CN'): ArchiveSession {
   if (!validId(session.id)) {
     return invalidArchive();
   }
@@ -789,7 +932,7 @@ function archiveSession(session: NativeConversation, images: Map<string, BackupI
         id: index + 1,
         parent_id: parent ?? null,
         role: role,
-        status: archiveStatus(item.status),
+        status: archiveStatus(item.status, item.stopReason),
         thinking_enabled: request?.thinking ?? !!request?.reasoning,
         search_enabled: request?.search ?? false,
         accumulated_token_usage: 0,
@@ -801,7 +944,7 @@ function archiveSession(session: NativeConversation, images: Map<string, BackupI
       message.parent_id = parent ?? null;
       message.role = role;
       if (role === 'ASSISTANT' && item.status !== nativeStatus(message.status)) {
-        message.status = archiveStatus(item.status);
+        message.status = archiveStatus(item.status, item.stopReason);
       }
       message.inserted_at = archiveDate(item.createdAt, message.inserted_at);
       if (sourceId !== session.id) {
@@ -820,11 +963,25 @@ function archiveSession(session: NativeConversation, images: Map<string, BackupI
     if (role === 'ASSISTANT') {
       message.thinking_enabled = item.thinking ?? message.thinking_enabled;
       message.search_enabled = item.search ?? message.search_enabled;
-      updateText(message, 'THINK', item.reasoning);
+      if (!preexisting && item.toolTimeline) {
+        exportTimeline(message, item, item.toolTimeline);
+      } else {
+        updateText(message, 'THINK', item.reasoning);
+        updateText(message, 'RESPONSE', item.content);
+      }
+    } else {
+      updateText(message, 'REQUEST', item.content);
     }
-    updateText(message, role === 'USER' ? 'REQUEST' : 'RESPONSE', item.content);
     if (role === 'ASSISTANT') {
       appendPortableSources(message, item);
+      exportReadLinks(message, item);
+      if (!message.fragments.some((fragment: ArchiveFragment): boolean => fragment.type === 'TEMPLATE_RESPONSE')) {
+        const notice = item.stopReason === 'refusal' ? nativeRefusalText(locale) :
+          item.status === 'error' && item.failure ? describeNativeReplyFailure(item.failure, locale).text : '';
+        if (notice) {
+          message.fragments.push({ type: 'TEMPLATE_RESPONSE', content: notice });
+        }
+      }
     }
     if (!preexisting && item.files?.length) {
       const files = item.files.map((file: NativeAttachment): ArchiveFile =>
@@ -1039,12 +1196,16 @@ export class NativeChatBackup {
         readChatBackup(input, context, context ? undefined : MAX_BACKUP_BYTES));
   }
 
-  async importFromPicker(context: common.UIAbilityContext): Promise<NativeConversation[] | null> {
+  async importFromPicker(context: common.UIAbilityContext, onFileSelected?: () => void): Promise<NativeConversation[] | null> {
     const options = new picker.DocumentSelectOptions();
     options.maxSelectNumber = 1;
     options.fileSuffixFilters = ['历史备份|.zip'];
     const selected = await new picker.DocumentViewPicker(context).select(options);
-    return selected[0] ? await this.importFromUri(selected[0], context) : null;
+    if (!selected[0]) {
+      return null;
+    }
+    onFileSelected?.();
+    return this.importFromUri(selected[0], context);
   }
 
   private async writeImage(context: common.UIAbilityContext, writer: NativeBackupZipWriter, name: string,
@@ -1080,7 +1241,7 @@ export class NativeChatBackup {
   }
 
   private async writeArchive(context: common.UIAbilityContext, path: string,
-    sessions: NativeConversation[]): Promise<void> {
+    sessions: NativeConversation[], locale: NativeLocale): Promise<void> {
     await writeBackupFile(path, true, async (write: (chunk: Uint8Array) => Promise<void>): Promise<void> => {
       const writer = new NativeBackupZipWriter(write);
       const manifest: ArchiveManifest = { export_format_version: VERSION };
@@ -1088,7 +1249,7 @@ export class NativeChatBackup {
       const index: ArchiveIndexEntry[] = [];
       await writer.add(MANIFEST, memoryBackupInput(backupUtf8(JSON.stringify(manifest))));
       for (const session of sessions) {
-        const file = archiveSession(session, images);
+        const file = archiveSession(session, images, locale);
         await writer.add(sessionPath(file.id), memoryBackupInput(backupUtf8(JSON.stringify(file))));
         index.push(summaryEntry(file));
       }
@@ -1103,7 +1264,8 @@ export class NativeChatBackup {
     });
   }
 
-  async exportToPicker(context: common.UIAbilityContext, sessions: NativeConversation[]): Promise<boolean> {
+  async exportToPicker(context: common.UIAbilityContext, sessions: NativeConversation[],
+    locale: NativeLocale = 'zh-CN'): Promise<boolean> {
     const options = new picker.DocumentSaveOptions();
     const date = new Date();
     const day = date.getFullYear().toString() + '-' + (date.getMonth() + 1).toString().padStart(2, '0') + '-' +
@@ -1111,7 +1273,7 @@ export class NativeChatBackup {
     options.newFileNames = ['deepseek_data-' + day + '.zip'];
     const temporary = (context.cacheDir || context.filesDir) + '/nuwa-backup-' + util.generateRandomUUID(true) + '.zip';
     try {
-      await this.writeArchive(context, temporary, sessions);
+      await this.writeArchive(context, temporary, sessions, locale);
       const selected = await new picker.DocumentViewPicker(context).save(options);
       if (!selected[0]) {
         return false;

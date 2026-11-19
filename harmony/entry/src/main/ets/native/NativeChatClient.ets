@@ -2,6 +2,7 @@ import { url, util } from '@kit.ArkTS';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { http } from '@kit.NetworkKit';
 import { allowsKeylessNativeApi } from './NativeApiCredential';
+import { NativeReadLink } from './NativeReadLinks';
 
 export interface NativeChatFileRef {
   serverId: string;
@@ -12,6 +13,7 @@ export interface NativeChatMessage {
   role: string;
   content: string;
   files?: NativeChatFileRef[];
+  readLinks?: NativeReadLink[];
 }
 
 export interface NativeReplyOutcome {
@@ -124,9 +126,51 @@ interface AnthropicContentBlock {
   text?: string;
 }
 
+interface AnthropicReadLinkInput {
+  action: 'read_link';
+  url: string;
+}
+
+interface AnthropicReadLinkCall {
+  type: 'server_tool_use';
+  id: string;
+  name: 'deepseek_read_url';
+  input: AnthropicReadLinkInput;
+  kind: 'read_link';
+}
+
+interface AnthropicReadLinkDocumentSource {
+  type: 'text';
+  media_type: 'text/plain';
+  data: string;
+}
+
+interface AnthropicReadLinkDocument {
+  type: 'document';
+  source: AnthropicReadLinkDocumentSource;
+  title: string | null;
+}
+
+interface AnthropicReadLinkContent {
+  type: 'web_fetch_result';
+  url: string;
+  content: AnthropicReadLinkDocument;
+  published_at: string | null;
+}
+
+interface AnthropicReadLinkResult {
+  type: 'web_fetch_tool_result';
+  tool_use_id: string;
+  kind: 'read_link';
+  content: AnthropicReadLinkContent;
+  signature: string;
+}
+
+type AnthropicBlock = AnthropicContentBlock | AnthropicReadLinkCall | AnthropicReadLinkResult;
+
 interface AnthropicChatMessage {
   role: string;
-  content: string | AnthropicContentBlock[];
+  content: string | AnthropicBlock[];
 }
 
 interface AnthropicRequestBody {
@@ -279,6 +323,9 @@ class ChatStream {
     if (this.pendingLine.endsWith('\r')) {
       this.readLine(this.pendingLine.slice(0, -1));
     }
+    if (this.protocol === 'anthropic' && this.receivedContent && !this.done && !this.outcome.stopReason) {
+      throw new Error('模型回复已中断');
+    }
     if (!this.hasReply && !this.outcome.stopReason) {
       throw new Error('模型未返回可读取的回复，请检查服务器地址和模型名称');
     }
@@ -419,7 +466,39 @@ class ChatStream {
   }
 }
 
+function anthropicReadLinkReply(message: NativeChatMessage): AnthropicChatMessage {
+  const blocks: AnthropicBlock[] = [];
+  let offset = 0;
+  for (const link of message.readLinks ?? []) {
+    if (link.offset > offset) {
+      const text: AnthropicContentBlock = { type: 'text', text: message.content.slice(offset, link.offset) };
+      blocks.push(text);
+    }
+    const call: AnthropicReadLinkCall = {
+      type: 'server_tool_use', id: link.id, name: 'deepseek_read_url', kind: 'read_link',
+      input: { action: 'read_link', url: link.url },
+    };
+    const result: AnthropicReadLinkResult = {
+      type: 'web_fetch_tool_result', tool_use_id: link.id, kind: 'read_link', signature: link.signature,
+      content: {
+        type: 'web_fetch_result', url: link.url, published_at: null,
+        content: { type: 'document', title: link.title, source: { type: 'text', media_type: 'text/plain', data: '' } },
+      },
+    };
+    blocks.push(call, result);
+    offset = link.offset;
+  }
+  if (offset < message.content.length) {
+    const text: AnthropicContentBlock = { type: 'text', text: message.content.slice(offset) };
+    blocks.push(text);
+  }
+  return { role: 'assistant', content: blocks };
+}
+
 function anthropicMessage(message: NativeChatMessage): AnthropicChatMessage {
+  if (message.role === 'assistant' && message.readLinks?.length) {
+    return anthropicReadLinkReply(message);
+  }
   if (!message.files?.length || message.role !== 'user') {
     return { role: message.role, content: message.content };
   }
