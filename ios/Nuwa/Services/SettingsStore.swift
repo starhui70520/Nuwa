@@ -9,6 +9,8 @@ final class SettingsStore: ObservableObject {
         static let apiBaseUrl = "nuwa.apiBaseUrl"
         static let apiModel = "nuwa.apiModel"
         static let thinkingEnabled = "nuwa.thinkingEnabled"
+        static let searchEnabled = "nuwa.searchEnabled"
+        static let ttsMuted = "nuwa.ttsMuted"
         static let themePreference = "nuwa.themePreference"
         static let chatFontSize = "nuwa.chatFontSize"
         static let systemPrompt = "nuwa.systemPrompt"
@@ -34,6 +36,14 @@ final class SettingsStore: ObservableObject {
         didSet { UserDefaults.standard.set(thinkingEnabled, forKey: Keys.thinkingEnabled) }
     }
 
+    @Published var searchEnabled: Bool {
+        didSet { UserDefaults.standard.set(searchEnabled, forKey: Keys.searchEnabled) }
+    }
+
+    @Published var ttsMuted: Bool {
+        didSet { UserDefaults.standard.set(ttsMuted, forKey: Keys.ttsMuted) }
+    }
+
     @Published var themePreference: ThemePreference {
         didSet { UserDefaults.standard.set(themePreference.rawValue, forKey: Keys.themePreference) }
     }
@@ -56,6 +66,8 @@ final class SettingsStore: ObservableObject {
         apiBaseUrl = defaults.string(forKey: Keys.apiBaseUrl) ?? "https://api.deepseek.com"
         apiModel = defaults.string(forKey: Keys.apiModel) ?? "deepseek-chat"
         thinkingEnabled = defaults.object(forKey: Keys.thinkingEnabled) as? Bool ?? false
+        searchEnabled = defaults.object(forKey: Keys.searchEnabled) as? Bool ?? false
+        ttsMuted = defaults.object(forKey: Keys.ttsMuted) as? Bool ?? false
         themePreference = ThemePreference(rawValue: defaults.string(forKey: Keys.themePreference) ?? "") ?? .system
         let storedSize = defaults.double(forKey: Keys.chatFontSize)
         chatFontSize = storedSize >= 12 && storedSize <= 22 ? storedSize : 16
