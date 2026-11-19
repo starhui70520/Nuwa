@@ -1,5 +1,5 @@
 import clsx from 'clsx'
-import { memo, useCallback, useEffect, useLayoutEffect, useRef } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
   IconArrowUpBold16,
   IconGlobeLanguageOutline14,
@@ -8,7 +8,8 @@ import {
   IconThinkOutline14,
 } from '../base/icons.js'
 import { getActiveSecret, setSearch, setThinking, useSettings } from '../../services/settings.js'
-import { useIsMobile } from '../../app/viewport.js'
+import { isNativeAndroid, isNativeIos } from '../../services/nativeBridge.js'
+import { useIsCompactWatch, useIsMobile } from '../../app/viewport.js'
 import { sendMessage, stopReply, useChatStore } from '../../services/chat/store.js'
 import {
   addDraftFiles,
@@ -51,6 +52,8 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
   const thinking = useSettings((state) => state.thinking)
   const importingHistory = useChatStore((state) => state.importingHistory)
   const isMobile = useIsMobile()
+  const isCompactWatch = useIsCompactWatch()
+  const [watchToolsOpen, setWatchToolsOpen] = useState(false)
   const search = useSettings((state) => state.search)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -151,6 +154,164 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
     }
   }
 
+  const fileInputNode = (
+    <input
+      ref={fileInputRef}
+      type="file"
+      multiple
+      hidden
+      accept={ACCEPT}
+      onChange={(event) => {
+        acceptFiles(Array.from(event.target.files ?? []))
+        event.target.value = ''
+      }}
+    />
+  )
+
+  const voiceButtonNode = (
+    <VoiceButton
+      status={voice.status}
+      disabled={!voice.available}
+      seconds={voice.seconds}
+      onClick={() => {
+        if (
+          voice.status !== 'idle' ||
+          (!useChatStore.getState().importingHistory && ensureApiKey())
+        ) {
+          void voice.toggle()
+        }
+      }}
+    />
+  )
+
+  if (isCompactWatch) {
+    const hasActiveTool = thinking || search
+    return (
+      <div
+        className={clsx(
+          styles.wrapper,
+          sessionId === null ? styles.home : styles.session,
+          styles.compactWatch
+        )}
+      >
+        {fileInputNode}
+        <DraftAttachments items={attachments} onRetry={retryFile} onRemove={removeFile} />
+        {watchToolsOpen ? (
+          <div className={styles.watchTools}>
+            <button
+              type="button"
+              className={clsx(styles.toggle, thinking && styles.selected)}
+              aria-label={t('thinkingSwitch')}
+              aria-pressed={thinking}
+              onClick={() => setThinking(!thinking)}
+            >
+              <IconThinkOutline14 />
+            </button>
+            <button
+              type="button"
+              className={clsx(styles.toggle, search && styles.selected)}
+              aria-label={t('search')}
+              aria-pressed={search}
+              onClick={() => setSearch(!search)}
+            >
+              <IconGlobeLanguageOutline14 />
+            </button>
+            <button
+              type="button"
+              className={styles.actionCircle}
+              aria-label={t('uploadFile')}
+              disabled={importingHistory}
+              onClick={() => {
+                setWatchToolsOpen(false)
+                if (ensureApiKey()) {
+                  fileInputRef.current?.click()
+                }
+              }}
+            >
+              <IconPlusCircleOutline22 />
+            </button>
+          </div>
+        ) : null}
+        <div className={styles.watchBar}>
+          <button
+            type="button"
+            className={clsx(
+              styles.actionCircle,
+              styles.watchPlusBtn,
+              watchToolsOpen && styles.watchPlusOpen
+            )}
+            aria-label={t('uploadFile')}
+            aria-expanded={watchToolsOpen}
+            onClick={() => setWatchToolsOpen((open) => !open)}
+          >
+            <IconPlusCircleOutline22 />
+            {hasActiveTool && !watchToolsOpen ? <span className={styles.watchDot} /> : null}
+          </button>
+          <div className={clsx(styles.textareaWrapper, styles.watchInputWrap)}>
+            <textarea
+              ref={textareaRef}
+              className={clsx(styles.textarea, recording && styles.textareaHidden)}
+              placeholder={t('chatInputPlaceholderChat')}
+              rows={1}
+              enterKeyHint="enter"
+              autoFocus={false}
+              disabled={importingHistory}
+              value={text}
+              onFocus={() => setWatchToolsOpen(false)}
+              onChange={(event) => setText(event.target.value)}
+              onKeyDown={(event) => {
+                if (
+                  !isMobile &&
+                  !isCompactWatch &&
+                  !isNativeAndroid() &&
+                  !isNativeIos() &&
+                  !window.matchMedia('(pointer: coarse)').matches &&
+                  event.key === 'Enter' &&
+                  !event.shiftKey &&
+                  !event.nativeEvent.isComposing
+                ) {
+                  event.preventDefault()
+                  send()
+                }
+              }}
+            />
+            {recording ? (
+              <Spectrum getAnalyser={voice.getAnalyser} getLevel={voice.getLevel} />
+            ) : null}
+            <div className={styles.mirror} aria-hidden>
+              {`${text}\n`}
+            </div>
+          </div>
+          {streaming && sessionId ? (
+            <button
+              type="button"
+              className={styles.sendButton}
+              aria-label={t('chatInputStopButtonTooltip')}
+              onClick={() => {
+                stopReadAloud()
+                stopReply(sessionId)
+              }}
+            >
+              <IconStopFill16 />
+            </button>
+          ) : canSend ? (
+            <button
+              type="button"
+              className={styles.sendButton}
+              aria-label={t('send')}
+              onClick={send}
+            >
+              <IconArrowUpBold16 />
+            </button>
+          ) : (
+            voiceButtonNode
+          )}
+        </div>
+        {dragging ? <DragMask /> : null}
+      </div>
+    )
+  }
+
   return (
     <div
       className={clsx(styles.wrapper, sessionId === null ? styles.home : styles.session)}
@@ -167,6 +328,14 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
           className={clsx(styles.textarea, recording && isMobile && styles.textareaHidden)}
           placeholder={t('chatInputPlaceholderChat')}
           rows={2}
+          enterKeyHint={
+            isMobile ||
+            isNativeAndroid() ||
+            isNativeIos() ||
+            (typeof window !== 'undefined' && window.matchMedia('(pointer: coarse)').matches)
+              ? 'enter'
+              : 'send'
+          }
           // 移动端不自动聚焦，避免一打开就弹出键盘
           autoFocus={!isMobile}
           disabled={importingHistory}
@@ -180,7 +349,17 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
             }
           }}
           onKeyDown={(event) => {
-            if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+            const enterNewline =
+              isMobile ||
+              isNativeAndroid() ||
+              isNativeIos() ||
+              window.matchMedia('(pointer: coarse)').matches
+            if (
+              !enterNewline &&
+              event.key === 'Enter' &&
+              !event.shiftKey &&
+              !event.nativeEvent.isComposing
+            ) {
               event.preventDefault()
               send()
             }
@@ -229,17 +408,7 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
           </Tooltip>
         </div>
         <div className={styles.right}>
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            hidden
-            accept={ACCEPT}
-            onChange={(event) => {
-              acceptFiles(Array.from(event.target.files ?? []))
-              event.target.value = ''
-            }}
-          />
+          {fileInputNode}
           {(() => {
             const uploadButton = (
               <Tooltip content={t('uploadFile')}>
@@ -257,21 +426,6 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
                   <IconPlusCircleOutline22 />
                 </button>
               </Tooltip>
-            )
-            const voiceButton = (
-              <VoiceButton
-                status={voice.status}
-                disabled={!voice.available}
-                seconds={voice.seconds}
-                onClick={() => {
-                  if (
-                    voice.status !== 'idle' ||
-                    (!useChatStore.getState().importingHistory && ensureApiKey())
-                  ) {
-                    void voice.toggle()
-                  }
-                }}
-              />
             )
             if (streaming && sessionId) {
               return (
@@ -295,13 +449,13 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
               return (
                 <>
                   {uploadButton}
-                  {voiceButton}
+                  {voiceButtonNode}
                 </>
               )
             }
             return (
               <>
-                {voiceButton}
+                {voiceButtonNode}
                 {uploadButton}
                 <button
                   type="button"

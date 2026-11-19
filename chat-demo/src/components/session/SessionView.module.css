@@ -60,6 +60,13 @@
     width: 100%;
     max-width: none;
     margin: 0 auto;
+    padding: 0 14px 14px;
     padding: 0 14px max(14px, env(safe-area-inset-bottom));
+  }
+}
+
+@media (max-width: 340px), (max-height: 420px) {
+  .inputContainer {
+    padding: 0 6px 6px;
   }
 }

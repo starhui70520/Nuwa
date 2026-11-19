@@ -496,7 +496,9 @@
   bottom: 0;
   left: 0;
   z-index: 1;
-  width: min(82vw, 310px);
+  width: 82vw;
+  max-width: 310px;
+  contain: layout style paint;
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
@@ -522,6 +524,7 @@
 .mobile {
   width: 100%;
   max-width: none;
+  padding: 10px 16px 0;
   padding: calc(10px + env(safe-area-inset-top, 0px)) 16px 0;
   border-right: none;
 
@@ -558,5 +561,40 @@
     padding: 1px 8px;
     font-size: 0.75rem;
     line-height: 19px;
+  }
+}
+
+@media (max-width: 340px), (max-height: 420px) {
+  .mobile {
+    padding: 6px 10px 0;
+
+    .searchWrap {
+      height: 32px;
+      margin-top: 2px;
+      padding: 0 10px;
+    }
+
+    .searchInput {
+      font-size: 0.8125rem;
+    }
+
+    .listWrap {
+      margin-top: 8px;
+    }
+
+    .sectionHeader {
+      padding: 2px 6px;
+      font-size: 0.75rem;
+      line-height: 16px;
+    }
+
+    .settings {
+      padding: 4px 4px;
+    }
+
+    .settingsLabel {
+      font-size: 0.8125rem;
+      line-height: 18px;
+    }
   }
 }

@@ -3,6 +3,8 @@
   flex-direction: column;
   align-items: flex-end;
   padding-bottom: 16px;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 84px;
 
   &.isFirst {
     padding-top: 34px;

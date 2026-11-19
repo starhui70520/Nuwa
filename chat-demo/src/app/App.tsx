@@ -2,6 +2,7 @@ import clsx from 'clsx'
 import { useEffect, useRef, useState } from 'react'
 import { useTranslate } from '../i18n/index.js'
 import { hasActiveCredential, useSettings } from '../services/settings.js'
+import { isLegacyWebView } from '../services/nativeBridge.js'
 import { useIsMobile, useMobileViewport, usePreventPageScroll } from './viewport.js'
 import { bindMigrationBridge, runZipImport } from '../services/chat/migrationBridge.js'
 import { maybeAutoBackupToIcloud } from '../services/chat/backup.js'
@@ -50,6 +51,7 @@ export const App = () => {
   const initError = useChatStore((state) => state.initError)
   const saveError = useChatStore((state) => Object.values(state.sessionSaveErrors).some(Boolean))
   const importingHistory = useChatStore((state) => state.importingHistory)
+  const importProgress = useChatStore((state) => state.importProgress)
   const session = useChatStore((state) =>
     state.activeId !== null && Object.hasOwn(state.sessionCache, state.activeId)
       ? state.sessionCache[state.activeId]
@@ -331,7 +333,15 @@ export const App = () => {
           ) : null}
           {importingHistory ? (
             <div className={styles.importingBanner} role="status" aria-live="polite">
-              <span>{t('importingHistoryBanner')}</span>
+              <span>
+                {importProgress?.phase === 'merging'
+                  ? `正在写入本地数据库（共 ${importProgress.sessions} 个会话）…`
+                  : importProgress && importProgress.sessions > 0
+                    ? `正在导入历史对话 · 已读取 ${importProgress.sessions} 个会话${
+                        importProgress.images > 0 ? `，${importProgress.images} 个附件` : ''
+                      }…`
+                    : t('importingHistoryBanner')}
+              </span>
             </div>
           ) : null}
           {saveError ? (
@@ -388,7 +398,7 @@ export const App = () => {
         </main>
         <SearchPanel />
       </div>
-      {showMigrationPrompt ? <MigrationPromptModal /> : null}
+      {showMigrationPrompt && !isLegacyWebView() ? <MigrationPromptModal /> : null}
       <SettingsDialog />
       <AppUpdateModal />
       <Toast />

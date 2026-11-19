@@ -286,4 +286,6 @@ export const zh = {
   updateLater: '暂不更新',
   settingsAndroidSpeechService: '系统语音引擎',
   settingsAndroidSpeechUnavailable: '未检测到可用引擎（点击前往设置）',
+  legacyWebViewUnavailable: '当前系统 WebView 版本过低（Chrome {version}），暂不支持此功能',
+  legacyWebViewUnavailableGeneric: '当前系统 WebView 版本过低，暂不支持此功能',
 } as const

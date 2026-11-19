@@ -5,11 +5,30 @@ import { isNativeAndroid } from '../services/nativeBridge.js'
 const query = window.matchMedia('not all and (min-width: 768px)')
 
 const subscribe = (onChange: () => void) => {
-  query.addEventListener('change', onChange)
-  return () => query.removeEventListener('change', onChange)
+  if (typeof query.addEventListener === 'function') {
+    query.addEventListener('change', onChange)
+    return () => query.removeEventListener('change', onChange)
+  }
+  query.addListener(onChange)
+  return () => query.removeListener(onChange)
 }
 
 export const useIsMobile = () => useSyncExternalStore(subscribe, () => query.matches)
+
+/** 小方屏手表 / 极紧凑视口（宽 <= 340px 或高 <= 420px） */
+const compactQuery = window.matchMedia('(max-width: 340px), (max-height: 420px)')
+
+const subscribeCompact = (onChange: () => void) => {
+  if (typeof compactQuery.addEventListener === 'function') {
+    compactQuery.addEventListener('change', onChange)
+    return () => compactQuery.removeEventListener('change', onChange)
+  }
+  compactQuery.addListener(onChange)
+  return () => compactQuery.removeListener(onChange)
+}
+
+export const useIsCompactWatch = () =>
+  useSyncExternalStore(subscribeCompact, () => compactQuery.matches)
 
 const preventPageScroll = (event: TouchEvent) => {
   if (event.touches.length !== 1) {

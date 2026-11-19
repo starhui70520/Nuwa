@@ -5,7 +5,7 @@ import { defineConfig } from '@rspack/cli'
 import { rspack, type Configuration } from '@rspack/core'
 
 const dev = process.env.NODE_ENV !== 'production'
-const targets = ['chrome >= 80', 'edge >= 88', 'safari >= 15', 'firefox >= 90']
+const targets = ['chrome >= 58', 'edge >= 88', 'safari >= 15', 'firefox >= 90']
 const root = path.dirname(fileURLToPath(import.meta.url))
 const { version } = JSON.parse(
   readFileSync(new URL('./package.json', import.meta.url), 'utf8')
@@ -29,6 +29,7 @@ export const createConfig = ({
   devServer,
 }: ConfigOptions = {}): Configuration => ({
   mode: dev ? 'development' : 'production',
+  target: ['web', 'es2017'],
   entry: './src/main.tsx',
   output: {
     path: path.resolve(root, 'dist'),
@@ -62,11 +63,24 @@ export const createConfig = ({
         loader: 'builtin:swc-loader',
         options: {
           jsc: {
+            target: 'es2015',
             parser: { syntax: 'typescript', tsx: true },
             transform: { react: { runtime: 'automatic', development: dev } },
             externalHelpers: true,
           },
-          env: { targets },
+        },
+        type: 'javascript/auto',
+      },
+      {
+        test: /\.m?js$/,
+        include: /[\\/]node_modules[\\/]/,
+        exclude: /[\\/]node_modules[\\/](@swc[\\/]helpers|core-js)[\\/]/,
+        loader: 'builtin:swc-loader',
+        options: {
+          jsc: {
+            target: 'es2015',
+            parser: { syntax: 'ecmascript' },
+          },
         },
         type: 'javascript/auto',
       },

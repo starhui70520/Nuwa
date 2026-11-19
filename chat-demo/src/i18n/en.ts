@@ -299,4 +299,6 @@ export const en = {
   updateLater: 'Later',
   settingsAndroidSpeechService: 'System speech service',
   settingsAndroidSpeechUnavailable: 'Unavailable (tap to configure)',
+  legacyWebViewUnavailable: 'System WebView version is too old (Chrome {version}) for this feature',
+  legacyWebViewUnavailableGeneric: 'System WebView version is too old for this feature',
 } satisfies Record<keyof typeof zh, string>

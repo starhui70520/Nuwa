@@ -6,6 +6,7 @@
   z-index: 2000;
   box-sizing: border-box;
   width: fit-content;
+  max-width: calc(100vw - 28px);
   max-width: min(calc(100vw - 28px), 480px);
   margin: 0 auto;
   padding: 12px 18px;

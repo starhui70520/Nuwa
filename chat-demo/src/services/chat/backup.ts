@@ -2,7 +2,7 @@ import { formatDate } from '../../utils/format.js'
 import { DeepSeekMigration, isNativeIos } from '../nativeBridge.js'
 import { useSettings } from '../settings.js'
 import * as db from './db.js'
-import { mergeHistory, replaceHistory, useChatStore } from './store.js'
+import { mergeHistory, replaceHistory, setImportProgress, useChatStore } from './store.js'
 import type { Session } from './types.js'
 
 export { BackupError } from './history/errors.js'
@@ -41,16 +41,32 @@ export const exportHistory = (): Promise<{ name: string; blob: Blob }> =>
     return { name: backupFileName(now), blob }
   })
 
+let importRunning = false
+
 /**
  * 增量合并导入：先检查 ZIP 格式与版本，校验失败时保留正在生成的回答；
  * 通过后从 ZIP 流式写入暂存，成功按 ID 合并进本地会话与图片原件。返回本次导入的会话数。
+ * 已有导入进行中时直接拒绝重复排队，避免误操作连续触发两次导入。
  */
-export const importHistory = (file: File): Promise<number> =>
-  enqueueBackup(async () => {
-    const { checkArchiveFormat, importArchive } = await import('./history/importArchive.js')
-    await checkArchiveFormat(file)
-    return mergeHistory(() => importArchive(file))
+export const importHistory = (file: File): Promise<number> => {
+  if (importRunning || useChatStore.getState().importingHistory) {
+    return Promise.reject(new Error('History import is already in progress'))
+  }
+  importRunning = true
+  return enqueueBackup(async () => {
+    try {
+      const { checkArchiveFormat, importArchive } = await import('./history/importArchive.js')
+      await checkArchiveFormat(file)
+      return await mergeHistory(() =>
+        importArchive(file, (progress) =>
+          setImportProgress({ phase: 'reading', sessions: progress.sessions, images: progress.images })
+        )
+      )
+    } finally {
+      importRunning = false
+    }
   })
+}
 
 /** 供桌面端 Tauri / 移动端 Capacitor / 浏览器插件直接传入 ZIP 字节流完成导入 */
 export const importHistoryFromBytes = (

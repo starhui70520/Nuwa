@@ -28,6 +28,9 @@ import { closeMobileSider, useMobileSider } from './mobileSiderState.js'
 import { SessionItem } from './SessionItem.js'
 import styles from './Sider.module.css'
 
+const INITIAL_RENDER_LIMIT = 60
+const RENDER_LOAD_STEP = 60
+
 /** 展开的侧边栏：搜索框 / 会话列表 / 底部账号入口 */
 export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
   const t = useTranslate()
@@ -49,8 +52,13 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
   const [selectMode, setSelectMode] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
   const [batchDeleting, setBatchDeleting] = useState(false)
+  const [renderLimit, setRenderLimit] = useState(INITIAL_RENDER_LIMIT)
 
   const normalizedQuery = query.trim().toLowerCase()
+
+  useEffect(() => {
+    setRenderLimit(INITIAL_RENDER_LIMIT)
+  }, [normalizedQuery])
 
   useEffect(() => {
     if (!normalizedQuery) {
@@ -86,7 +94,15 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
     })
   }, [sessions, normalizedQuery, contentSearch, t])
 
-  const groups = useMemo(() => groupSessions(filteredSessions, now, t), [filteredSessions, now, t])
+  const visibleSessions = useMemo(
+    () =>
+      filteredSessions.length > renderLimit
+        ? filteredSessions.slice(0, renderLimit)
+        : filteredSessions,
+    [filteredSessions, renderLimit]
+  )
+
+  const groups = useMemo(() => groupSessions(visibleSessions, now, t), [visibleSessions, now, t])
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout>
@@ -125,6 +141,7 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
     if (mobile && !mobileOpen) {
       setSelectMode(false)
       setSelectedIds(new Set())
+      setRenderLimit(INITIAL_RENDER_LIMIT)
     }
   }, [mobile, mobileOpen])
 
@@ -252,7 +269,18 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
         </>
       )}
 
-      <div className={styles.listWrap}>
+      <div
+        className={styles.listWrap}
+        onScroll={(event) => {
+          if (renderLimit >= filteredSessions.length) {
+            return
+          }
+          const el = event.currentTarget
+          if (el.scrollHeight - el.scrollTop - el.clientHeight < 320) {
+            setRenderLimit((prev) => Math.min(filteredSessions.length, prev + RENDER_LOAD_STEP))
+          }
+        }}
+      >
         {sessions.length === 0 ? (
           <div className={styles.emptyState}>
             <div className={styles.emptyTitle}>{t('siderEmptyTitle')}</div>

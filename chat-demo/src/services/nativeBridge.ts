@@ -50,6 +50,7 @@ export type DeepSeekMigrationPlugin = {
   saveFileToDocuments: (options: { name: string; data: string }) => Promise<{ presented: boolean }>
   icloudStatus: () => Promise<{ available: boolean }>
   icloudBackupNow: (options: { name: string; data: string }) => Promise<{ path: string }>
+  fetchShareContent: (options: { shareId: string }) => Promise<{ status: number; body: string }>
 }
 
 export const DeepSeekMigration = registerPlugin<DeepSeekMigrationPlugin>('DeepSeekMigration')
@@ -59,6 +60,26 @@ export const isNativeAndroid = (): boolean =>
 
 export const isNativeIos = (): boolean =>
   Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'ios'
+
+const MIN_MODERN_WEBVIEW_CHROME_MAJOR = 80
+
+export const getChromeMajorVersion = (): number | null => {
+  if (typeof navigator === 'undefined') {
+    return null
+  }
+  const match = navigator.userAgent.match(/Chrome\/(\d+)/)
+  if (!match) {
+    return null
+  }
+  const major = Number.parseInt(match[1], 10)
+  return Number.isFinite(major) ? major : null
+}
+
+/** 检测是否为不支持 DeepSeek 官方现代网页（如登录/一键迁移）的老版本 WebView */
+export const isLegacyWebView = (): boolean => {
+  const major = getChromeMajorVersion()
+  return major !== null && major < MIN_MODERN_WEBVIEW_CHROME_MAJOR
+}
 
 export type HarmonySpeechBridge = {
   startSpeechRecognition?: (id: string, locale: string) => void

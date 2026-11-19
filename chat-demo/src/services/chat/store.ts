@@ -117,11 +117,18 @@ const stripRejectedImages = (
 /** 允许自动补标题的请求；手动重命名后取消本轮标题写入，包含主动清空标题的情况。 */
 const titleRequests = new Set<AbortController>()
 
+export type ImportProgress = {
+  phase: 'reading' | 'merging'
+  sessions: number
+  images: number
+}
+
 type ChatState = {
   ready: boolean
   initError: boolean
   /** 历史导入或全部删除期间锁定交互，提交成功前仍展示原有记录。 */
   importingHistory: boolean
+  importProgress: ImportProgress | null
   /** 仅列表元数据，按 updatedAt 降序；流式消息更新不会改变此数组。 */
   sessions: SessionSummary[]
   sessionCache: Record<string, Session>
@@ -137,6 +144,7 @@ export const useChatStore = create<ChatState>(() => ({
   ready: false,
   initError: false,
   importingHistory: false,
+  importProgress: null,
   sessions: [],
   sessionCache: {},
   sessionLoadErrors: {},
@@ -144,6 +152,10 @@ export const useChatStore = create<ChatState>(() => ({
   activeId: null,
   streaming: {},
 }))
+
+export const setImportProgress = (importProgress: ImportProgress | null) => {
+  set({ importProgress })
+}
 
 const { getState: get, setState: set } = useChatStore
 
@@ -247,52 +259,106 @@ const updateReply = (sessionId: string, reply: AssistantMessage) =>
     ),
   }))
 
+const savingSessions = new Set<string>()
+const pendingPersistAgain = new Set<string>()
+const persistRetryTimers = new Map<string, ReturnType<typeof setTimeout>>()
+const persistRetryCounts = new Map<string, number>()
+
+const clearPersistRetry = (sessionId: string) => {
+  const timer = persistRetryTimers.get(sessionId)
+  if (timer !== undefined) {
+    clearTimeout(timer)
+    persistRetryTimers.delete(sessionId)
+  }
+  persistRetryCounts.delete(sessionId)
+}
+
 const persist = (sessionId: string) => {
   const session = getSession(sessionId)
-  if (session) {
-    unsavedSessions.add(sessionId)
-    if (deletingSessions.has(sessionId)) {
-      return
-    }
-    const epoch = historyEpoch
-    const files = pendingFiles.get(sessionId)
-    void db
-      .saveSession(session, files)
-      .then(() => {
-        if (epoch !== historyEpoch || !getSession(sessionId)) {
-          return
-        }
-        if (pendingFiles.get(sessionId) === files) {
-          pendingFiles.delete(sessionId)
-        }
-        if (getSession(sessionId) === session) {
-          unsavedSessions.delete(sessionId)
-          set((state) => ({
-            sessionSaveErrors: Object.fromEntries(
-              Object.entries(state.sessionSaveErrors).filter(([id]) => id !== sessionId)
-            ),
-          }))
-          trimSessionCache()
-        }
-      })
-      .catch((error: unknown) => {
-        db.reportStorageError('save session')(error)
-        if (epoch === historyEpoch && getSession(sessionId)) {
-          set((state) => ({
-            sessionSaveErrors: { ...state.sessionSaveErrors, [sessionId]: true },
-          }))
-        }
-      })
+  if (!session) {
+    return
   }
+  unsavedSessions.add(sessionId)
+  if (deletingSessions.has(sessionId)) {
+    return
+  }
+  if (savingSessions.has(sessionId)) {
+    // 已有进行中的大事务写入，合并到本轮结束后再写一次，避免长对话并发写爆内存或事务中止。
+    pendingPersistAgain.add(sessionId)
+    return
+  }
+  savingSessions.add(sessionId)
+  const epoch = historyEpoch
+  const files = pendingFiles.get(sessionId)
+  void db
+    .saveSession(session, files)
+    .then(() => {
+      savingSessions.delete(sessionId)
+      if (epoch !== historyEpoch || !getSession(sessionId)) {
+        pendingPersistAgain.delete(sessionId)
+        clearPersistRetry(sessionId)
+        return
+      }
+      if (pendingFiles.get(sessionId) === files) {
+        pendingFiles.delete(sessionId)
+      }
+      clearPersistRetry(sessionId)
+      if (pendingPersistAgain.delete(sessionId) || getSession(sessionId) !== session) {
+        persist(sessionId)
+        return
+      }
+      unsavedSessions.delete(sessionId)
+      set((state) => ({
+        sessionSaveErrors: Object.fromEntries(
+          Object.entries(state.sessionSaveErrors).filter(([id]) => id !== sessionId)
+        ),
+      }))
+      trimSessionCache()
+    })
+    .catch((error: unknown) => {
+      savingSessions.delete(sessionId)
+      pendingPersistAgain.delete(sessionId)
+      db.reportStorageError('save session')(error)
+      if (epoch !== historyEpoch || !getSession(sessionId) || deletingSessions.has(sessionId)) {
+        clearPersistRetry(sessionId)
+        return
+      }
+      const attempt = (persistRetryCounts.get(sessionId) ?? 0) + 1
+      if (attempt <= 2) {
+        persistRetryCounts.set(sessionId, attempt)
+        const delay = attempt === 1 ? 1000 : 2500
+        const existing = persistRetryTimers.get(sessionId)
+        if (existing !== undefined) {
+          clearTimeout(existing)
+        }
+        persistRetryTimers.set(
+          sessionId,
+          setTimeout(() => {
+            persistRetryTimers.delete(sessionId)
+            if (epoch === historyEpoch && unsavedSessions.has(sessionId)) {
+              persist(sessionId)
+            }
+          }, delay)
+        )
+        return
+      }
+      clearPersistRetry(sessionId)
+      set((state) => ({
+        sessionSaveErrors: { ...state.sessionSaveErrors, [sessionId]: true },
+      }))
+    })
 }
 
 export const retrySaveSessions = () => {
   if (!get().importingHistory) {
-    unsavedSessions.forEach(persist)
+    unsavedSessions.forEach((id) => {
+      clearPersistRetry(id)
+      persist(id)
+    })
   }
 }
 
-/** 离开前先合并尚未绘制的增量；隐藏期间浏览器可能暂停动画帧。 */
+/** 离开前先合并尚未绘制的增量；切回前台时自动重试未保存成功的会话。 */
 export const bindChatPersistence = () => {
   const save = () => {
     if (get().importingHistory) {
@@ -308,16 +374,25 @@ export const bindChatPersistence = () => {
       }
     }
   }
+  const onResume = () => {
+    if (unsavedSessions.size > 0) {
+      retrySaveSessions()
+    }
+  }
   const onVisibilityChange = () => {
     if (document.visibilityState === 'hidden') {
       save()
+    } else if (document.visibilityState === 'visible') {
+      onResume()
     }
   }
   document.addEventListener('visibilitychange', onVisibilityChange)
   window.addEventListener('pagehide', save)
+  window.addEventListener('dsapp:native-resume', onResume)
   return () => {
     document.removeEventListener('visibilitychange', onVisibilityChange)
     window.removeEventListener('pagehide', save)
+    window.removeEventListener('dsapp:native-resume', onResume)
   }
 }
 
@@ -515,7 +590,7 @@ export const mergeHistory = async (write: () => Promise<void>): Promise<number> 
   if (get().importingHistory) {
     throw new Error('History import is already in progress')
   }
-  set({ importingHistory: true })
+  set({ importingHistory: true, importProgress: { phase: 'reading', sessions: 0, images: 0 } })
   try {
     for (const controller of Object.values(get().streaming)) {
       controller.abort()
@@ -529,6 +604,14 @@ export const mergeHistory = async (write: () => Promise<void>): Promise<number> 
     let result: { importedCount: number; summaries: SessionSummary[] }
     try {
       await write()
+      const current = get().importProgress
+      set({
+        importProgress: {
+          phase: 'merging',
+          sessions: current?.sessions ?? 0,
+          images: current?.images ?? 0,
+        },
+      })
       result = await db.mergeStaging()
     } catch (error) {
       await db.clearStaging().catch(db.reportStorageError('clear unfinished history merge'))
@@ -543,7 +626,7 @@ export const mergeHistory = async (write: () => Promise<void>): Promise<number> 
     })
     return result.importedCount
   } finally {
-    set({ importingHistory: false })
+    set({ importingHistory: false, importProgress: null })
     retrySaveSessions()
     const { activeId, ready } = get()
     if (activeId !== null) {
@@ -552,6 +635,25 @@ export const mergeHistory = async (write: () => Promise<void>): Promise<number> 
       void initChat()
     }
   }
+}
+
+export const importSingleSession = async (session: Session): Promise<void> => {
+  if (get().importingHistory) {
+    throw new Error('History import is already in progress')
+  }
+  await db.saveSession(session)
+  touchSession(session.id)
+  set((state) => ({
+    ready: true,
+    initError: false,
+    sessions: sortSessions([
+      toSessionSummary(session),
+      ...state.sessions.filter((item) => item.id !== session.id),
+    ]),
+    sessionCache: { ...state.sessionCache, [session.id]: session },
+    activeId: session.id,
+  }))
+  trimSessionCache()
 }
 
 export const newChat = (options?: { silentIfAlreadyNew?: boolean }): boolean => {

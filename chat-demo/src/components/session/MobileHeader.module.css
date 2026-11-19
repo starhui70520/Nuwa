@@ -81,3 +81,40 @@
   user-select: none;
   -webkit-user-select: none;
 }
+
+@media (max-width: 340px), (max-height: 420px) {
+  .header {
+    min-height: 40px;
+    padding: 6px 8px 4px;
+    gap: 0;
+  }
+
+  .header > * + * {
+    margin-left: 6px;
+  }
+
+  .circleButton,
+  .capsule {
+    height: 30px;
+  }
+
+  .circleButton {
+    width: 30px;
+  }
+
+  .capsuleAction {
+    width: 28px;
+    height: 26px;
+  }
+
+  .title {
+    font-size: 0.8125rem;
+  }
+}
+
+/* 手表弹出软键盘时可用高度极小，自动隐藏顶栏给输入区让路 */
+@media (max-height: 180px) {
+  .header {
+    display: none;
+  }
+}

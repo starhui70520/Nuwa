@@ -26,6 +26,7 @@ import {
   hasUsedOneClickMigration,
   triggerOneClickMigration,
 } from '../../services/chat/migrationBridge.js'
+import { importFromShareLink } from '../../services/chat/history/importShareLink.js'
 import { useChatStore } from '../../services/chat/store.js'
 import { getRegionName, provinces, regionCodes } from '../../services/location.js'
 import {
@@ -51,7 +52,13 @@ import {
   type SpeechEngine,
   type ThemePreference,
 } from '../../services/settings.js'
-import { DeepSeekMigration, isNativeAndroid, isNativeIos } from '../../services/nativeBridge.js'
+import {
+  DeepSeekMigration,
+  getChromeMajorVersion,
+  isLegacyWebView,
+  isNativeAndroid,
+  isNativeIos,
+} from '../../services/nativeBridge.js'
 import { handleExternalAnchorClick, openExternalUrl } from '../../services/externalLink.js'
 import { Button } from '../base/Button.js'
 import {
@@ -573,6 +580,7 @@ const SettingsContent = () => {
             <>
               <div className={styles.groupCard}>
                 <OneClickMigrateSetting disabled={historyBusy} />
+                <ShareLinkImportSetting disabled={historyBusy} />
                 <ImportHistory historyImport={historyImport} disabled={historyBusy} />
                 <ExportHistory disabled={historyBusy} />
                 {isNativeIos() ? <IcloudAutoBackup disabled={historyBusy} /> : null}
@@ -752,14 +760,32 @@ const useHistoryDelete = () => {
   }
 }
 
+const showLegacyWebViewToast = () => {
+  const version = getChromeMajorVersion()
+  if (version !== null) {
+    showToast({
+      key: 'legacyWebViewUnavailable',
+      params: { version: String(version) },
+      type: 'error',
+    })
+  } else {
+    showToast({ key: 'legacyWebViewUnavailableGeneric', type: 'error' })
+  }
+}
+
 const DeepSeekAccountSetting = () => {
   const t = useTranslate()
   const authMode = useSettings((state) => state.authMode)
   const dshToken = useSettings((state) => state.dshToken)
   const dshAccountLabel = useSettings((state) => state.dshAccountLabel)
   const [busy, setBusy] = useState(false)
+  const legacyWebView = isLegacyWebView()
 
   const onSignIn = async () => {
+    if (legacyWebView) {
+      showLegacyWebViewToast()
+      return
+    }
     if (busy) {
       return
     }
@@ -816,10 +842,11 @@ const DeepSeekAccountSetting = () => {
           </div>
         ) : (
           <Button
-            variant="primary"
+            variant={legacyWebView ? 'outlined' : 'primary'}
             size="m"
-            className={styles.cellButton}
-            disabled={busy}
+            className={clsx(styles.cellButton, legacyWebView && styles.legacyDisabledButton)}
+            disabled={!legacyWebView && busy}
+            aria-disabled={legacyWebView || busy}
             onClick={() => void onSignIn()}
           >
             {t('dshAccountSignInButton')}
@@ -834,6 +861,7 @@ const OneClickMigrateSetting = ({ disabled }: { disabled: boolean }) => {
   const t = useTranslate()
   const [choosingAccount, setChoosingAccount] = useState(false)
   const hasSessions = useChatStore((state) => state.sessions.length > 0)
+  const legacyWebView = isLegacyWebView()
 
   const launch = (options: { clearSession?: boolean; forceReExport?: boolean }) => {
     setChoosingAccount(false)
@@ -849,11 +877,16 @@ const OneClickMigrateSetting = ({ disabled }: { disabled: boolean }) => {
         status={null}
         action={
           <Button
-            variant="primary"
+            variant={legacyWebView ? 'outlined' : 'primary'}
             size="m"
-            className={styles.cellButton}
-            disabled={disabled}
+            className={clsx(styles.cellButton, legacyWebView && styles.legacyDisabledButton)}
+            disabled={!legacyWebView && disabled}
+            aria-disabled={legacyWebView || disabled}
             onClick={() => {
+              if (legacyWebView) {
+                showLegacyWebViewToast()
+                return
+              }
               if (isNativeAndroid() && (hasUsedOneClickMigration() || hasSessions)) {
                 setChoosingAccount(true)
                 return
@@ -1280,6 +1313,107 @@ const useHistoryImport = () => {
   return { file, busy, status, select: setFile, cancel: () => setFile(null), confirm }
 }
 
+/** 通过 DeepSeek 分享链接直接导入单条对话 */
+const ShareLinkImportSetting = ({ disabled }: { disabled: boolean }) => {
+  const t = useTranslate()
+  const [opened, setOpened] = useState(false)
+  const [linkText, setLinkText] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [errorText, setErrorText] = useState<string | null>(null)
+
+  const onClose = () => {
+    if (!busy) {
+      setOpened(false)
+      setErrorText(null)
+    }
+  }
+
+  const onConfirm = async () => {
+    if (busy) {
+      return
+    }
+    setBusy(true)
+    setErrorText(null)
+    try {
+      const session = await importFromShareLink(linkText)
+      setOpened(false)
+      setLinkText('')
+      closeSettings()
+      showToast({
+        key: 'historyImportedOne',
+        params: { count: session.messages.length },
+      })
+    } catch (error) {
+      setErrorText(error instanceof Error ? error.message : '导入失败，请检查链接是否有效')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <>
+      <SettingCell
+        label="通过分享链接导入"
+        description="粘贴 DeepSeek 分享链接（如 chat.deepseek.com/share/...）直接导入并继续对话"
+        status={null}
+        action={
+          <Button
+            variant="outlined"
+            size="m"
+            className={styles.cellButton}
+            disabled={disabled || busy}
+            onClick={() => {
+              setErrorText(null)
+              setOpened(true)
+            }}
+          >
+            导入链接
+          </Button>
+        }
+      />
+      {opened ? (
+        <Modal
+          title="通过 DeepSeek 分享链接导入"
+          className={styles.importConfirm}
+          onClose={onClose}
+          footer={
+            <>
+              <Button variant="outlined" size="m" disabled={busy} onClick={onClose}>
+                {t('cancel')}
+              </Button>
+              <Button
+                variant="primary"
+                size="m"
+                disabled={busy || !linkText.trim()}
+                onClick={() => void onConfirm()}
+              >
+                {busy ? '导入中…' : '确认导入'}
+              </Button>
+            </>
+          }
+        >
+          <div className={styles.shareLinkModalBody}>
+            <textarea
+              className={styles.shareLinkInput}
+              rows={3}
+              placeholder="粘贴分享链接或包含链接的完整分享文案，例如：https://chat.deepseek.com/share/..."
+              value={linkText}
+              disabled={busy}
+              onChange={(event) => {
+                setLinkText(event.target.value)
+                if (errorText) {
+                  setErrorText(null)
+                }
+              }}
+            />
+            {errorText ? <div className={styles.error}>{errorText}</div> : null}
+          </div>
+        </Modal>
+      ) : null}
+    </>
+  )
+}
+
 /** 增量导入历史对话 */
 const ImportHistory = ({
   historyImport,
@@ -1290,12 +1424,24 @@ const ImportHistory = ({
 }) => {
   const t = useTranslate()
   const inputRef = useRef<HTMLInputElement>(null)
+  const importingHistory = useChatStore((state) => state.importingHistory)
+  const importProgress = useChatStore((state) => state.importProgress)
+
+  const progressDesc = importingHistory
+    ? importProgress?.phase === 'merging'
+      ? `正在写入本地数据库（共 ${importProgress.sessions} 个会话）…`
+      : importProgress && importProgress.sessions > 0
+        ? `正在导入：已读取 ${importProgress.sessions} 个会话${
+            importProgress.images > 0 ? `，${importProgress.images} 个附件` : ''
+          }…`
+        : '正在解析归档文件，请稍候…'
+    : t('historyImportDescription')
 
   return (
     <SettingCell
       label={t('historyImport')}
-      description={t('historyImportDescription')}
-      status={historyImport.status}
+      description={progressDesc}
+      status={importingHistory ? null : historyImport.status}
       action={
         <>
           <Button
@@ -1306,7 +1452,7 @@ const ImportHistory = ({
             onClick={() => inputRef.current?.click()}
           >
             <IconUploadOutline14 />
-            {t('upload')}
+            {importingHistory ? '导入中…' : t('upload')}
           </Button>
           <input
             ref={inputRef}

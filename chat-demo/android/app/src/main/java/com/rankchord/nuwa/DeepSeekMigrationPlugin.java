@@ -1308,6 +1308,52 @@ public class DeepSeekMigrationPlugin extends Plugin {
         return cjkOrPunct ? (prev + next) : (prev + " " + next);
     }
 
+    @PluginMethod
+    public void fetchShareContent(PluginCall call) {
+        final String shareId = call.getString("shareId", "").trim();
+        if (!shareId.matches("^[A-Za-z0-9_-]{4,64}$")) {
+            call.reject("INVALID_SHARE_ID");
+            return;
+        }
+        new Thread(() -> {
+            HttpURLConnection conn = null;
+            try {
+                URL url = new URL("https://chat.deepseek.com/api/v0/share/content?share_id=" + shareId);
+                conn = (HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("GET");
+                conn.setConnectTimeout(15000);
+                conn.setReadTimeout(20000);
+                conn.setRequestProperty("Accept", "application/json");
+                conn.setRequestProperty(
+                    "User-Agent",
+                    "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+                );
+                int status = conn.getResponseCode();
+                java.io.InputStream stream = status >= 400 ? conn.getErrorStream() : conn.getInputStream();
+                java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
+                if (stream != null) {
+                    byte[] buf = new byte[8192];
+                    int read;
+                    while ((read = stream.read(buf)) != -1) {
+                        baos.write(buf, 0, read);
+                    }
+                    stream.close();
+                }
+                String body = baos.toString("UTF-8");
+                JSObject ret = new JSObject();
+                ret.put("status", status);
+                ret.put("body", body);
+                call.resolve(ret);
+            } catch (Exception e) {
+                call.reject("FETCH_SHARE_FAILED: " + e.getMessage());
+            } finally {
+                if (conn != null) {
+                    conn.disconnect();
+                }
+            }
+        }).start();
+    }
+
     private void emitWebEvent(final String script) {
         if (getBridge() != null && getBridge().getWebView() != null) {
             mainHandler.post(() -> {

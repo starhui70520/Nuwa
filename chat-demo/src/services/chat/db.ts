@@ -86,7 +86,12 @@ const isConnectionClosedError = (error: unknown): boolean => {
   }
   return (
     error.name === 'InvalidStateError' ||
-    /database connection is closing|connection.*closed|backing store/i.test(error.message)
+    error.name === 'AbortError' ||
+    error.name === 'TransactionInactiveError' ||
+    error.name === 'UnknownError' ||
+    /database connection is closing|connection.*closed|backing store|transaction.*abort|inactive/i.test(
+      error.message
+    )
   )
 }
 
@@ -230,11 +235,34 @@ export const addStagingSession = async (session: Session): Promise<void> => {
   await (await getDB()).add('sessionsStaging', session)
 }
 
+export const addStagingSessions = async (sessions: Session[]): Promise<void> => {
+  if (sessions.length === 0) {
+    return
+  }
+  const tx = (await getDB()).transaction('sessionsStaging', 'readwrite')
+  await Promise.all([
+    (async () => {
+      try {
+        for (const session of sessions) {
+          await tx.store.add(session)
+        }
+      } catch (error) {
+        abortTransaction(tx)
+        throw error
+      }
+    })(),
+    tx.done,
+  ])
+}
+
 export const saveStagingFiles = (files: StoredFile[]): Promise<void> =>
   putFiles('filesStaging', files)
 
 /** 图片位于会话 JSON 之后；全部读完后回填具体 MIME，保留归档给出的 isImage 标识。 */
 export const updateStagingFileTypes = async (types: ReadonlyMap<string, string>): Promise<void> => {
+  if (types.size === 0) {
+    return
+  }
   const tx = (await getDB()).transaction('sessionsStaging', 'readwrite')
   await Promise.all([
     (async () => {
@@ -315,24 +343,50 @@ const messageSignature = (message: Message): string => {
   return `A:${text}`
 }
 
-/** 为会话消息树中的每个节点计算从根到该节点的路径签名集合，用于精准判定双方是否各自新增内容。 */
+/** 双 32 位 FNV-1a 迭代哈希，将任意长度文本压缩为 16 位十六进制指纹，避免长会话 O(N^2) 内存爆炸。 */
+const hashStep = (seed: string, text: string): string => {
+  let h1 = 0x811c9dc5
+  let h2 = 0x01000193
+  for (let i = 0; i < seed.length; i++) {
+    const c = seed.charCodeAt(i)
+    h1 = Math.imul(h1 ^ c, 0x01000193)
+    h2 = Math.imul(h2 ^ (c + 17), 0x85ebca6b)
+  }
+  h1 = Math.imul(h1 ^ 0x3e, 0x01000193)
+  h2 = Math.imul(h2 ^ 0x3e, 0x85ebca6b)
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i)
+    h1 = Math.imul(h1 ^ c, 0x01000193)
+    h2 = Math.imul(h2 ^ (c + 31), 0x85ebca6b)
+  }
+  return `${(h1 >>> 0).toString(16).padStart(8, '0')}${(h2 >>> 0).toString(16).padStart(8, '0')}`
+}
+
+/** 为会话消息树中的每个节点计算从根到该节点的路径哈希集合（迭代计算，O(N) 时间与内存，无递归爆栈）。 */
 const buildSessionPathSignatures = (session: Session): Set<string> => {
   const byId = new Map(session.messages.map((message) => [message.id, message]))
   const memo = new Map<string, string>()
-  const resolve = (message: Message, depth: number): string => {
-    const cached = memo.get(message.id)
-    if (cached !== undefined) {
-      return cached
-    }
-    const parent =
-      message.parentId && depth < session.messages.length ? byId.get(message.parentId) : undefined
-    const path = `${parent ? resolve(parent, depth + 1) : ''}>${messageSignature(message)}`
-    memo.set(message.id, path)
-    return path
-  }
   const paths = new Set<string>()
-  for (const message of session.messages) {
-    paths.add(resolve(message, 0))
+  for (const start of session.messages) {
+    if (memo.has(start.id)) {
+      continue
+    }
+    const chain: Message[] = []
+    const seen = new Set<string>()
+    let cur: Message | undefined = start
+    while (cur && !memo.has(cur.id) && !seen.has(cur.id)) {
+      seen.add(cur.id)
+      chain.push(cur)
+      cur = cur.parentId ? byId.get(cur.parentId) : undefined
+    }
+    let parentHash = cur ? (memo.get(cur.id) ?? '') : ''
+    for (let i = chain.length - 1; i >= 0; i--) {
+      const node = chain[i]
+      const digest = hashStep(parentHash, messageSignature(node))
+      memo.set(node.id, digest)
+      paths.add(digest)
+      parentHash = digest
+    }
   }
   return paths
 }

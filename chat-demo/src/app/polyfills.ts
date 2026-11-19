@@ -209,4 +209,294 @@ if (typeof crypto !== 'undefined' && typeof crypto.randomUUID !== 'function') {
   })
 }
 
+const g = (typeof globalThis !== 'undefined'
+  ? globalThis
+  : typeof window !== 'undefined'
+    ? window
+    : typeof self !== 'undefined'
+      ? self
+      : {}) as Record<string, unknown>
+
+if (typeof g.globalThis === 'undefined') {
+  g.globalThis = g
+}
+
+if (typeof Symbol !== 'undefined' && !(Symbol as unknown as Record<string, unknown>).asyncIterator) {
+  Object.defineProperty(Symbol, 'asyncIterator', {
+    value: Symbol('Symbol.asyncIterator'),
+    configurable: true,
+  })
+}
+
+if (typeof g.queueMicrotask !== 'function') {
+  g.queueMicrotask = (cb: () => void) => {
+    Promise.resolve().then(cb)
+  }
+}
+
+if (typeof Object.fromEntries !== 'function') {
+  Object.defineProperty(Object, 'fromEntries', {
+    value: function fromEntries(iterable: Iterable<readonly [PropertyKey, unknown]>) {
+      const obj: Record<PropertyKey, unknown> = {}
+      for (const entry of iterable) {
+        if (entry != null) {
+          obj[entry[0]] = entry[1]
+        }
+      }
+      return obj
+    },
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  })
+}
+
+if (typeof Array.prototype.flat !== 'function') {
+  Object.defineProperty(Array.prototype, 'flat', {
+    value: function flat<T>(this: T[], depth = 1): unknown[] {
+      const flatten = (arr: unknown[], d: number): unknown[] => {
+        const out: unknown[] = []
+        for (let i = 0; i < arr.length; i++) {
+          if (!(i in arr)) {
+            continue
+          }
+          const item = arr[i]
+          if (d > 0 && Array.isArray(item)) {
+            out.push(...flatten(item, d - 1))
+          } else {
+            out.push(item)
+          }
+        }
+        return out
+      }
+      return flatten(this, Number(depth))
+    },
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  })
+}
+
+if (typeof Array.prototype.flatMap !== 'function') {
+  Object.defineProperty(Array.prototype, 'flatMap', {
+    value: function flatMap<T, U>(
+      this: T[],
+      callback: (value: T, index: number, array: T[]) => U | readonly U[],
+      thisArg?: unknown
+    ): U[] {
+      const out: U[] = []
+      for (let i = 0; i < this.length; i++) {
+        if (!(i in this)) {
+          continue
+        }
+        const mapped = callback.call(thisArg, this[i], i, this)
+        if (Array.isArray(mapped)) {
+          out.push(...mapped)
+        } else {
+          out.push(mapped as U)
+        }
+      }
+      return out
+    },
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  })
+}
+
+if (typeof Promise.prototype.finally !== 'function') {
+  Object.defineProperty(Promise.prototype, 'finally', {
+    value: function finallyPolyfill<T>(this: Promise<T>, onFinally?: (() => unknown) | null) {
+      const handler = typeof onFinally === 'function' ? onFinally : () => {}
+      return this.then(
+        (value) => Promise.resolve(handler()).then(() => value),
+        (reason) =>
+          Promise.resolve(handler()).then(() => {
+            throw reason
+          })
+      )
+    },
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  })
+}
+
+if (typeof Promise.allSettled !== 'function') {
+  Promise.allSettled = function allSettled<T>(
+    iterable: Iterable<T | PromiseLike<T>>
+  ): Promise<PromiseSettledResult<Awaited<T>>[]> {
+    return Promise.all(
+      Array.from(iterable, (item) =>
+        Promise.resolve(item).then(
+          (value) => ({ status: 'fulfilled' as const, value: value as Awaited<T> }),
+          (reason) => ({ status: 'rejected' as const, reason })
+        )
+      )
+    )
+  } as typeof Promise.allSettled
+}
+
+if (typeof String.prototype.trimStart !== 'function') {
+  Object.defineProperty(String.prototype, 'trimStart', {
+    value: function trimStart(this: string) {
+      return String(this).replace(/^\s+/, '')
+    },
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  })
+}
+
+if (typeof String.prototype.trimEnd !== 'function') {
+  Object.defineProperty(String.prototype, 'trimEnd', {
+    value: function trimEnd(this: string) {
+      return String(this).replace(/\s+$/, '')
+    },
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  })
+}
+
+if (typeof Intl !== 'undefined' && typeof (Intl as unknown as Record<string, unknown>).DisplayNames !== 'function') {
+  class FallbackDisplayNames {
+    of(code: string): string {
+      return String(code)
+    }
+  }
+  ;(Intl as unknown as Record<string, unknown>).DisplayNames = FallbackDisplayNames
+}
+
+if (typeof g.AbortController !== 'function') {
+  class FallbackAbortSignal {
+    aborted = false
+    reason: unknown = undefined
+    onabort: ((ev: Event) => void) | null = null
+    private listeners = new Set<EventListenerOrEventListenerObject>()
+
+    addEventListener(type: string, listener: EventListenerOrEventListenerObject | null) {
+      if (type === 'abort' && listener) {
+        this.listeners.add(listener)
+      }
+    }
+
+    removeEventListener(type: string, listener: EventListenerOrEventListenerObject | null) {
+      if (type === 'abort' && listener) {
+        this.listeners.delete(listener)
+      }
+    }
+
+    dispatchEvent(event: Event): boolean {
+      if (this.onabort) {
+        try {
+          this.onabort(event)
+        } catch {
+          // 忽略单个监听异常
+        }
+      }
+      for (const listener of Array.from(this.listeners)) {
+        try {
+          if (typeof listener === 'function') {
+            listener(event)
+          } else if (typeof listener.handleEvent === 'function') {
+            listener.handleEvent(event)
+          }
+        } catch {
+          // 忽略单个监听异常
+        }
+      }
+      return true
+    }
+
+    throwIfAborted() {
+      if (this.aborted) {
+        throw this.reason ?? new Error('Aborted')
+      }
+    }
+  }
+
+  class FallbackAbortController {
+    signal = new FallbackAbortSignal()
+    abort(reason?: unknown) {
+      if (this.signal.aborted) {
+        return
+      }
+      this.signal.aborted = true
+      this.signal.reason = reason ?? new Error('Aborted')
+      const ev = typeof Event === 'function' ? new Event('abort') : ({ type: 'abort' } as Event)
+      this.signal.dispatchEvent(ev)
+    }
+  }
+
+  g.AbortSignal = FallbackAbortSignal
+  g.AbortController = FallbackAbortController
+}
+
+if (typeof g.ResizeObserver !== 'function') {
+  class FallbackResizeObserver {
+    private cb: ResizeObserverCallback
+    private targets = new Set<Element>()
+    private timer: ReturnType<typeof setTimeout> | null = null
+    private onResize = () => {
+      if (this.timer) {
+        clearTimeout(this.timer)
+      }
+      this.timer = setTimeout(() => this.notify(), 50)
+    }
+
+    constructor(cb: ResizeObserverCallback) {
+      this.cb = cb
+    }
+
+    private notify() {
+      if (this.targets.size === 0) {
+        return
+      }
+      const entries = Array.from(this.targets).map((target) => {
+        const rect = target.getBoundingClientRect()
+        return {
+          target,
+          contentRect: rect,
+          borderBoxSize: [{ inlineSize: rect.width, blockSize: rect.height }],
+          contentBoxSize: [{ inlineSize: rect.width, blockSize: rect.height }],
+          devicePixelContentBoxSize: [{ inlineSize: rect.width, blockSize: rect.height }],
+        } as unknown as ResizeObserverEntry
+      })
+      try {
+        this.cb(entries, this as unknown as ResizeObserver)
+      } catch {
+        // 忽略回调异常
+      }
+    }
+
+    observe(target: Element) {
+      if (this.targets.size === 0 && typeof window !== 'undefined') {
+        window.addEventListener('resize', this.onResize)
+      }
+      this.targets.add(target)
+      this.onResize()
+    }
+
+    unobserve(target: Element) {
+      this.targets.delete(target)
+      if (this.targets.size === 0 && typeof window !== 'undefined') {
+        window.removeEventListener('resize', this.onResize)
+      }
+    }
+
+    disconnect() {
+      this.targets.clear()
+      if (this.timer) {
+        clearTimeout(this.timer)
+      }
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('resize', this.onResize)
+      }
+    }
+  }
+
+  g.ResizeObserver = FallbackResizeObserver
+}
+
 export {}

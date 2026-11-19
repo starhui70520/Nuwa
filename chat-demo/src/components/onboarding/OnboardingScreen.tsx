@@ -6,6 +6,7 @@ import {
   PlatformAuthUnavailableError,
   startDeepSeekAccountLogin,
 } from '../../services/api/dshAuth.js'
+import { isLegacyWebView } from '../../services/nativeBridge.js'
 import {
   setApiBaseUrl,
   setApiModel,
@@ -31,6 +32,7 @@ export const OnboardingScreen = () => {
   const apiBaseUrl = useSettings((state) => state.apiBaseUrl)
   const apiModel = useSettings((state) => state.apiModel)
   const form = useApiKeyForm()
+  const legacyWebView = isLegacyWebView()
 
   const enterDeepSeekKeyView = () => {
     setApiProtocol('anthropic')
@@ -91,15 +93,21 @@ export const OnboardingScreen = () => {
       <div className={styles.bottom}>
         {view === 'home' ? (
           <>
+            {!legacyWebView ? (
+              <button
+                type="button"
+                className={clsx(styles.pillButton, styles.pillPrimary)}
+                disabled={authorizing}
+                onClick={() => void onDeepSeekAccountClick()}
+              >
+                {t('onboardingLoginDeepSeekAccount')}
+              </button>
+            ) : null}
             <button
               type="button"
-              className={clsx(styles.pillButton, styles.pillPrimary)}
-              disabled={authorizing}
-              onClick={() => void onDeepSeekAccountClick()}
+              className={clsx(styles.pillButton, legacyWebView && styles.pillPrimary)}
+              onClick={enterDeepSeekKeyView}
             >
-              {t('onboardingLoginDeepSeekAccount')}
-            </button>
-            <button type="button" className={styles.pillButton} onClick={enterDeepSeekKeyView}>
               {t('onboardingUseDeepSeekKey')}
             </button>
             <button

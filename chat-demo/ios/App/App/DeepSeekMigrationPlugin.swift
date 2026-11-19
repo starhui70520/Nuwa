@@ -27,6 +27,7 @@ public class DeepSeekMigrationPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "saveFileToDocuments", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "icloudStatus", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "icloudBackupNow", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "fetchShareContent", returnType: CAPPluginReturnPromise),
     ]
 
     private var pendingAuthCall: CAPPluginCall?
@@ -82,6 +83,29 @@ public class DeepSeekMigrationPlugin: CAPPlugin, CAPBridgedPlugin {
     /// iOS 通过 promise 直接返回 token，无 pending 态可消费。
     @objc func consumePendingPlatformAuth(_ call: CAPPluginCall) {
         call.resolve(["hasPending": false])
+    }
+
+    /// 拉取 DeepSeek 公开分享链接的会话 JSON（绕过 WebView 跨域限制）。
+    @objc func fetchShareContent(_ call: CAPPluginCall) {
+        let shareId = (call.getString("shareId") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+        guard shareId.count >= 4, shareId.count <= 64, shareId.unicodeScalars.allSatisfy({ allowed.contains($0) }),
+              let url = URL(string: "https://chat.deepseek.com/api/v0/share/content?share_id=\(shareId)") else {
+            call.reject("INVALID_SHARE_ID")
+            return
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 20
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error {
+                call.reject("FETCH_SHARE_FAILED: \(error.localizedDescription)")
+                return
+            }
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            call.resolve(["status": status, "body": body])
+        }.resume()
     }
 
     /// 打开内嵌迁移浏览器；导出包落盘后 resolve {filePath, fileName}，取消则 resolve 空对象。

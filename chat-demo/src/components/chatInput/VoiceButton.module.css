@@ -166,6 +166,18 @@
   animation: spin 0.8s linear infinite;
 }
 
+@media (max-width: 340px), (max-height: 420px) {
+  .button {
+    width: 26px;
+    height: 26px;
+  }
+
+  .active {
+    width: 22px;
+    height: 22px;
+  }
+}
+
 @keyframes spin {
   to {
     transform: rotate(360deg);

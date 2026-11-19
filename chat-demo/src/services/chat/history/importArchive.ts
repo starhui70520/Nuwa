@@ -78,7 +78,10 @@ export const checkArchiveFormat = async (file: File): Promise<void> => {
  * 会话读完立即暂存，只保留图片路径映射；图片全部读完后逐会话回填 MIME，不改变图片身份。
  * 写入导入暂存存储；调用方负责先清空暂存，成功后替换正式数据，失败时清理暂存。
  */
-export const importArchive = async (file: File): Promise<void> => {
+export const importArchive = async (
+  file: File,
+  onProgress?: (progress: { sessions: number; images: number }) => void
+): Promise<void> => {
   if (!(await isZipFile(file))) {
     fail('backupUnrecognized')
   }
@@ -89,6 +92,17 @@ export const importArchive = async (file: File): Promise<void> => {
   let manifest = false
   let index: SessionIndexEntry[] | undefined
   let currentSessionId: string | undefined
+  const stagingBatch: Awaited<ReturnType<typeof toLocalSession>>['session'][] = []
+  const STAGING_BATCH_SIZE = 20
+
+  const flushSessions = async () => {
+    if (stagingBatch.length === 0) {
+      return
+    }
+    const batch = stagingBatch.splice(0, stagingBatch.length)
+    await db.addStagingSessions(batch)
+    onProgress?.({ sessions: imported.size, images: stored.size })
+  }
 
   const saveImage = async (entry: ArchiveEntry, id: string) => {
     if (stored.has(id)) {
@@ -99,6 +113,7 @@ export const importArchive = async (file: File): Promise<void> => {
     const type = imageType(new Uint8Array(await data.slice(0, 16).arrayBuffer()))
     await db.saveStagingFiles([{ id, blob: new Blob([data], { type }) }])
     stored.set(id, type)
+    onProgress?.({ sessions: imported.size, images: stored.size })
   }
 
   try {
@@ -127,14 +142,19 @@ export const importArchive = async (file: File): Promise<void> => {
         for (const [imagePath, id] of local.images) {
           images.set(imagePath, id)
         }
-        await db.addStagingSession(local.session)
+        stagingBatch.push(local.session)
+        if (stagingBatch.length >= STAGING_BATCH_SIZE) {
+          await flushSessions()
+        }
       } else if (path === INDEX_PATH && !index) {
+        await flushSessions()
         index = readSessionIndex(await readJson(entry))
       } else if (
         index
           ? imported.has(/^chat_sessions\/([^/]+)_files\//.exec(path)?.[1] ?? '')
           : currentSessionId && path.startsWith(sessionFilesDir(currentSessionId))
       ) {
+        await flushSessions()
         // 没有被引用的条目不保存，引用了但缺失的图片只展示文件名。
         const id = images.get(path)
         await (id === undefined ? skipEntry(entry) : saveImage(entry, id))
@@ -142,6 +162,7 @@ export const importArchive = async (file: File): Promise<void> => {
         fail('backupIncomplete')
       }
     }
+    await flushSessions()
   } catch (error) {
     throw error instanceof ArchiveError ? new BackupError('backupIncomplete') : error
   }

@@ -430,3 +430,88 @@
     cursor: not-allowed;
   }
 }
+
+.compactWatch {
+  --line-height: 1.25rem;
+  --input-padding-top: 5px;
+  border-radius: 18px;
+  font-size: 0.875rem;
+
+  .textarea,
+  .mirror {
+    min-height: calc(var(--line-height) + var(--input-padding-top) * 2);
+    padding: var(--input-padding-top) 4px;
+  }
+
+  .mirror {
+    max-height: 54px;
+  }
+
+  .toggle {
+    height: 26px;
+    padding: 0 8px;
+    font-size: 0.75rem;
+  }
+
+  .actionCircle,
+  .sendButton {
+    width: 28px;
+    height: 28px;
+    margin-left: 0;
+  }
+}
+
+.watchTools {
+  display: flex;
+  align-items: center;
+  padding: 5px 8px 4px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+
+  [data-ds-dark-theme] & {
+    border-bottom-color: rgba(255, 255, 255, 0.08);
+  }
+
+  > * + * {
+    margin-left: 6px;
+  }
+}
+
+.watchBar {
+  display: flex;
+  align-items: flex-end;
+  padding: 3px 5px;
+
+  > * + * {
+    margin-left: 4px;
+  }
+}
+
+.watchInputWrap {
+  flex: 1;
+  min-width: 0;
+}
+
+.watchPlusBtn {
+  position: relative;
+  transition: transform 0.2s ease;
+}
+
+.watchPlusOpen {
+  transform: rotate(45deg);
+}
+
+.watchDot {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: var(--dsw-alias-brand-primary);
+}
+
+@media (max-width: 340px), (max-height: 420px) {
+  .wrapper {
+    max-height: calc(100vh - 8px);
+  }
+}

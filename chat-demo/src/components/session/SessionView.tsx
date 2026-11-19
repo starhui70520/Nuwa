@@ -8,7 +8,7 @@ import { MessageList } from '../messages/MessageList.js'
 import { MobileHeader } from './MobileHeader.js'
 import styles from './SessionView.module.css'
 
-const DOUBLE_TAP_MS = 320
+const DOUBLE_TAP_MS = 400
 
 /** 会话页：标题栏（移动端为顶栏）+ 消息列表，输入框吸底 */
 export const SessionView = ({
@@ -52,6 +52,7 @@ export const SessionView = ({
         </div>
       )}
       <MessageList
+        key={session.id}
         session={session}
         streaming={streaming}
         scrollToTopRef={scrollToTopRef}

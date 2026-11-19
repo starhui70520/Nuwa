@@ -5,10 +5,12 @@ import android.annotation.SuppressLint;
 import android.app.ActivityManager;
 import android.content.ComponentCallbacks2;
 import android.content.Context;
+import android.content.Intent;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.graphics.Color;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.SystemClock;
@@ -16,8 +18,11 @@ import android.view.Display;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
+import android.webkit.MimeTypeMap;
 import android.webkit.PermissionRequest;
 import android.webkit.RenderProcessGoneDetail;
+import android.webkit.ValueCallback;
+import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import androidx.activity.OnBackPressedCallback;
@@ -31,6 +36,8 @@ import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.BridgeWebChromeClient;
 import com.getcapacitor.WebViewListener;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -232,6 +239,24 @@ public class MainActivity extends BridgeActivity {
                 }
                 super.onPermissionRequest(request);
             }
+
+            @Override
+            public boolean onShowFileChooser(
+                WebView view,
+                ValueCallback<Uri[]> filePathCallback,
+                FileChooserParams fileChooserParams
+            ) {
+                FileChooserParams safeParams = sanitizeFileChooserParams(fileChooserParams);
+                try {
+                    return super.onShowFileChooser(view, filePathCallback, safeParams);
+                } catch (Exception e) {
+                    try {
+                        filePathCallback.onReceiveValue(null);
+                    } catch (Exception ignored) {
+                    }
+                    return true;
+                }
+            }
         });
 
         getBridge().addWebViewListener(new WebViewListener() {
@@ -297,5 +322,86 @@ public class MainActivity extends BridgeActivity {
         } catch (Exception ignored) {
             return false;
         }
+    }
+
+    /**
+     * 兼容老版本 Android/WebView：Capacitor BridgeWebChromeClient 在 acceptTypes 包含无法映射的
+     * 扩展名（如 .md/.ts）时会触发 validTypes[0] 越界闪退。这里统一清洗为安全 MIME 或降级为 * / *。
+     */
+    private WebChromeClient.FileChooserParams sanitizeFileChooserParams(
+        final WebChromeClient.FileChooserParams orig
+    ) {
+        if (orig == null) {
+            return null;
+        }
+        String[] rawTypes = orig.getAcceptTypes();
+        List<String> valid = new ArrayList<>();
+        MimeTypeMap mtm = MimeTypeMap.getSingleton();
+        if (rawTypes != null) {
+            for (String raw : rawTypes) {
+                if (raw == null) {
+                    continue;
+                }
+                for (String token : raw.split(",")) {
+                    String t = token.trim();
+                    if (t.isEmpty()) {
+                        continue;
+                    }
+                    if (t.startsWith(".")) {
+                        String ext = t.substring(1).toLowerCase();
+                        String mapped = mtm.getMimeTypeFromExtension(ext);
+                        if (mapped != null && !valid.contains(mapped)) {
+                            valid.add(mapped);
+                        }
+                    } else if (t.contains("/") && !valid.contains(t)) {
+                        valid.add(t);
+                    }
+                }
+            }
+        }
+        final String[] safeTypes = valid.isEmpty()
+            ? new String[]{"*/*"}
+            : valid.toArray(new String[0]);
+
+        return new WebChromeClient.FileChooserParams() {
+            @Override
+            public int getMode() {
+                return orig.getMode();
+            }
+
+            @Override
+            public String[] getAcceptTypes() {
+                return safeTypes;
+            }
+
+            @Override
+            public boolean isCaptureEnabled() {
+                return orig.isCaptureEnabled();
+            }
+
+            @Override
+            public CharSequence getTitle() {
+                return orig.getTitle();
+            }
+
+            @Override
+            public String getFilenameHint() {
+                return orig.getFilenameHint();
+            }
+
+            @Override
+            public Intent createIntent() {
+                Intent intent = orig.createIntent();
+                if (intent == null) {
+                    intent = new Intent(Intent.ACTION_GET_CONTENT);
+                    intent.addCategory(Intent.CATEGORY_OPENABLE);
+                }
+                String type = intent.getType();
+                if (type == null || type.isEmpty() || type.startsWith(".")) {
+                    intent.setType("*/*");
+                }
+                return intent;
+            }
+        };
     }
 }

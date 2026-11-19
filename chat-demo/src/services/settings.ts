@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type { TtsVoice } from './api/speech.js'
 import { normalizeLocation, type UserLocation } from './location.js'
+import { isLegacyWebView } from './nativeBridge.js'
 
 export type Locale = 'zh-CN' | 'en-US'
 
@@ -229,11 +230,14 @@ export const setApiKey = (apiKey: string | null) => {
   write(KEYS.apiKey, apiKey)
   if (apiKey) {
     write(KEYS.authMode, 'api-key')
-    const handled = useSettings.getState().migrationPromptHandled
+    const handled = useSettings.getState().migrationPromptHandled || isLegacyWebView()
+    if (handled && !useSettings.getState().migrationPromptHandled) {
+      write(KEYS.migrationPromptHandled, 'true')
+    }
     useSettings.setState({
       apiKey,
       authMode: 'api-key',
-      ...(!handled ? { showMigrationPrompt: true } : {}),
+      ...(handled ? { migrationPromptHandled: true, showMigrationPrompt: false } : { showMigrationPrompt: true }),
     })
     return
   }
@@ -244,12 +248,15 @@ export const setDeepSeekAccountAuth = (dshToken: string, dshAccountLabel: string
   write(KEYS.dshToken, dshToken)
   write(KEYS.dshAccountLabel, dshAccountLabel)
   write(KEYS.authMode, 'deepseek-account')
-  const handled = useSettings.getState().migrationPromptHandled
+  const handled = useSettings.getState().migrationPromptHandled || isLegacyWebView()
+  if (handled && !useSettings.getState().migrationPromptHandled) {
+    write(KEYS.migrationPromptHandled, 'true')
+  }
   useSettings.setState({
     dshToken,
     dshAccountLabel,
     authMode: 'deepseek-account',
-    ...(!handled ? { showMigrationPrompt: true } : {}),
+    ...(handled ? { migrationPromptHandled: true, showMigrationPrompt: false } : { showMigrationPrompt: true }),
   })
 }
 

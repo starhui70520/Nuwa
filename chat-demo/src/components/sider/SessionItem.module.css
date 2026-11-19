@@ -10,6 +10,8 @@
   line-height: 22px;
   color: var(--dsw-alias-label-primary);
   cursor: pointer;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 44px;
   transition:
     background-color var(--ds-transition-duration) var(--ds-ease-in-out),
     color var(--ds-transition-duration) var(--ds-ease-in-out);
