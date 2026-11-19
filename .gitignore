@@ -45,3 +45,5 @@ harmony/oh_modules/
 harmony/**/oh_modules/
 harmony/entry/src/main/resources/rawfile/web/*
 !harmony/entry/src/main/resources/rawfile/web/.gitkeep
+harmony/entry/src/main/resources/rawfile/mermaid/mermaid.min.js
+harmony/entry/src/main/resources/rawfile/mermaid/MERMAID-LICENSE.txt

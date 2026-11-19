@@ -2,11 +2,14 @@ import { common } from '@kit.AbilityKit';
 import { LengthMetrics } from '@kit.ArkUI';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { url } from '@kit.ArkTS';
+import { NativeLocale } from './NativeLocation';
 import { NativeMathEquation } from './NativeMathEquation';
+import { NativeMermaidPreview } from './NativeMermaidPreview';
 import {
   findNativeDisplayMath, findNativeInlineMath, NativeMathMatch, NativeMathNode, NativeMathSpan, nativeMathSpans,
   parseNativeMath,
 } from './NativeMarkdownMath';
+import { NativeTheme } from './NativeSettings';
 
 /**
  * Small native Markdown renderer for the Harmony chat surface.
@@ -22,6 +25,7 @@ interface MarkdownBlock {
   marker: string;
   rows?: string[][];
   lang?: string;
+  closed?: boolean;
   checked?: boolean;
   source?: string;
   math?: NativeMathNode;
@@ -50,8 +54,12 @@ export struct NativeMarkdown {
   @Prop content: string = '';
   @Prop fontScale: number = 1;
   @Prop hasCitations: boolean = false;
+  @Prop locale: NativeLocale = 'zh-CN';
+  @Prop theme: NativeTheme = 'system';
+  @Prop loading: boolean = false;
   onCitation: (number: number) => void = () => {};
   @State private copiedCodeKey: string = '';
+  @State private mermaidCodeIndices: number[] = [];
   private cachedCitationMode: boolean = false;
   private cachedContent: string = '\u0000';
   private cachedBlocks: MarkdownBlock[] = [];
@@ -60,6 +68,29 @@ export struct NativeMarkdown {
 
   private codeCopyKey(text: string, index: number): string {
     return `${index}:${text}`;
+  }
+
+  private label(chinese: string, english: string): string {
+    return this.locale === 'en-US' ? english : chinese;
+  }
+
+  private isMermaid(block: MarkdownBlock): boolean {
+    return block.kind === 'code' && block.lang?.toLowerCase() === 'mermaid';
+  }
+
+  private blockKey(block: MarkdownBlock, index: number): string {
+    const id = block.kind + '-' + index;
+    if (!this.isMermaid(block)) return id;
+    if (this.loading && !block.closed && !this.mermaidCodeIndices.includes(index)) return id + '-loading';
+    return id + '-' + block.text;
+  }
+
+  private setMermaidMode(index: number, code: boolean): void {
+    if (code && !this.mermaidCodeIndices.includes(index)) {
+      this.mermaidCodeIndices = [...this.mermaidCodeIndices, index];
+    } else if (!code) {
+      this.mermaidCodeIndices = this.mermaidCodeIndices.filter((item: number): boolean => item !== index);
+    }
   }
 
   private blocks(): MarkdownBlock[] {
@@ -85,7 +116,10 @@ export struct NativeMarkdown {
       const trimmed: string = line.trim();
       if (trimmed.startsWith('```') || trimmed.startsWith('~~~')) {
         if (inCode) {
-          result.push({ kind: 'code', text: codeLines.join('\n'), level: 0, ordered: false, marker: '', lang: codeLanguage });
+          result.push({
+            kind: 'code', text: codeLines.join('\n'), level: 0, ordered: false, marker: '',
+            lang: codeLanguage, closed: true,
+          });
           codeLines = [];
           inCode = false;
         } else {
@@ -612,47 +646,86 @@ export struct NativeMarkdown {
         pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, text)
       );
       this.copiedCodeKey = key;
-      this.getUIContext().getPromptAction().showToast({ message: '已复制' });
+      this.getUIContext().getPromptAction().showToast({ message: this.label('已复制', 'Copied') });
     } catch {
-      this.getUIContext().getPromptAction().showToast({ message: '复制失败' });
+      this.getUIContext().getPromptAction().showToast({ message: this.label('复制失败', 'Copy failed') });
     }
+  }
+
+  @Builder
+  private mermaidModeButton(index: number, label: string, code: boolean) {
+    Button(label, { type: ButtonType.Normal, buttonStyle: ButtonStyleMode.TEXTUAL })
+      .height(28)
+      .padding({ left: 9, right: 9 })
+      .borderRadius(7)
+      .fontSize(13)
+      .fontColor($r('app.color.native_chat_primary'))
+      .backgroundColor(this.mermaidCodeIndices.includes(index) === code ?
+        $r('app.color.native_chat_field') : Color.Transparent)
+      .accessibilitySelected(this.mermaidCodeIndices.includes(index) === code)
+      .onClick(() => { this.setMermaidMode(index, code); })
+  }
+
+  @Builder
+  private codeBlock(block: MarkdownBlock, index: number) {
+    Column() {
+      Row() {
+        if (this.isMermaid(block)) {
+          Row({ space: 4 }) {
+            this.mermaidModeButton(index, this.label('图表', 'Diagram'), false)
+            this.mermaidModeButton(index, this.label('代码', 'Code'), true)
+          }
+          .accessibilityDescription(this.label('Mermaid 图表与代码切换', 'Toggle between Mermaid diagram and code'))
+          Blank().layoutWeight(1)
+        } else {
+          Text(block.lang || 'text')
+            .fontSize(12)
+            .fontColor($r('app.color.native_chat_secondary'))
+            .layoutWeight(1)
+        }
+        Button(this.copiedCodeKey === this.codeCopyKey(block.text, index) ?
+          this.label('已复制', 'Copied') : this.label('复制', 'Copy'), { buttonStyle: ButtonStyleMode.TEXTUAL })
+          .height(28)
+          .fontSize(13)
+          .onClick(() => { void this.copyCode(block.text, this.codeCopyKey(block.text, index)); })
+      }
+      .width('100%')
+      .padding(6)
+      .backgroundColor($r('app.color.native_chat_sidebar'))
+      if (this.isMermaid(block) && !this.mermaidCodeIndices.includes(index)) {
+        if (this.loading && !block.closed) {
+          Text(this.label('图表生成中...', 'Rendering diagram...'))
+            .width('100%').height(160).textAlign(TextAlign.Center)
+            .fontSize(14).fontColor($r('app.color.native_chat_secondary'))
+        } else {
+          NativeMermaidPreview({ source: block.text, locale: this.locale, theme: this.theme })
+        }
+      } else {
+        Text() {
+          ForEach(this.codeParts(block.lang || 'text', block.text), (part: CodePart) => {
+            Span(part.text).fontColor(this.codeColor(part.kind))
+          }, (part: CodePart, partIndex: number): string => partIndex + ':' + part.kind + ':' + part.text.length)
+        }
+        .fontFamily('monospace')
+        .fontSize(13 * this.fontScale)
+        .fontColor($r('app.color.native_chat_primary'))
+        .lineHeight(22 * this.fontScale)
+        .width('100%')
+        .padding(16)
+        .copyOption(CopyOptions.LocalDevice)
+      }
+    }
+    .width('100%')
+    .borderRadius(12)
+    .clip(true)
+    .backgroundColor($r('app.color.native_chat_field'))
   }
 
   build() {
     Column({ space: 10 }) {
       ForEach(this.blocks(), (block: MarkdownBlock, index: number) => {
         if (block.kind === 'code') {
-          Column() {
-            Row() {
-              Text(block.lang || 'text')
-                .fontSize(12)
-                .fontColor($r('app.color.native_chat_secondary'))
-                .layoutWeight(1)
-              Button(this.copiedCodeKey === this.codeCopyKey(block.text, index) ? '已复制' : '复制', { buttonStyle: ButtonStyleMode.TEXTUAL })
-                .height(28)
-                .fontSize(13)
-                .onClick(() => { void this.copyCode(block.text, this.codeCopyKey(block.text, index)); })
-            }
-            .width('100%')
-            .padding(6)
-            .backgroundColor($r('app.color.native_chat_sidebar'))
-            Text() {
-              ForEach(this.codeParts(block.lang || 'text', block.text), (part: CodePart) => {
-                Span(part.text).fontColor(this.codeColor(part.kind))
-              }, (part: CodePart, partIndex: number): string => `${partIndex}:${part.kind}:${part.text.length}`)
-            }
-              .fontFamily('monospace')
-              .fontSize(13 * this.fontScale)
-              .fontColor($r('app.color.native_chat_primary'))
-              .lineHeight(22 * this.fontScale)
-              .width('100%')
-              .padding(16)
-              .copyOption(CopyOptions.LocalDevice)
-          }
-            .width('100%')
-            .borderRadius(12)
-            .clip(true)
-            .backgroundColor($r('app.color.native_chat_field'))
+          this.codeBlock(block, index)
         } else if (block.kind === 'math') {
           NativeMathEquation({ expression: block.math ?? null, source: block.text, formulaFontSize: 17 * this.fontScale })
         } else if (block.kind === 'heading') {
@@ -718,7 +791,7 @@ export struct NativeMarkdown {
         } else {
           this.inlineText(block.text, 16)
         }
-      }, (block: MarkdownBlock, index: number): string => `${block.kind}-${index}`)
+      }, (block: MarkdownBlock, index: number): string => this.blockKey(block, index))
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
