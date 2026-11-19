@@ -1,6 +1,7 @@
 import { url, util } from '@kit.ArkTS';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { http } from '@kit.NetworkKit';
+import { allowsKeylessNativeApi } from './NativeApiCredential';
 
 export interface NativeChatFileRef {
   serverId: string;
@@ -17,6 +18,7 @@ export interface NativeReplyOutcome {
   stopReason: string;
   canPrefill: boolean;
   thinkingSignature: string;
+  title?: string;
 }
 
 export interface NativeReplyPrefill {
@@ -37,6 +39,8 @@ export interface NativeChatConfig {
   thinking?: boolean;
   search?: boolean;
   prefill?: NativeReplyPrefill;
+  omitExtended?: boolean;
+  requestTitle?: boolean;
 }
 
 interface ChatRequestBody {
@@ -72,6 +76,7 @@ interface AnthropicEventDelta {
   thinking?: string;
   signature?: string;
   stop_reason?: string | null;
+  title?: string;
 }
 
 interface AnthropicEventError {
@@ -132,10 +137,61 @@ interface AnthropicRequestBody {
   thinking: AnthropicThinking;
   safety_check: AnthropicSafetyCheck;
   tools?: AnthropicTool[];
+  title?: AnthropicTitle;
+}
+
+interface AnthropicTitle {
+  enabled: boolean;
 }
 
 const DEEPSEEK_ACCOUNT_ORIGIN: string = 'https://api.deepseek.com';
 const DEFAULT_DEEPSEEK_SYSTEM: string = '该助手为DeepSeek，由深度求索公司创造。';
+const MAX_ERROR_BODY_BYTES: number = 8192;
+
+export class NativeModelError extends Error {
+  readonly status: number;
+  readonly receivedContent: boolean;
+  readonly inputLimit: boolean;
+  readonly invalidFile: boolean;
+  readonly fileIds: string[];
+  readonly imageMessageIndex: number;
+  readonly imageBlockIndex: number;
+
+  constructor(message: string, status: number, receivedContent: boolean, apiKey: string, accountToken: string) {
+    super(redactCredentials(message, apiKey, accountToken));
+    this.status = status;
+    this.receivedContent = receivedContent;
+    this.inputLimit = /user input too long.*exceeds max 32768 tokens/i.test(message);
+    this.invalidFile = status === 400 && /file_ids do not exist or are not created under your account|file data not found for file_id|\.source\.file_id: invalid file_id/i.test(message);
+    this.fileIds = this.invalidFile ? Array.from(new Set(message.match(/file-api-[\w-]+/g) ?? [])) : [];
+    const image = /messages\.(\d+)\.content\.(\d+):.*unsupported image/i.exec(message);
+    this.imageMessageIndex = image ? Number(image[1]) : -1;
+    this.imageBlockIndex = image ? Number(image[2]) : -1;
+  }
+}
+
+export function usesExtendedNativeRequest(config: NativeChatConfig, messages: NativeChatMessage[]): boolean {
+  if (config.omitExtended || (!config.accountToken && config.protocol !== 'anthropic')) {
+    return false;
+  }
+  const prompt = messages[messages.length - 1];
+  return !(prompt?.files?.some((file: NativeChatFileRef): boolean => !file.isImage) &&
+    !config.search && !/https?:\/\//i.test(prompt.content));
+}
+
+function httpErrorMessage(bytes: Uint8Array, status: number): string {
+  try {
+    const response = util.TextDecoder.create('utf-8').decodeToString(bytes);
+    const body = JSON.parse(response) as ChatChunk;
+    const message = body?.error?.message ?? body?.message;
+    if (typeof message === 'string' && message.trim()) {
+      return message;
+    }
+  } catch {
+    // A gateway can send an HTML page instead of a structured API error.
+  }
+  return `服务端请求失败 (HTTP ${status})`;
+}
 
 function redactCredentials(message: string, apiKey: string, accountToken: string): string {
   let safeMessage = message;
@@ -201,6 +257,7 @@ class ChatStream {
   private dataLines: string[] = [];
   private done: boolean = false;
   private hasReply: boolean = false;
+  receivedContent: boolean = false;
   private outcome: NativeReplyOutcome = { stopReason: '', canPrefill: true, thinkingSignature: '' };
   private readonly onDelta: (content: string, reasoning: string) => void;
   private readonly protocol: 'openai' | 'anthropic';
@@ -311,6 +368,7 @@ class ChatStream {
     const reasoning = typeof reasoningValue === 'string' ? reasoningValue : '';
     if (content || reasoning) {
       this.hasReply = true;
+      this.receivedContent = true;
       this.onDelta(content, reasoning);
     }
   }
@@ -332,11 +390,17 @@ class ChatStream {
     }
     const delta = event.delta;
     const block = event.type === 'content_block_start' ? event.content_block : undefined;
+    if (event.type === 'content_block_start') {
+      this.receivedContent = true;
+    }
     if (block && ['tool_use', 'server_tool_use', 'web_search_tool_result', 'web_fetch_tool_result'].includes(block.type ?? '')) {
       this.outcome.canPrefill = false;
     }
     if (event.type === 'message_delta' && delta?.stop_reason) {
       this.outcome.stopReason = delta.stop_reason;
+      if ((delta.stop_reason === 'end_turn' || delta.stop_reason === 'max_tokens') && typeof delta.title === 'string') {
+        this.outcome.title = delta.title.trim();
+      }
     }
     if (block?.type === 'thinking') {
       this.outcome.thinkingSignature = block.signature ?? '';
@@ -370,7 +434,7 @@ function anthropicMessage(message: NativeChatMessage): AnthropicChatMessage {
 }
 
 export class NativeChatClient {
-  private settleRequest?: (error?: Error) => void;
+  private settleRequest?: (error?: Error | NativeModelError) => void;
 
   cancel(): void {
     this.settleRequest?.();
@@ -391,6 +455,9 @@ export class NativeChatClient {
     const model = (accountToken ? 'deepseek-flash' : config.model).trim();
     if (!model) {
       throw new Error('请输入模型名称');
+    }
+    if (!apiKey && !accountToken && !allowsKeylessNativeApi(config.baseUrl, protocol)) {
+      throw new Error('请输入 API Key');
     }
     if (/[\r\n]/.test(apiKey)) {
       throw new Error('API 密钥中不能包含换行');
@@ -416,15 +483,12 @@ export class NativeChatClient {
       if (config.search) {
         tools.push({ type: 'deepseek_web_search', name: 'deepseek_web_search' });
       }
-      const withDocuments = messages.some((message: NativeChatMessage): boolean =>
-        message.files?.some((file: NativeChatFileRef): boolean => !file.isImage) ?? false);
       const withImages = messages.some((message: NativeChatMessage): boolean =>
         message.files?.some((file: NativeChatFileRef): boolean => file.isImage) ?? false);
       if (withImages) {
         headers['anthropic-beta'] = 'files-api-2025-04-14';
       }
-      const lastPrompt = messages.length ? messages[messages.length - 1].content : '';
-      const omitExtended = withDocuments && !config.search && !/https?:\/\//i.test(lastPrompt);
+      const extended = usesExtendedNativeRequest(config, messages);
       const anthropicMessages = messages.map<AnthropicChatMessage>(anthropicMessage);
       const prefill = config.prefill;
       if (prefill) {
@@ -445,11 +509,13 @@ export class NativeChatClient {
         messages: anthropicMessages,
         stream: true,
         thinking: { type: config.thinking ? 'enabled' : 'disabled' },
-        safety_check: { level: omitExtended ? 'low' : 'high' },
-        tools: omitExtended ? undefined : tools,
+        safety_check: { level: extended ? 'high' : 'low' },
+        tools: extended ? tools : undefined,
+        title: extended && config.requestTitle ? { enabled: true } : undefined,
       } as AnthropicRequestBody;
     } else {
-      const textMessages = messages.filter((message: NativeChatMessage): boolean => !!message.content)
+      const textMessages = messages.filter((message: NativeChatMessage): boolean =>
+        !!message.content && (message.role === 'user' || message.role === 'assistant'))
         .map<NativeChatMessage>((message: NativeChatMessage): NativeChatMessage => ({
           role: message.role, content: message.content,
         }));
@@ -463,13 +529,14 @@ export class NativeChatClient {
       header: headers,
       extraData: JSON.stringify(body),
       usingCache: false,
+      usingProxy: apiKey || accountToken ? undefined : false,
       maxRedirects: 0,
       connectTimeout: 15000,
       readTimeout: 300000,
     };
     const request = http.createHttp();
     return new Promise<NativeReplyOutcome>((resolve, reject) => {
-      const settle = (error?: Error): void => {
+      const settle = (error?: Error | NativeModelError): void => {
         if (this.settleRequest !== settle) {
           return;
         }
@@ -490,17 +557,27 @@ export class NativeChatClient {
           onDelta(content, reasoning);
         }
       }, protocol, onAnthropicEvent);
+      const errorBody = new Uint8Array(MAX_ERROR_BODY_BYTES);
+      let errorBodyLength = 0;
+      let streamError: string = '';
       this.settleRequest = settle;
       try {
         request.on('dataReceive', (bytes: ArrayBuffer): void => {
           if (this.settleRequest !== settle) {
             return;
           }
+          const copied = Math.min(MAX_ERROR_BODY_BYTES - errorBodyLength, bytes.byteLength);
+          if (copied > 0) {
+            errorBody.set(new Uint8Array(bytes, 0, copied), errorBodyLength);
+            errorBodyLength += copied;
+          }
+          if (streamError) {
+            return;
+          }
           try {
             stream.push(bytes);
           } catch (error) {
-            const message = error instanceof Error ? error.message : '无法读取模型回复';
-            settle(new Error(redactCredentials(message, apiKey, accountToken)));
+            streamError = error instanceof Error ? error.message : '无法读取模型回复';
           }
         });
         request.requestInStream(endpoint, options).then((status: number): void => {
@@ -508,7 +585,12 @@ export class NativeChatClient {
             return;
           }
           if (status < 200 || status >= 300) {
-            settle(new Error(`服务端请求失败 (HTTP ${status})`));
+            const message = streamError || httpErrorMessage(errorBody.subarray(0, errorBodyLength), status);
+            settle(new NativeModelError(message, status, stream.receivedContent, apiKey, accountToken));
+            return;
+          }
+          if (streamError) {
+            settle(new NativeModelError(streamError, status, stream.receivedContent, apiKey, accountToken));
             return;
           }
           try {
@@ -516,10 +598,11 @@ export class NativeChatClient {
             settle();
           } catch (error) {
             const message = error instanceof Error ? error.message : '无法读取模型回复';
-            settle(new Error(redactCredentials(message, apiKey, accountToken)));
+            settle(new NativeModelError(message, status, stream.receivedContent, apiKey, accountToken));
           }
         }, (error: BusinessError): void => {
-          settle(new Error(`无法连接模型服务 (${error.code})`));
+          const message = streamError || `无法连接模型服务 (${error.code})`;
+          settle(new NativeModelError(message, 0, stream.receivedContent, apiKey, accountToken));
         });
       } catch {
         settle(new Error('无法发起模型请求'));

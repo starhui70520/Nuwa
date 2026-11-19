@@ -3,10 +3,12 @@ import { preferences } from '@kit.ArkData';
 import { asset } from '@kit.AssetStoreKit';
 import { util } from '@kit.ArkTS';
 import { BusinessError } from '@kit.BasicServicesKit';
+import { defaultNativeLocale, NativeLocale, NativeUserLocation, restoreNativeLocation } from './NativeLocation';
 
 export type NativeApiProtocol = 'openai' | 'anthropic';
 export type NativeAuthMode = 'api-key' | 'deepseek-account';
 export type NativeTheme = 'system' | 'light' | 'dark';
+export type NativeManualPreference = 'locale' | 'location';
 export const NATIVE_CHAT_FONT_SIZES: number[] = [12, 14, 16, 18, 20, 22];
 
 /** User-configurable settings. API credentials are held separately in Asset Store Kit. */
@@ -16,6 +18,8 @@ export interface NativeSettings {
   model: string;
   protocol: NativeApiProtocol;
   authMode: NativeAuthMode;
+  locale: NativeLocale;
+  location: NativeUserLocation | null;
   theme: NativeTheme;
   chatFontSize: number;
   attachmentBinding: string;
@@ -114,6 +118,8 @@ export class NativeSettingsController {
     const model = await store.get('model', DEFAULT_MODEL) as string;
     const protocol = await store.get('protocol', 'openai') as string;
     const authMode = await store.get('authMode', 'api-key') as string;
+    const locale = await store.get('locale', '') as string;
+    const location = restoreNativeLocation(await store.get('location', 'null') as string);
     const theme = await store.get('theme', 'system') as string;
     const chatFontSize = await store.get('chatFontSize', 16) as number;
     const binding = await store.get('attachmentBinding', '') as string;
@@ -129,6 +135,8 @@ export class NativeSettingsController {
       model,
       protocol: resolvedProtocol,
       authMode: authMode === 'deepseek-account' ? 'deepseek-account' : 'api-key',
+      locale: locale === 'zh-CN' || locale === 'en-US' ? locale : defaultNativeLocale(),
+      location,
       theme: theme === 'dark' || theme === 'light' ? theme : 'system',
       chatFontSize: NATIVE_CHAT_FONT_SIZES.includes(chatFontSize) ? chatFontSize : 16,
       attachmentBinding: binding || util.generateRandomUUID(true),
@@ -138,7 +146,8 @@ export class NativeSettingsController {
     };
   }
 
-  async save(context: common.UIAbilityContext, settings: NativeSettings): Promise<void> {
+  async save(context: common.UIAbilityContext, settings: NativeSettings,
+    manualPreference?: NativeManualPreference): Promise<void> {
     const operation = serializedWrites.then(async (): Promise<void> => {
       const store = await preferences.getPreferences(context, PREFERENCES_NAME);
       const credential = await readCredential();
@@ -152,7 +161,7 @@ export class NativeSettingsController {
       // If a caller changes endpoint/protocol while retaining the same key, keep
       // the old binding. load() will hide that credential until the user enters
       // a new key for the new endpoint.
-      await Promise.all([
+      const writes = [
         store.put('baseUrl', settings.baseUrl),
         store.put('model', settings.model),
         store.put('protocol', settings.protocol),
@@ -163,7 +172,14 @@ export class NativeSettingsController {
         store.put('thinking', settings.thinking),
         store.put('search', settings.search),
         store.put('ttsMuted', settings.ttsMuted),
-      ]);
+      ];
+      // Changing other settings must preserve both system defaults and the saved location hierarchy.
+      if (manualPreference === 'locale') {
+        writes.push(store.put('locale', settings.locale));
+      } else if (manualPreference === 'location') {
+        writes.push(store.put('location', JSON.stringify(settings.location)));
+      }
+      await Promise.all(writes);
       await store.flush();
     });
     serializedWrites = operation.catch(() => {});

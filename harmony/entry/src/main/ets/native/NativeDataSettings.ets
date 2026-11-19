@@ -1,6 +1,9 @@
 /** Native equivalent of the tagged Android data-management settings page. */
+import { NativeLocale } from './NativeLocation';
+
 @Component
 export struct NativeDataSettings {
+  @Prop locale: NativeLocale = 'zh-CN';
   @Prop busy: boolean = false;
   @Prop sessionCount: number = 0;
 
@@ -9,6 +12,10 @@ export struct NativeDataSettings {
   onDeleteAll: () => void = () => {};
   onShareImport: () => void = () => {};
   onMigration: () => void = () => {};
+
+  private text(chinese: string, english: string): string {
+    return this.locale === 'zh-CN' ? chinese : english;
+  }
 
   @Builder
   private actionButton(label: string, variant: string, enabled: boolean, action: () => void) {
@@ -59,33 +66,37 @@ export struct NativeDataSettings {
     Column({ space: 12 }) {
       Column({ space: 0 }) {
         this.settingRow(
-          '一键迁移 DeepSeek 历史',
-          '登录官方网页端自动触发导出并合并到本机',
-          this.busy ? '处理中…' : '一键导入',
+          this.text('一键迁移 DeepSeek 历史', 'One-Click DeepSeek Migration'),
+          this.text('登录官方网页端自动触发导出并合并到本机',
+            'Sign in to DeepSeek web to export and merge chats locally.'),
+          this.busy ? this.text('处理中…', 'Working…') : this.text('一键导入', 'Import'),
           'primary',
           !this.busy,
           this.onMigration,
         )
         this.settingRow(
-          '通过分享链接导入',
-          '粘贴 DeepSeek 分享链接（如 chat.deepseek.com/share/...）直接导入并继续对话',
-          '导入链接',
+          this.text('通过分享链接导入', 'Import from share link'),
+          this.text('粘贴 DeepSeek 分享链接（如 chat.deepseek.com/share/...）直接导入并继续对话',
+            'Paste a DeepSeek share link (e.g. chat.deepseek.com/share/...) to import and continue the chat.'),
+          this.text('导入链接', 'Import link'),
           'outlined',
           !this.busy,
           this.onShareImport,
         )
         this.settingRow(
-          '导入历史对话',
-          '按会话 ID 增量合并导入，保留已有本地对话与附件，支持 DeepSeek 导出的 ZIP 文件。',
-          this.busy ? '处理中…' : '↑ 上传',
+          this.text('导入历史对话', 'Import chat history'),
+          this.text('按会话 ID 增量合并导入，保留已有本地对话与附件，支持 DeepSeek 导出的 ZIP 文件。',
+            'Merge chats by session ID while keeping existing local chats and attachments. Supports DeepSeek ZIP exports.'),
+          this.busy ? this.text('处理中…', 'Working…') : this.text('↑ 上传', '↑ Upload'),
           'outlined',
           !this.busy,
           this.onImport,
         )
         this.settingRow(
-          '导出所有历史对话',
-          '包含所有历史对话及本地图片原件；其他附件仅保留文件信息，不包含 API Key。',
-          this.busy ? '处理中…' : '↓ 下载',
+          this.text('导出所有历史对话', 'Export all chat history'),
+          this.text('包含所有历史对话及本地图片原件；其他附件仅保留文件信息，不包含 API Key。',
+            'Includes all chats and locally stored images. Other attachments keep file details only. API keys are excluded.'),
+          this.busy ? this.text('处理中…', 'Working…') : this.text('↓ 下载', '↓ Export'),
           'outlined',
           !this.busy && this.sessionCount > 0,
           this.onExport,
@@ -98,9 +109,10 @@ export struct NativeDataSettings {
 
       Column({ space: 0 }) {
         this.settingRow(
-          '删除所有对话',
-          '删除后，所有对话都将被清空且无法找回。本地保存的附件及未发送的草稿也将被删除。',
-          this.busy ? '处理中…' : '删除',
+          this.text('删除所有对话', 'Delete all chats'),
+          this.text('删除后，所有对话都将被清空且无法找回。本地保存的附件及未发送的草稿也将被删除。',
+            'All chats will be cleared permanently. Locally saved attachments and unsent drafts will also be deleted.'),
+          this.busy ? this.text('处理中…', 'Working…') : this.text('删除', 'Delete'),
           'danger',
           !this.busy && this.sessionCount > 0,
           this.onDeleteAll,

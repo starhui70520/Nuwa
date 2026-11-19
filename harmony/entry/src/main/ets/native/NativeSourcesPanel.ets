@@ -1,5 +1,7 @@
+import { nativeIconTint } from './NativeIconTint';
 import { common } from '@kit.AbilityKit';
 import { NativeChatSource, safeNativeSourceUrl } from './NativeChatSources';
+import { NativeLocale } from './NativeLocation';
 
 function sourceDate(value: string | null): string {
   if (!value) {
@@ -15,9 +17,14 @@ function sourceDate(value: string | null): string {
 
 @Component
 export struct NativeSourcesPanel {
+  @Prop locale: NativeLocale = 'zh-CN';
   @Prop sources: NativeChatSource[] = [];
   @Prop title: string = '参考资料';
   onClose: () => void = () => {};
+
+  private text(chinese: string, english: string): string {
+    return this.locale === 'zh-CN' ? chinese : english;
+  }
 
   private async openSource(source: NativeChatSource): Promise<void> {
     const href = safeNativeSourceUrl(source.url);
@@ -28,7 +35,7 @@ export struct NativeSourcesPanel {
       const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
       await context.openLink(href, { appLinkingOnly: false });
     } catch {
-      this.getUIContext().getPromptAction().showToast({ message: '无法打开链接' });
+      this.getUIContext().getPromptAction().showToast({ message: this.text('无法打开链接', 'Unable to open link') });
     }
   }
 
@@ -59,7 +66,7 @@ export struct NativeSourcesPanel {
         }
         .layoutWeight(1).alignItems(HorizontalAlign.Start)
         Image($r('app.media.native_chevron_right')).width(14).height(14)
-          .fillColor($r('app.color.native_chat_caption'))
+          .colorFilter(nativeIconTint($r('app.color.native_chat_caption')))
       }
       .width('100%').alignItems(VerticalAlign.Center)
     }
@@ -71,11 +78,12 @@ export struct NativeSourcesPanel {
   build() {
     Column({ space: 12 }) {
       Row() {
-        Text(this.title).layoutWeight(1).fontSize(18).fontWeight(FontWeight.Medium)
+        Text(this.title === '参考资料' ? this.text('参考资料', 'Sources') : this.title)
+          .layoutWeight(1).fontSize(18).fontWeight(FontWeight.Medium)
           .fontColor($r('app.color.native_chat_primary'))
         Button('×', { type: ButtonType.Normal, buttonStyle: ButtonStyleMode.TEXTUAL }).width(38).height(36)
           .fontSize(24).fontColor($r('app.color.native_chat_secondary')).padding(0)
-          .accessibilityText('关闭').onClick(() => { this.onClose(); })
+          .accessibilityText(this.text('关闭', 'Close')).onClick(() => { this.onClose(); })
       }
       .width('100%').padding({ left: 2 })
       List({ space: 8 }) {
