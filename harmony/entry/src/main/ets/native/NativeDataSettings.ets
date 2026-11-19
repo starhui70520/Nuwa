@@ -1,5 +1,6 @@
 /** Native equivalent of the tagged Android data-management settings page. */
 import { NativeLocale } from './NativeLocation';
+import { NativeMigrationIntent } from './NativeMigrationStrategy';
 
 @Component
 export struct NativeDataSettings {
@@ -125,5 +126,75 @@ export struct NativeDataSettings {
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
+  }
+}
+
+@Component
+export struct NativeMigrationChoices {
+  @Prop locale: NativeLocale = 'zh-CN';
+  @Prop compact: boolean = false;
+  onChoose: (intent: NativeMigrationIntent) => void = (_intent: NativeMigrationIntent) => {};
+  onDismiss: () => void = () => {};
+
+  private label(chinese: string, english: string): string {
+    return this.locale === 'en-US' ? english : chinese;
+  }
+
+  @Builder
+  private choice(title: string, primary: boolean, intent: NativeMigrationIntent) {
+    Button({ type: ButtonType.Capsule }) {
+      Text(title)
+        .fontSize(14)
+        .fontWeight(FontWeight.Medium)
+        .textAlign(TextAlign.Center)
+        .fontColor(primary ? Color.White : $r('app.color.native_chat_primary'))
+    }
+    .width('100%')
+    .constraintSize({ minHeight: this.compact ? 36 : 42 })
+    .padding({ left: 10, right: 10, top: 8, bottom: 8 })
+    .backgroundColor(primary ? $r('app.color.native_chat_blue') : Color.Transparent)
+    .border({ width: primary ? 0 : 1, color: $r('app.color.native_chat_stroke') })
+    .onClick(() => { this.onChoose(intent); })
+  }
+
+  build() {
+    Column({ space: this.compact ? 8 : 12 }) {
+      Row({ space: 6 }) {
+        Text(this.label('选择导入方式', 'Choose Import Mode'))
+          .layoutWeight(1)
+          .fontSize(this.compact ? 16 : 18)
+          .fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.native_chat_primary'))
+        Button('×', { buttonStyle: ButtonStyleMode.TEXTUAL })
+          .width(33).height(33).padding(0).fontSize(23)
+          .fontColor($r('app.color.native_chat_secondary'))
+          .accessibilityText(this.label('关闭', 'Close'))
+          .onClick(this.onDismiss)
+      }
+      .width('100%')
+      Text(this.label(
+        '如果当前账号在 DeepSeek 又有新对话，请选择「重新导出并更新」；如需导入其他账号记录，请选择「切换其他账号」。',
+        'Choose "Re-export & Update" if you have new chats in DeepSeek on this account, or switch to another DeepSeek account.'))
+        .width('100%')
+        .fontSize(this.compact ? 12 : 13)
+        .lineHeight(this.compact ? 16 : 20)
+        .fontColor($r('app.color.native_chat_secondary'))
+      Column({ space: this.compact ? 7 : 10 }) {
+        this.choice(this.label('重新导出并更新（当前账号）', 'Re-export & Update (Current Account)'), true,
+          { clearSession: false, forceReExport: true })
+        this.choice(this.label('直接下载上次导出（当前账号）', 'Download Previous Export (Current Account)'), false,
+          { clearSession: false, forceReExport: false })
+        this.choice(this.label('切换其他账号', 'Switch Account'), false,
+          { clearSession: true, forceReExport: false })
+      }
+      .width('100%')
+    }
+    .width('92%')
+    .constraintSize({ maxWidth: 400 })
+    .padding(this.compact ? 12 : 18)
+    .borderRadius(24)
+    .backgroundColor($r('app.color.native_chat_surface'))
+    .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+    .shadow({ radius: 22, color: '#26000000', offsetY: 9 })
   }
 }

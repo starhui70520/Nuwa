@@ -30,7 +30,6 @@ interface MarkdownBlock {
   lang?: string;
   closed?: boolean;
   checked?: boolean;
-  source?: string;
   math?: NativeMathNode;
 }
 
@@ -40,8 +39,6 @@ interface InlinePart {
   code: boolean;
   italic: boolean;
   strike: boolean;
-  image?: boolean;
-  source?: string;
   target?: string;
   citation?: number;
   math?: NativeMathSpan[];
@@ -62,6 +59,8 @@ interface NativeRenderedFormula {
 export struct NativeMarkdown {
   @Prop @Watch('scheduleMathPictures') content: string = '';
   @Prop @Watch('scheduleMathPictures') fontScale: number = 1;
+  @Prop @Watch('scheduleMathPictures') muted: boolean = false;
+  @Prop @Watch('scheduleMathPictures') disableLinks: boolean = false;
   @Prop hasCitations: boolean = false;
   @Prop locale: NativeLocale = 'zh-CN';
   @Prop @Watch('scheduleMathPictures') theme: NativeTheme = 'system';
@@ -72,6 +71,7 @@ export struct NativeMarkdown {
   @State private mathPictures: NativeRenderedFormula[] = [];
   @State private contentWidth: number = 0;
   private cachedCitationMode: boolean = false;
+  private cachedLinkMode: boolean = false;
   private cachedContent: string = '\u0000';
   private cachedBlocks: MarkdownBlock[] = [];
   private inlineCache: Map<string, InlinePart[]> = new Map<string, InlinePart[]>();
@@ -95,7 +95,16 @@ export struct NativeMarkdown {
     clearTimeout(this.mathTimer);
   }
 
+  private bodySize(): number {
+    return this.muted ? 14 : 16;
+  }
+
+  private bodyColor(): Resource {
+    return this.muted ? $r('app.color.native_chat_secondary') : $r('app.color.native_chat_primary');
+  }
+
   private headingSize(level: number): number {
+    if (this.muted) return this.bodySize();
     return level === 1 ? 24 : level === 2 ? 22 : level === 3 ? 20 : 16;
   }
 
@@ -105,14 +114,16 @@ export struct NativeMarkdown {
     this.mathDensity = Math.round(Math.min(3.5, Math.max(1, density)) * 100) / 100;
     this.mathFontRatio = context.fp2px(16) / context.vp2px(16);
     if (this.theme === 'dark' || this.theme === 'light') {
-      this.mathColor = this.theme === 'dark' ? '#F9FAFB' : '#0F1115';
+      this.mathColor = this.muted ? (this.theme === 'dark' ? '#CFD3D6' : '#61666B') :
+        (this.theme === 'dark' ? '#F9FAFB' : '#0F1115');
       return;
     }
+    const fallback = this.muted ? 0x61666B : 0x0F1115;
     try {
-      const color = context.getHostContext()?.resourceManager.getColorSync($r('app.color.native_chat_primary').id);
-      this.mathColor = '#' + ((color ?? 0x0F1115) & 0xFFFFFF).toString(16).padStart(6, '0');
+      const color = context.getHostContext()?.resourceManager.getColorSync(this.bodyColor().id);
+      this.mathColor = '#' + ((color ?? fallback) & 0xFFFFFF).toString(16).padStart(6, '0');
     } catch {
-      this.mathColor = '#0F1115';
+      this.mathColor = '#' + fallback.toString(16).padStart(6, '0');
     }
   }
 
@@ -136,7 +147,7 @@ export struct NativeMarkdown {
     const entries = new Map<string, NativeMathPictureRequest>();
     for (const block of this.blocks()) {
       if (block.kind === 'math') {
-        const request = this.mathRequest(block.text, 16, true);
+        const request = this.mathRequest(block.text, this.bodySize(), true);
         entries.set(nativeMathPictureKey(request), request);
       } else if (block.kind === 'heading') {
         this.collectInlinePictures(entries, '**' + block.text + '**', this.headingSize(block.level));
@@ -144,11 +155,12 @@ export struct NativeMarkdown {
         const rows = block.rows ?? [];
         for (let index = 0; index < rows.length; index++) {
           for (const cell of rows[index]) {
-            this.collectInlinePictures(entries, index === 0 && cell ? '**' + cell + '**' : cell, index === 0 ? 14 : 13);
+            this.collectInlinePictures(entries, index === 0 && cell ? '**' + cell + '**' : cell,
+              this.muted || index === 0 ? 14 : 13);
           }
         }
       } else if (block.kind === 'paragraph' || block.kind === 'list' || block.kind === 'quote') {
-        this.collectInlinePictures(entries, block.text, 16);
+        this.collectInlinePictures(entries, block.text, this.bodySize());
       }
     }
     return entries;
@@ -213,7 +225,7 @@ export struct NativeMarkdown {
   private inlineAccessibilityText(value: string): string {
     const parts = this.inlineParts(value);
     if (!this.mathPictures.length || !parts.some((part: InlinePart): boolean => !!part.formula) ||
-      parts.some((part: InlinePart): boolean => !!part.target || !!part.citation || !!part.image)) return '';
+      parts.some((part: InlinePart): boolean => !!part.target || !!part.citation)) return '';
     return parts.map<string>((part: InlinePart): string => part.formula ?? part.text).join('');
   }
 
@@ -304,16 +316,6 @@ export struct NativeMarkdown {
         flushParagraph();
         result.push({ kind: 'hr', text: '', level: 0, ordered: false, marker: '' });
         continue;
-      }
-
-      const imageMatch: RegExpMatchArray | null = trimmed.match(/^!\[([^\]]*)\]\((https:\/\/[^\s)]+)(?:\s+"[^"]*")?\)$/);
-      if (imageMatch) {
-        const safeSource = this.safeImageSource(imageMatch[2]);
-        if (safeSource) {
-          flushParagraph();
-          result.push({ kind: 'image', text: imageMatch[1], source: safeSource, level: 0, ordered: false, marker: '' });
-          continue;
-        }
       }
 
       if (trimmed.startsWith('>')) {
@@ -414,16 +416,18 @@ export struct NativeMarkdown {
     return cells.length > 0 && cells.every((cell: string): boolean => /^:?-{3,}:?$/.test(cell));
   }
 
-  private safeImageSource(target: string): string | null {
+  private imageLinkTarget(target: string): string | undefined {
     try {
-      const parsed = url.URL.parseURL(target);
-      if (parsed.protocol !== 'https:' || !parsed.hostname || parsed.username || parsed.password) {
-        return null;
+      const address = /^[a-z][a-z\d+.-]*:\/\//i.test(target) ? target : 'https://' + target;
+      const parsed = url.URL.parseURL(address);
+      if ((parsed.protocol === 'https:' || parsed.protocol === 'http:') &&
+        parsed.hostname && !parsed.username && !parsed.password) {
+        return parsed.href;
       }
-      return parsed.href;
     } catch {
-      return null;
+      return undefined;
     }
+    return undefined;
   }
 
   private mathPart(value: string, match: NativeMathMatch, strong: boolean, italic: boolean): InlinePart {
@@ -436,6 +440,16 @@ export struct NativeMarkdown {
   }
 
   private addEmphasis(parts: InlinePart[], value: string, strong: boolean, italic: boolean): void {
+    if (this.disableLinks && value.includes('[')) {
+      for (const part of this.inlineParts(value)) {
+        parts.push({
+          text: part.text, strong: strong || part.strong, italic: italic || part.italic,
+          code: part.code, strike: part.strike, target: part.target, citation: part.citation,
+          math: part.math, formula: part.formula,
+        });
+      }
+      return;
+    }
     let offset = 0;
     let match = findNativeInlineMath(value);
     while (match) {
@@ -462,8 +476,9 @@ export struct NativeMarkdown {
   }
 
   private inlineParts(value: string): InlinePart[] {
-    if (this.cachedCitationMode !== this.hasCitations) {
+    if (this.cachedCitationMode !== this.hasCitations || this.cachedLinkMode !== this.disableLinks) {
       this.cachedCitationMode = this.hasCitations;
+      this.cachedLinkMode = this.disableLinks;
       this.inlineCache.clear();
     }
     const cached: InlinePart[] | undefined = this.inlineCache.get(value);
@@ -527,18 +542,17 @@ export struct NativeMarkdown {
         parts.push({ text: '`', strong: false, code: false, italic: false, strike: false });
         rest = rest.substring(1);
       } else if (kind === 'image') {
-        const labelEnd: number = rest.indexOf('](', 2);
-        const urlEnd: number = labelEnd >= 0 ? rest.indexOf(')', labelEnd + 2) : -1;
-        if (labelEnd > 1 && urlEnd > labelEnd + 2) {
-          const label: string = rest.substring(2, labelEnd);
-          const source: string | null = this.safeImageSource(rest.substring(labelEnd + 2, urlEnd));
-          parts.push({ text: label, strong: false, code: false, italic: false, strike: false,
-            image: source !== null, source: source ?? undefined });
-          rest = rest.substring(urlEnd + 1);
+        const label = rest.match(/^!\[([^\]\n]*)\]\(/);
+        const destination = label ? rest.slice(label[0].length).match(
+          /^[ \t]*(?:<([^<>\n]+)>|((?:[^\s()<>]|\([^\s()]*\))+))(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?[ \t]*\)/) : null;
+        if (label && destination) {
+          const target = this.imageLinkTarget(destination[1] ?? destination[2]);
+          parts.push({ text: target ?? label[1], strong: false, code: false, italic: false, strike: false, target });
+          rest = rest.slice(label[0].length + destination[0].length);
           continue;
         }
-        parts.push({ text: '!', strong: false, code: false, italic: false, strike: false });
-        rest = rest.substring(1);
+        parts.push({ text: '![', strong: false, code: false, italic: false, strike: false });
+        rest = rest.substring(2);
       } else if (kind === 'link') {
         if (this.hasCitations) {
           const marker = rest.match(/^\[citation:([1-9][0-9]{0,2})\]/);
@@ -553,8 +567,14 @@ export struct NativeMarkdown {
         const urlEnd: number = labelEnd >= 0 ? rest.indexOf(')', labelEnd + 2) : -1;
         if (labelEnd > 1 && urlEnd > labelEnd + 2) {
           const label: string = rest.substring(1, labelEnd);
-          const destination: string = rest.substring(labelEnd + 2, urlEnd);
-          parts.push({ text: label, strong: false, code: false, italic: false, strike: false, target: destination });
+          if (this.disableLinks) {
+            for (const part of this.inlineParts(label)) {
+              parts.push(part);
+            }
+          } else {
+            parts.push({ text: label, strong: false, code: false, italic: false, strike: false,
+              target: rest.substring(labelEnd + 2, urlEnd) });
+          }
           rest = rest.substring(urlEnd + 1);
           continue;
         }
@@ -772,13 +792,7 @@ export struct NativeMarkdown {
   private inlineText(value: string, size: number, maxWidth: number = 0) {
     Text() {
       ForEach(this.inlineParts(value), (part: InlinePart) => {
-        if (part.image && part.source) {
-          ImageSpan(part.source)
-            .width(72)
-            .height(72)
-            .objectFit(ImageFit.Contain)
-            .verticalAlign(ImageSpanAlignment.CENTER)
-        } else if (part.citation !== undefined) {
+        if (part.citation !== undefined) {
           Span(part.text).fontSize(11 * this.fontScale).fontWeight(FontWeight.Medium)
             .fontColor($r('app.color.native_chat_blue_text')).backgroundColor($r('app.color.native_chat_field'))
             .onClick(() => { this.onCitation(part.citation ?? 0); })
@@ -795,7 +809,7 @@ export struct NativeMarkdown {
               .fontFamily('serif')
               .fontSize(size * this.fontScale * span.scale)
               .baselineOffset(LengthMetrics.fp(size * this.fontScale * span.offset))
-              .fontColor($r('app.color.native_chat_primary'))
+              .fontColor(this.bodyColor())
               .fontStyle(span.italic || part.italic ? FontStyle.Italic : FontStyle.Normal)
               .fontWeight(span.bold || part.strong ? FontWeight.Bold : FontWeight.Regular)
           }, (_span: NativeMathSpan, index: number): string => index.toString())
@@ -803,7 +817,7 @@ export struct NativeMarkdown {
           Span(part.text)
             .fontWeight(part.strong ? FontWeight.Bold : FontWeight.Regular)
             .fontStyle(part.italic ? FontStyle.Italic : FontStyle.Normal)
-            .fontColor(part.target ? $r('app.color.native_chat_blue_text') : $r('app.color.native_chat_primary'))
+            .fontColor(part.target ? $r('app.color.native_chat_blue_text') : this.bodyColor())
             .decoration({ type: part.target ? TextDecorationType.Underline : (part.strike ? TextDecorationType.LineThrough : TextDecorationType.None) })
             .backgroundColor(part.code ? $r('app.color.native_chat_field') : Color.Transparent)
             .onClick(() => { if (part.target) { void this.openLink(part.target); } })
@@ -811,7 +825,7 @@ export struct NativeMarkdown {
       }, (part: InlinePart, index: number): string => `${index}:${part.text}:${part.target ?? ''}:${part.citation ?? 0}`)
     }
     .fontSize(size * this.fontScale)
-    .lineHeight(size * this.fontScale * 1.75)
+    .lineHeight(size * this.fontScale * (this.muted ? 24 / 14 : 1.75))
     .width('100%')
     .accessibilityText(this.inlineAccessibilityText(value))
     .copyOption(CopyOptions.LocalDevice)
@@ -904,17 +918,19 @@ export struct NativeMarkdown {
         if (block.kind === 'code') {
           this.codeBlock(block, index)
         } else if (block.kind === 'math') {
-          if (this.mathPicture(block.text, 16, true)) {
-            this.displayedFormula(this.mathPicture(block.text, 16, true)!, block.text)
+          if (this.mathPicture(block.text, this.bodySize(), true)) {
+            this.displayedFormula(this.mathPicture(block.text, this.bodySize(), true)!, block.text)
           } else {
-            NativeMathEquation({ expression: block.math ?? null, source: block.text, formulaFontSize: 17 * this.fontScale })
+            NativeMathEquation({ expression: block.math ?? null, source: block.text,
+              formulaFontSize: (this.bodySize() + 1) * this.fontScale })
           }
         } else if (block.kind === 'heading') {
           this.inlineText(`**${block.text}**`, this.headingSize(block.level))
         } else if (block.kind === 'list') {
           Row({ space: 8 }) {
-            Text(block.marker).fontSize(16).width(22).fontColor($r('app.color.native_chat_secondary'))
-            this.inlineText(block.text, 16)
+            Text(block.marker).fontSize(this.muted ? this.bodySize() * this.fontScale : 16).width(22)
+              .fontColor($r('app.color.native_chat_secondary'))
+            this.inlineText(block.text, this.bodySize())
           }
           .width('100%')
           .padding({ left: block.level, top: 3, bottom: 3 })
@@ -924,28 +940,10 @@ export struct NativeMarkdown {
             .height(1)
             .margin({ top: 8, bottom: 8 })
             .backgroundColor($r('app.color.native_chat_stroke'))
-        } else if (block.kind === 'image' && block.source) {
-          Column() {
-            Image(block.source)
-              .width('100%')
-              .height(220)
-              .objectFit(ImageFit.Contain)
-              .draggable(false)
-            if (block.text.length > 0) {
-              Text(block.text)
-                .fontSize(12 * this.fontScale)
-                .fontColor($r('app.color.native_chat_secondary'))
-                .width('100%')
-            }
-          }
-          .width('100%')
-          .padding(8)
-          .backgroundColor($r('app.color.native_chat_field'))
-          .borderRadius(10)
         } else if (block.kind === 'quote') {
           Row({ space: 14 }) {
             Text('│').fontSize(16).fontColor($r('app.color.native_chat_caption'))
-            this.inlineText(block.text, 16)
+            this.inlineText(block.text, this.bodySize())
           }
           .width('100%')
         } else if (block.kind === 'table') {
@@ -955,7 +953,8 @@ export struct NativeMarkdown {
                 Row({ space: 0 }) {
                   ForEach(row, (cell: string, cellIndex: number) => {
                     Column() {
-                      this.inlineText(rowIndex === 0 && cell.length > 0 ? `**${cell}**` : cell, rowIndex === 0 ? 14 : 13, 104)
+                      this.inlineText(rowIndex === 0 && cell.length > 0 ? `**${cell}**` : cell,
+                        this.muted || rowIndex === 0 ? 14 : 13, 104)
                     }
                     .width(128)
                     .padding({ left: cellIndex === 0 ? 0 : 12, right: 12, top: 10, bottom: 10 })
@@ -970,7 +969,7 @@ export struct NativeMarkdown {
           .scrollable(ScrollDirection.Horizontal)
           .scrollBar(BarState.Off)
         } else {
-          this.inlineText(block.text, 16)
+          this.inlineText(block.text, this.bodySize())
         }
       }, (block: MarkdownBlock, index: number): string => this.blockKey(block, index))
     }

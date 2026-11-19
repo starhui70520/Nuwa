@@ -2,6 +2,7 @@ import { nativeIconTint } from '../native/NativeIconTint';
 import { common, ConfigurationConstant, wantConstant } from '@kit.AbilityKit';
 import { KeyboardAvoidMode, LengthMetrics } from '@kit.ArkUI';
 import { url, util } from '@kit.ArkTS';
+import { preferences } from '@kit.ArkData';
 import { webview } from '@kit.ArkWeb';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { filePreview } from '@kit.PreviewKit';
@@ -11,11 +12,13 @@ import {
 } from '../native/NativeChatClient';
 import { loadNativeAccount, saveNativeAccount } from '../native/NativeAccountStore';
 import { allowsKeylessNativeApi, NativeApiCredential, verifyNativeApiCredential } from '../native/NativeApiCredential';
-import { NativeDataSettings } from '../native/NativeDataSettings';
+import { NativeDataSettings, NativeMigrationChoices } from '../native/NativeDataSettings';
 import { NativeDeepSeekAccount, NativeDeepSeekAccountController, NativeDeepSeekBalance } from '../native/NativeDeepSeekAccount';
 import { NativeOnboarding, NativeOnboardingView } from '../native/NativeOnboarding';
 import { NativeAttachment, NativeChatAttachments } from '../native/NativeChatAttachments';
-import { hydrateImportedAttachment, importedAttachmentPreview, NativeChatBackup, mergeChatBackup } from '../native/NativeChatBackup';
+import {
+  hydrateImportedAttachment, importedAttachmentPreview, NativeChatBackup, mergeChatBackup, nativeArchivedReplyTemplate,
+} from '../native/NativeChatBackup';
 import { NativeChatCitation, NativeChatSource, NativeChatSources } from '../native/NativeChatSources';
 import { NativeSourcesPanel } from '../native/NativeSourcesPanel';
 import { NativeToolTimeline, NativeToolTimelineStep, NativeToolTimelineView } from '../native/NativeToolTimeline';
@@ -32,6 +35,8 @@ import { NativeMathRendererHost } from '../native/NativeMathRendererHost';
 import { NativeDraftStorage, NativeStoredDraft } from '../native/NativeDraftStorage';
 import { CHAT_PAGE_SIZE, nativeMessageRange, NativeMessageList, NativeMessageRange, NativeMessageRow } from '../native/NativeMessageList';
 import { NativeMigrationPrompt } from '../native/NativeMigrationPrompt';
+import { NativeMigrationIntent } from '../native/NativeMigrationStrategy';
+import { hasPendingNativeMigration } from '../native/NativePendingMigration';
 import { describeNativeReplyFailure, nativeRefusalText, NativeReplyNotice } from '../native/NativeReplyNotice';
 import { isOfficialNativeReadLinkRoute, NativeReadLink, NativeReadLinkCollector, useNativeReadLink } from '../native/NativeReadLinks';
 import {
@@ -44,7 +49,7 @@ import {
   checkNativeUpdate, fetchNativeReleaseHistory, getNativeCurrentVersion, isUpdateSnoozed, NativeReleaseHistoryItem,
   NativeUpdateCheck, NativeUpdatePreferences, NativeUpdateSchedule, UPDATE_POLL_MS, UPDATE_RESUME_MS,
 } from '../native/NativeUpdates';
-import { importNativeShareLink, nativeShareTemplate } from '../native/NativeShareImport';
+import { importNativeShareLink } from '../native/NativeShareImport';
 import { openNuwaPrivacyPolicy } from '../native/PrivacyPolicy';
 import { HarmonySpeechRecognition } from '../speech/HarmonySpeechRecognition';
 import { HarmonyTextToSpeech } from '../speech/HarmonyTextToSpeech';
@@ -72,6 +77,8 @@ interface NativeDraft {
 }
 
 const EMPTY_TIMELINE: NativeToolTimelineView = { steps: [], answer: '', answerOffset: 0 };
+const MIGRATION_PREFERENCES = 'nuwa_native_migration';
+const MIGRATION_USED_KEY = 'one_click_used';
 
 @Entry
 @Component
@@ -99,6 +106,7 @@ struct NativeChat {
   @State private selecting: boolean = false;
   @State private settingsVisible: boolean = false;
   @State private migrationPromptVisible: boolean = false;
+  @State private migrationChoiceVisible: boolean = false;
   @State private transcribing: boolean = false;
   @State private compactToolsOpen: boolean = false;
   @State private onboardingView: NativeOnboardingView = 'home';
@@ -160,6 +168,8 @@ struct NativeChat {
   private balanceFetchedAt: number = 0;
   private balanceBinding: string = '';
   private migrationInProgress: boolean = false;
+  private migrationUsed: boolean = false;
+  private coldMigrationChecked: boolean = false;
   private readonly scroller = new Scroller();
   private readonly messageList = new NativeMessageList();
   private messagePath: NativeConversationMessage[] = [];
@@ -272,6 +282,8 @@ struct NativeChat {
       this.sourcesVisible = false;
     } else if (this.shareImportVisible) {
       this.closeShareImport();
+    } else if (this.migrationChoiceVisible) {
+      this.migrationChoiceVisible = false;
     } else if (this.migrationPromptVisible) {
       if (!this.backupBusy) this.dismissMigrationPrompt();
     } else if (this.settingsVisible) {
@@ -321,9 +333,14 @@ struct NativeChat {
         this.toast(this.label('无法读取已保存的服务设置', 'Unable to load the saved API configuration'));
       }
       await this.loadDrafts(context);
+      await this.loadMigrationUsed(context);
       this.loaded = true;
       this.applyTheme();
       this.scrollToLatest();
+      if (!this.coldMigrationChecked) {
+        this.coldMigrationChecked = true;
+        if (hasPendingNativeMigration(context)) void this.openHistoryMigration();
+      }
     } catch {
       this.status = this.label('无法读取本地会话', "Unable to load local chats");
     }
@@ -1408,7 +1425,7 @@ struct NativeChat {
         if (!this.deletingSessions) {
           void this.save(context);
         }
-        if (!error && !reply.stopped && !this.settings.ttsMuted && this.history.activeId === current.id && message.content) {
+        if (!error && !reply.stopped && !this.settings.ttsMuted && this.history.activeId === current.id) {
           this.readMessage(message);
         }
       }
@@ -1537,11 +1554,13 @@ struct NativeChat {
   }
 
   private readMessage(message: NativeConversationMessage): void {
+    const text = this.assistantResponseText(message);
+    if (!text) return;
     const active = this.readingId === message.id;
     this.speaker.stop();
     this.readingId = active ? '' : message.id;
     if (this.readingId) {
-      this.speaker.speak(message.id, message.content, this.settings.locale, this.speechOptions());
+      this.speaker.speak(message.id, text, this.settings.locale, this.speechOptions());
     }
   }
 
@@ -2059,7 +2078,7 @@ struct NativeChat {
         citations: message().citations ?? [], fontScale: this.settings.chatFontSize / 16, locale: this.settings.locale,
         streaming: message().status === 'pending' || message().status === 'streaming',
         thinking: message().thinking || undefined, stopped: message().status === 'stopped',
-        hasResponse: message().content.length > (message().toolTimeline?.answerOffset ?? 0),
+        hasResponse: !!this.assistantResponseText(message()),
         onSources: (sources: NativeChatSource[]): void => { this.openSources(sources); },
       })
     } else if (message().reasoning) {
@@ -2079,9 +2098,14 @@ struct NativeChat {
           this.collapsedThoughts.filter((messageId: string): boolean => messageId !== id) : [...this.collapsedThoughts, id];
       })
       if (!this.collapsedThoughts.includes(message().id)) {
-        Text(message().reasoning).fontSize(14).lineHeight(22).width('100%').fontColor($r('app.color.native_chat_secondary'))
-          .padding({ left: 12 }).copyOption(CopyOptions.LocalDevice)
-          .border({ width: { left: 2 }, color: $r('app.color.native_chat_stroke') })
+        Column() {
+          NativeMarkdown({
+            content: message().reasoning, fontScale: this.settings.chatFontSize / 16,
+            locale: this.settings.locale, theme: this.settings.theme, muted: true, disableLinks: true, loading: thinking(),
+          })
+        }
+        .width('100%').padding({ left: 12 })
+        .border({ width: { left: 2 }, color: $r('app.color.native_chat_stroke') })
       }
     }
     if (message().content.length > (message().toolTimeline?.answerOffset ?? 0)) {
@@ -2103,14 +2127,22 @@ struct NativeChat {
     if (message.failure) {
       return describeNativeReplyFailure(message.failure, this.settings.locale);
     }
-    return { text: this.shareTemplate(message) || this.label('回复失败，请重试', 'Reply failed. Please try again.') };
+    return { text: this.archivedReplyTemplate(message) || this.label('回复失败，请重试', 'Reply failed. Please try again.') };
   }
 
   private copyableReply(message: NativeConversationMessage): string {
     if (message.stopReason === 'refusal') {
-      return this.shareTemplate(message) || nativeRefusalText(this.settings.locale);
+      return this.archivedReplyTemplate(message) || nativeRefusalText(this.settings.locale);
     }
-    return message.content || (message.status === 'error' ? this.replyNotice(message).text : this.shareTemplate(message));
+    return this.assistantResponseText(message) || (message.status === 'error' ? this.replyNotice(message).text : '');
+  }
+
+  private assistantResponseText(message: NativeConversationMessage): string {
+    if (message.stopReason === 'refusal') return '';
+    const answer = message.content.slice(message.toolTimeline?.answerOffset ?? 0);
+    if (message.status === 'error' || message.status === 'pending' || message.status === 'streaming') return answer;
+    const template = this.archivedReplyTemplate(message);
+    return answer && template ? answer + '\n\n' + template : answer || template;
   }
 
   @Builder
@@ -2149,8 +2181,8 @@ struct NativeChat {
             locale: this.settings.locale, theme: this.settings.theme })
         } else {
           this.replyContent(() => message, () => false)
-          if (message.status !== 'error' && this.shareTemplate(message)) {
-            NativeMarkdown({ content: this.shareTemplate(message), fontScale: this.settings.chatFontSize / 16,
+          if (message.status !== 'error' && this.archivedReplyTemplate(message)) {
+            NativeMarkdown({ content: this.archivedReplyTemplate(message), fontScale: this.settings.chatFontSize / 16,
               locale: this.settings.locale, theme: this.settings.theme })
           }
           this.sourcesSummary(message.sources ?? [])
@@ -2165,7 +2197,7 @@ struct NativeChat {
             this.iconButton($r('app.media.native_copy'), this.label('复制', "Copy"), () => { void this.copy(this.copyableReply(message)); },
               28, 16, $r('app.color.native_chat_secondary'))
           }
-          if (message.content && message.stopReason !== 'refusal') {
+          if (this.assistantResponseText(message)) {
             this.iconButton($r('app.media.native_speaker'), this.readingId === message.id ? this.label('停止朗读', "Stop read-aloud") : this.label('朗读', "Read aloud"),
               () => { this.readMessage(message); }, 28, 16,
               this.readingId === message.id ? $r('app.color.native_chat_blue_text') : $r('app.color.native_chat_secondary'))
@@ -2246,15 +2278,55 @@ struct NativeChat {
     }
   }
 
-  private async openHistoryMigration(): Promise<void> {
+  private async loadMigrationUsed(context: common.UIAbilityContext): Promise<void> {
+    try {
+      const store = await preferences.getPreferences(context, MIGRATION_PREFERENCES);
+      this.migrationUsed = (await store.get(MIGRATION_USED_KEY, false)) === true;
+    } catch {
+      // Chat migration remains available if the preference cannot be read.
+    }
+  }
+
+  private async markMigrationUsed(): Promise<void> {
+    if (this.migrationUsed) return;
+    this.migrationUsed = true;
+    try {
+      const store = await preferences.getPreferences(this.host(), MIGRATION_PREFERENCES);
+      await store.put(MIGRATION_USED_KEY, true);
+      await store.flush();
+    } catch {
+      // The current process still remembers that the migration was launched.
+    }
+  }
+
+  private chooseHistoryMigration(): void {
+    if (this.migrationInProgress) return;
     if (this.backupBusy || this.replies.length > 0) {
       this.toast(this.label('请在回复结束后迁移', 'Migration is available after the reply finishes'));
       return;
     }
+    if (this.migrationUsed || this.history.sessions.length > 0) {
+      this.migrationChoiceVisible = true;
+    } else {
+      void this.openHistoryMigration();
+    }
+  }
+
+  private async openHistoryMigration(intent: NativeMigrationIntent = { clearSession: false, forceReExport: false }): Promise<void> {
+    if (this.migrationInProgress) return;
+    if (this.backupBusy || this.replies.length > 0) {
+      this.toast(this.label('请在回复结束后迁移', 'Migration is available after the reply finishes'));
+      return;
+    }
+    this.migrationChoiceVisible = false;
     this.settingsVisible = false;
     this.migrationInProgress = true;
     try {
-      await this.getUIContext().getRouter().pushUrl({ url: 'pages/Index', params: { migrate: true } });
+      await this.markMigrationUsed();
+      await this.getUIContext().getRouter().pushUrl({
+        url: 'pages/Index',
+        params: { migrate: true, clearSession: intent.clearSession, forceReExport: intent.forceReExport },
+      });
     } catch {
       this.migrationInProgress = false;
       this.toast(this.label('无法打开历史迁移', "Unable to open chat migration"));
@@ -2333,9 +2405,9 @@ struct NativeChat {
     .backgroundColor($r('app.color.native_chat_surface')).backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
   }
 
-  private shareTemplate(message: NativeConversationMessage): string {
+  private archivedReplyTemplate(message: NativeConversationMessage): string {
     const session = this.session();
-    return session ? nativeShareTemplate(session, message.id) : '';
+    return session ? nativeArchivedReplyTemplate(session, message.id) : '';
   }
 
   private async startUpdateChecks(): Promise<void> {
@@ -2762,7 +2834,7 @@ struct NativeChat {
           } else if (this.settingsSection === 'data') {
             NativeDataSettings({
               busy: this.backupBusy, sessionCount: this.history.sessions.length, locale: this.settings.locale,
-              onMigration: () => { void this.openHistoryMigration(); },
+              onMigration: () => { this.chooseHistoryMigration(); },
               onShareImport: () => { this.openShareImport(); },
               onImport: () => { void this.importChatHistory(); },
               onExport: () => { void this.exportChatHistory(); },
@@ -3184,6 +3256,18 @@ struct NativeChat {
         }
         .width('100%').height('100%')
       }
+      if (this.migrationChoiceVisible) {
+        Stack({ alignContent: Alignment.Center }) {
+          Column().width('100%').height('100%').backgroundColor('#66000000')
+            .onClick(() => { this.migrationChoiceVisible = false; })
+          NativeMigrationChoices({
+            locale: this.settings.locale, compact: this.compact() || this.viewportHeight < 500,
+            onChoose: (intent: NativeMigrationIntent) => { void this.openHistoryMigration(intent); },
+            onDismiss: () => { this.migrationChoiceVisible = false; },
+          })
+        }
+        .width('100%').height('100%')
+      }
     }
     .width('100%').height('100%').backgroundColor($r('app.color.native_chat_sidebar')).clip(true)
     .onAreaChange((_old: Area, area: Area): void => {
@@ -3200,6 +3284,7 @@ struct NativeChat {
         .onActionUpdate((event: GestureEvent) => {
           if (!this.wide() && this.authenticated() && !this.settingsVisible && !this.renamingId && !this.authorizing &&
             !this.imagePreview && !this.shareImportVisible && !this.sourcesVisible && !this.migrationPromptVisible &&
+            !this.migrationChoiceVisible &&
             (this.drawerOpen || this.touchStart < 160)) {
             this.drawerDrag = event.offsetX;
           }

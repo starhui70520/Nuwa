@@ -267,9 +267,31 @@ function validateFragment(fragment: ArchiveFragment, sessionId: string, imagePat
   }
 }
 
+let recentTemplateArchive = '';
+const recentArchiveTemplates = new Map<string, string>();
+
 function textFragments(message: ArchiveMessage, type: string): string {
   return message.fragments.filter((fragment: ArchiveFragment): boolean => fragment.type === type)
-    .map((fragment: ArchiveFragment): string => fragment.content ?? '').join(type === 'RESPONSE' ? '' : '\n');
+    .map((fragment: ArchiveFragment): string => fragment.content ?? '')
+    .join(type === 'RESPONSE' || type === 'TEMPLATE_RESPONSE' ? '' : '\n');
+}
+
+export function nativeArchivedReplyTemplate(session: NativeConversation, messageId: string): string {
+  if (!session.archiveJson) return '';
+  if (recentTemplateArchive !== session.archiveJson) {
+    recentTemplateArchive = session.archiveJson;
+    recentArchiveTemplates.clear();
+    try {
+      const origin = JSON.parse(session.archiveJson) as ArchiveOrigin;
+      for (const message of origin.session.messages) {
+        const template = textFragments(message, 'TEMPLATE_RESPONSE');
+        if (template) recentArchiveTemplates.set(message.id.toString(), template);
+      }
+    } catch {
+      recentArchiveTemplates.clear();
+    }
+  }
+  return recentArchiveTemplates.get(messageId) ?? '';
 }
 
 function importedTimeline(message: ArchiveMessage): NativeToolTimelineView | undefined {

@@ -292,9 +292,11 @@ export struct NativeToolTimelinePanel {
             content: this.sourceText(step), fontScale: this.fontScale * 0.85,
             hasCitations: this.citations.length > 0, onCitation: (index: number): void => { this.openCitation(index); },
           })
-        } else if (step.text) {
-          Text(step.text).fontSize(13 * this.fontScale).fontColor($r('app.color.native_chat_secondary'))
-            .width('100%').textAlign(TextAlign.Start).copyOption(CopyOptions.LocalDevice)
+        } else if (step.type === 'thinking' && step.text) {
+          NativeMarkdown({
+            content: step.text, fontScale: this.fontScale, locale: this.locale, muted: true, disableLinks: true,
+            loading: this.streaming && step.active === true,
+          })
         }
       }
       .layoutWeight(1).alignItems(HorizontalAlign.Start)

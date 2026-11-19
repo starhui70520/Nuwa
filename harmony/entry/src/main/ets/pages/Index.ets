@@ -10,17 +10,29 @@ import { HarmonySpeechRecognition } from '../speech/HarmonySpeechRecognition';
 import { HarmonyTextToSpeech } from '../speech/HarmonyTextToSpeech';
 import { NativeChatBackup, mergeChatBackup } from '../native/NativeChatBackup';
 import { NativeChatStorage } from '../native/NativeChatStorage';
+import { MAX_FILE_BACKUP_BYTES } from '../native/NativeBackupZip';
+import {
+  completeNativeMigrationDownload, consumePendingNativeMigration, discardIncompleteNativeMigration,
+  discardPendingNativeMigration, hasPendingNativeMigration, nativeMigrationDownloadPath,
+} from '../native/NativePendingMigration';
+import { buildNativeMigrationExportScript } from '../native/NativeMigrationStrategy';
 import { openNuwaPrivacyPolicy } from '../native/PrivacyPolicy';
 
 interface MigrationRouteParams {
   migrate?: boolean;
+  clearSession?: boolean;
+  forceReExport?: boolean;
 }
 
+const CHAT_ORIGIN = 'https://chat.deepseek.com';
+const CHAT_URL = CHAT_ORIGIN + '/';
 const PLATFORM_ORIGIN = 'https://platform.deepseek.com';
 const CLIENT_VERSION = '0.2.2';
 const APP_WEB_URL = 'resource://rawfile/web/index.html';
 const APP_BRIDGE_PERMISSION =
   '{"javascriptProxyPermission":{"urlPermissionList":[{"scheme":"resource","host":"rawfile","port":"","path":""}]}}';
+const MIGRATION_BRIDGE_PERMISSION =
+  '{"javascriptProxyPermission":{"urlPermissionList":[{"scheme":"https","host":"chat.deepseek.com","port":"","path":""}]}}';
 
 interface PlatformIdProfile {
   name?: string;
@@ -243,6 +255,7 @@ struct Index {
 
   @State private nativeMigration: boolean = false;
   @State private importingMigration: boolean = false;
+  @State private pendingMigrationAvailable: boolean = false;
   private readonly backup = new NativeChatBackup();
   private readonly conversationStorage = new NativeChatStorage();
   @State private migrationVisible: boolean = false;
@@ -257,12 +270,18 @@ struct Index {
   private cachedDeviceId: string = '';
   private migrationSavePath: string = '';
   private migrationFileName: string = 'deepseek_data.zip';
+  private nativeMigrationDownload?: webview.WebDownloadItem;
   private migrationAutoExportTriggered: boolean = false;
+  private migrationForceReExport: boolean = false;
+  private migrationClearSession: boolean = false;
+  private migrationClearingSession: boolean = false;
   private migrationPollTimer: number = -1;
 
   private migrationExportBridge: MigrationExportBridge = new MigrationExportBridge(
     () => {
-      if (this.migrationAutoExportTriggered || !this.migrationVisible) {
+      if (this.migrationAutoExportTriggered || !this.migrationVisible || this.importingMigration ||
+        this.pendingMigrationAvailable ||
+        this.migrationClearSession || this.migrationClearingSession) {
         return;
       }
       this.migrationAutoExportTriggered = true;
@@ -313,12 +332,21 @@ struct Index {
     const params = this.getUIContext().getRouter().getParams() as MigrationRouteParams | undefined;
     if (params?.migrate) {
       this.nativeMigration = true;
+      this.migrationForceReExport = params.forceReExport === true;
+      this.migrationClearSession = params.clearSession === true;
       this.openMigrationOverlay();
+    }
+  }
+
+  onPageShow(): void {
+    if (this.nativeMigration) {
+      void this.importNativeDownload();
     }
   }
 
   aboutToDisappear(): void {
     this.stopMigrationLoginPoll();
+    this.cancelNativeMigrationDownload();
     this.harmonyBridge.destroySpeech();
     try {
       this.controller.deleteJavaScriptRegister('__NUWA_HARMONY__');
@@ -506,7 +534,8 @@ struct Index {
 
   private openMigrationOverlay(): void {
     this.migrationAutoExportTriggered = false;
-    this.migrationStatusText = '请登录 DeepSeek 账号，登录成功后将自动辅助导出';
+    this.migrationStatusText = this.migrationClearSession ? '正在切换账号…' :
+      '请登录 DeepSeek 账号，登录成功后将自动辅助导出';
     this.migrationVisible = true;
     this.startMigrationLoginPoll();
   }
@@ -536,7 +565,9 @@ struct Index {
   }
 
   private checkMigrationLoginState(): void {
-    if (!this.migrationVisible || this.migrationAutoExportTriggered) {
+    if (!this.migrationVisible || this.migrationAutoExportTriggered || this.importingMigration ||
+      this.pendingMigrationAvailable ||
+      this.migrationClearSession || this.migrationClearingSession) {
       return;
     }
     const js = "(function(){"
@@ -557,147 +588,14 @@ struct Index {
   }
 
   private runMigrationAutoExportScript(manualTrigger: boolean): void {
-    if (!this.migrationVisible) {
+    if (!this.migrationVisible || this.importingMigration || this.pendingMigrationAvailable ||
+      this.migrationClearSession || this.migrationClearingSession) {
       return;
     }
     if (manualTrigger) {
       this.migrationStatusText = '正在尝试自动点击导出，请稍候...';
     }
-    const resetJs = manualTrigger
-      ? "if (window.__dsappAutoExportTimer) { clearInterval(window.__dsappAutoExportTimer); window.__dsappAutoExportTimer = null; } window.__dsappAutoExportRunning = false;"
-      : "";
-    const js = "(function(){"
-      + resetJs
-      + "if (window.__dsappAutoExportRunning) return;"
-      + "window.__dsappAutoExportRunning = true;"
-      + "var triggerClick = function(el) {"
-      + "  if (!el) return false;"
-      + "  var target = (el.closest && el.closest('button, [role=\"button\"], [role=\"menuitem\"], [role=\"tab\"], [tabindex=\"0\"], a')) || el;"
-      + "  if (!target || typeof target.click !== 'function') return false;"
-      + "  try { target.scrollIntoView({ block: 'nearest', inline: 'center' }); } catch (e) {}"
-      + "  target.click();"
-      + "  return true;"
-      + "};"
-      + "var findVisibleByText = function(patterns, excludeDanger) {"
-      + "  var nodes = Array.from(document.querySelectorAll('button, [role=\"button\"], [role=\"menuitem\"], [role=\"tab\"], [tabindex=\"0\"], a, li, div, span'));"
-      + "  var best = null;"
-      + "  var bestLen = 999;"
-      + "  var bestArea = 999999999;"
-      + "  for (var i = 0; i < nodes.length; i++) {"
-      + "    var el = nodes[i];"
-      + "    var rect = el.getBoundingClientRect();"
-      + "    if (rect.width <= 0 || rect.height <= 0) continue;"
-      + "    var text = (el.innerText || '').trim();"
-      + "    if (!text || text.length > 32) continue;"
-      + "    if (excludeDanger && /^(删除|Delete)$/i.test(text)) continue;"
-      + "    for (var j = 0; j < patterns.length; j++) {"
-      + "      if (patterns[j].test(text)) {"
-      + "        var area = rect.width * rect.height;"
-      + "        if (text.length < bestLen || (text.length === bestLen && area < bestArea)) {"
-      + "          best = el;"
-      + "          bestLen = text.length;"
-      + "          bestArea = area;"
-      + "        }"
-      + "        break;"
-      + "      }"
-      + "    }"
-      + "  }"
-      + "  return best;"
-      + "};"
-      + "var clickHamburger = function() {"
-      + "  var els = Array.from(document.querySelectorAll('[tabindex=\"0\"], button, [role=\"button\"], div'));"
-      + "  var best = null;"
-      + "  var bestArea = 999999;"
-      + "  for (var i = 0; i < els.length; i++) {"
-      + "    var el = els[i];"
-      + "    var r = el.getBoundingClientRect();"
-      + "    if (r.width >= 20 && r.width <= 72 && r.height >= 20 && r.height <= 72 && r.left >= 0 && r.left < 80 && r.top >= 0 && r.top < 110 && el.querySelector('svg')) {"
-      + "      var area = r.width * r.height;"
-      + "      if (area < bestArea) { best = el; bestArea = area; }"
-      + "    }"
-      + "  }"
-      + "  return triggerClick(best);"
-      + "};"
-      + "var clickProfileBar = function() {"
-      + "  var els = Array.from(document.querySelectorAll('[tabindex=\"0\"], button, [role=\"button\"]'));"
-      + "  for (var i = 0; i < els.length; i++) {"
-      + "    var el = els[i];"
-      + "    if (el.tagName === 'A') continue;"
-      + "    var r = el.getBoundingClientRect();"
-      + "    if (r.width >= 120 && r.width <= 340 && r.height >= 32 && r.height <= 80 && r.left >= 0 && r.left < 80 && r.bottom > window.innerHeight - 90) {"
-      + "      return triggerClick(el);"
-      + "    }"
-      + "  }"
-      + "  return false;"
-      + "};"
-      + "var ticks = 0;"
-      + "var exportClicked = false;"
-      + "var lastSection = '';"
-      + "var lastAction = '';"
-      + "var lastActionTick = -10;"
-      + "var timer = setInterval(function() {"
-      + "  try {"
-      + "    ticks++;"
-      + "    var maxTicks = exportClicked ? 260 : 30;"
-      + "    if (ticks > maxTicks) {"
-      + "      clearInterval(timer);"
-      + "      window.__dsappAutoExportTimer = null;"
-      + "      window.__dsappAutoExportRunning = false;"
-      + "      window.HarmonyMigrationBridge && window.HarmonyMigrationBridge.onAutoExportTimeout();"
-      + "      return;"
-      + "    }"
-      + "    var confirmBtn = findVisibleByText([/^(确认导出|确认|确定|Confirm)$/i], true);"
-      + "    if (confirmBtn && triggerClick(confirmBtn)) {"
-      + "      return;"
-      + "    }"
-      + "    if (lastSection === 'data' || findVisibleByText([/导出所有历史对话|Export all/i], true)) {"
-      + "      var dlBtn = findVisibleByText([/^(下载|Download)$/i], true);"
-      + "      if (dlBtn && triggerClick(dlBtn)) {"
-      + "        clearInterval(timer);"
-      + "        window.__dsappAutoExportTimer = null;"
-      + "        window.__dsappAutoExportRunning = false;"
-      + "        return;"
-      + "      }"
-      + "      if (!exportClicked) {"
-      + "        var expBtn = findVisibleByText([/^(导出数据|导出|Export Data|Export)$/i], true);"
-      + "        if (expBtn && triggerClick(expBtn)) {"
-      + "          exportClicked = true;"
-      + "          window.HarmonyMigrationBridge && window.HarmonyMigrationBridge.onWaitingExport();"
-      + "          return;"
-      + "        }"
-      + "      }"
-      + "      return;"
-      + "    }"
-      + "    if (findVisibleByText([/^(通用设置|账号管理|General|Account)$/i], true) || findVisibleByText([/^(数据管理|Data Controls|Data management|Data)$/i], true)) {"
-      + "      var dataTab = findVisibleByText([/^(数据管理|Data Controls|Data management|Data)$/i], true);"
-      + "      if (dataTab && triggerClick(dataTab)) {"
-      + "        lastSection = 'data';"
-      + "        return;"
-      + "      }"
-      + "    }"
-      + "    var settingsItem = findVisibleByText([/^(系统设置|Settings)$/i], true);"
-      + "    if (settingsItem && triggerClick(settingsItem)) {"
-      + "      return;"
-      + "    }"
-      + "    if (findVisibleByText([/^(开启新对话|New chat)$/i], true)) {"
-      + "      if (lastAction !== 'profile' || ticks - lastActionTick >= 3) {"
-      + "        if (clickProfileBar()) {"
-      + "          lastAction = 'profile';"
-      + "          lastActionTick = ticks;"
-      + "        }"
-      + "      }"
-      + "      return;"
-      + "    }"
-      + "    if (lastAction !== 'hamburger' || ticks - lastActionTick >= 3) {"
-      + "      if (clickHamburger()) {"
-      + "        lastAction = 'hamburger';"
-      + "        lastActionTick = ticks;"
-      + "      }"
-      + "    }"
-      + "  } catch (err) {}"
-      + "}, 700);"
-      + "window.__dsappAutoExportTimer = timer;"
-      + "})();";
+    const js = buildNativeMigrationExportScript(manualTrigger, this.migrationForceReExport);
     try {
       this.migrationController.runJavaScript(js);
     } catch {
@@ -705,28 +603,161 @@ struct Index {
     }
   }
 
-  private async importNativeDownload(path: string): Promise<void> {
-    this.importingMigration = true;
-    this.migrationStatusText = '正在导入并合并历史对话，请稍候…';
-    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+  private onMigrationPageEnd(): void {
+    if (this.importingMigration || this.pendingMigrationAvailable) return;
+    if (this.migrationClearSession) {
+      void this.clearMigrationSession();
+    } else {
+      this.checkMigrationLoginState();
+    }
+  }
+
+  private switchMigrationAccount(): void {
+    if (this.importingMigration || this.pendingMigrationAvailable || this.migrationClearingSession) return;
+    this.cancelNativeMigrationDownload();
+    this.migrationForceReExport = false;
+    this.migrationAutoExportTriggered = false;
+    this.migrationClearSession = true;
+    this.migrationStatusText = '正在切换账号…';
+    this.startMigrationLoginPoll();
     try {
-      const sessions = await this.backup.importFromUri(path, context);
-      const history = await this.conversationStorage.loadConversations(context);
-      const merged = mergeChatBackup(history, sessions);
-      await this.conversationStorage.saveConversations(context, merged.history);
-      const ui = this.getUIContext();
-      ui.getPromptAction().showToast({ message: merged.importedCount ? `已导入 ${merged.importedCount} 个对话` : '没有新增对话' });
-      ui.getRouter().back();
+      if (new url.URL(this.migrationController.getUrl()).origin === CHAT_ORIGIN) {
+        void this.clearMigrationSession();
+      } else {
+        this.migrationController.loadUrl(CHAT_URL);
+      }
+    } catch {
+      this.migrationStatusText = '未能打开 DeepSeek 网页，请重试';
+    }
+  }
+
+  private async clearMigrationSession(): Promise<void> {
+    if (this.migrationClearingSession || !this.migrationVisible) return;
+    this.migrationClearingSession = true;
+    try {
+      if (new url.URL(this.migrationController.getUrl()).origin !== CHAT_ORIGIN) return;
+      const script = "(function(){if(location.origin !== 'https://chat.deepseek.com') return;" +
+        "clearInterval(window.__dsappAutoExportTimer); window.__dsappAutoExportRunning = false;" +
+        "sessionStorage.clear(); localStorage.clear();})();";
+      await this.migrationController.runJavaScript(script);
+      await webview.WebCookieManager.clearAllCookies();
+      webview.WebStorage.deleteOrigin(CHAT_ORIGIN);
+      if (!this.migrationVisible) return;
+      this.migrationClearSession = false;
+      this.migrationStatusText = '请登录要导入的 DeepSeek 账号';
+      this.migrationController.loadUrl(CHAT_URL);
+    } catch {
+      this.migrationStatusText = '未能切换账号，请重试';
+    } finally {
+      this.migrationClearingSession = false;
+    }
+  }
+
+  private clearNativePartialDownload(): void {
+    try {
+      discardIncompleteNativeMigration(this.getUIContext().getHostContext() as common.UIAbilityContext);
+    } catch {
+      // A subsequent download can retry cleanup.
+    }
+  }
+
+  private cancelNativeMigrationDownload(): void {
+    const download = this.nativeMigrationDownload;
+    if (!download) {
+      return;
+    }
+    this.nativeMigrationDownload = undefined;
+    try {
+      download.cancel();
+    } catch {
+      // The WebView can already have canceled when it detached.
+    }
+    this.clearNativePartialDownload();
+  }
+
+  private discardPendingMigration(): void {
+    try {
+      discardPendingNativeMigration(this.getUIContext().getHostContext() as common.UIAbilityContext);
+      this.pendingMigrationAvailable = false;
+      this.migrationAutoExportTriggered = false;
+      this.migrationStatusText = '已放弃此次导出包，可以重新导出';
+    } catch (error) {
+      this.migrationStatusText = (error as Error).message || '无法放弃导出包';
+    }
+  }
+
+  private async importNativeDownload(receivedBytes?: number): Promise<void> {
+    if (this.importingMigration || this.nativeMigrationDownload) {
+      return;
+    }
+    const ui = this.getUIContext();
+    const context = ui.getHostContext() as common.UIAbilityContext;
+    if (receivedBytes === undefined && !hasPendingNativeMigration(context)) {
+      return;
+    }
+    this.importingMigration = true;
+    this.migrationAutoExportTriggered = true;
+    this.stopMigrationLoginPoll();
+    this.migrationStatusText = '正在导入并合并历史对话，请稍候…';
+    try {
+      if (receivedBytes !== undefined) {
+        await completeNativeMigrationDownload(context, receivedBytes);
+      }
+      this.pendingMigrationAvailable = true;
+      const importedCount = await consumePendingNativeMigration(context, async (path: string): Promise<number> => {
+        const sessions = await this.backup.importFromUri(path, context);
+        const history = await this.conversationStorage.loadConversations(context);
+        const merged = mergeChatBackup(history, sessions);
+        await this.conversationStorage.saveConversations(context, merged.history);
+        return merged.importedCount;
+      });
+      this.pendingMigrationAvailable = hasPendingNativeMigration(context);
+      if (importedCount !== null) {
+        ui.getPromptAction().showToast({ message: importedCount ? `已导入 ${importedCount} 个对话` : '没有新增对话' });
+        ui.getRouter().back();
+      }
     } catch (error) {
       this.migrationStatusText = (error as Error).message || '读取导出包失败，请重试';
+      this.pendingMigrationAvailable = hasPendingNativeMigration(context);
+      this.clearNativePartialDownload();
     } finally {
       this.importingMigration = false;
-      await fs.unlink(path).catch(() => {});
     }
+  }
+
+  private startNativeMigrationDownload(item: webview.WebDownloadItem): void {
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    if (this.importingMigration || this.nativeMigrationDownload || this.migrationClearSession ||
+      this.migrationClearingSession || hasPendingNativeMigration(context)) {
+      item.cancel();
+      return;
+    }
+    if (item.getTotalBytes() > MAX_FILE_BACKUP_BYTES) {
+      item.cancel();
+      this.migrationStatusText = '导出包超过 512 MB，无法导入';
+      return;
+    }
+    try {
+      discardIncompleteNativeMigration(context);
+      this.nativeMigrationDownload = item;
+      this.migrationStatusText = '正在下载历史记录导出包...';
+      item.start(nativeMigrationDownloadPath(context));
+    } catch (error) {
+      this.cancelNativeMigrationDownload();
+      this.migrationStatusText = (error as Error).message || '无法下载导出包，请重试';
+    }
+  }
+
+  private activeNativeMigrationDownload(item: webview.WebDownloadItem): boolean {
+    return this.nativeMigrationDownload?.getGuid() === item.getGuid();
   }
 
   private setupMigrationDownloadDelegate(): void {
     this.downloadDelegate.onBeforeDownload((item: webview.WebDownloadItem) => {
+      if (this.nativeMigration) {
+        this.startNativeMigrationDownload(item);
+        return;
+      }
       if (this.importingMigration) {
         item.cancel();
         return;
@@ -745,13 +776,33 @@ struct Index {
       item.start(this.migrationSavePath);
     });
 
-    this.downloadDelegate.onDownloadFailed((_item: webview.WebDownloadItem) => {
+    this.downloadDelegate.onDownloadUpdated((item: webview.WebDownloadItem) => {
+      if (this.activeNativeMigrationDownload(item)) {
+        this.nativeMigrationDownload = item;
+        if (item.getReceivedBytes() > MAX_FILE_BACKUP_BYTES) {
+          this.cancelNativeMigrationDownload();
+          this.migrationStatusText = '导出包超过 512 MB，无法导入';
+        }
+      }
+    });
+
+    this.downloadDelegate.onDownloadFailed((item: webview.WebDownloadItem) => {
+      if (this.nativeMigration) {
+        if (!this.activeNativeMigrationDownload(item)) {
+          return;
+        }
+        this.nativeMigrationDownload = undefined;
+        this.clearNativePartialDownload();
+      }
       this.migrationStatusText = '下载导出包失败，请重新点击下载';
     });
 
-    this.downloadDelegate.onDownloadFinish((_item: webview.WebDownloadItem) => {
+    this.downloadDelegate.onDownloadFinish((item: webview.WebDownloadItem) => {
       if (this.nativeMigration) {
-        void this.importNativeDownload(this.migrationSavePath);
+        if (this.activeNativeMigrationDownload(item)) {
+          this.nativeMigrationDownload = undefined;
+          void this.importNativeDownload(item.getReceivedBytes());
+        }
         return;
       }
       try {
@@ -788,6 +839,9 @@ struct Index {
       return true;
     }
     if (this.nativeMigration) {
+      if (this.pendingMigrationAvailable) {
+        return false;
+      }
       if (this.migrationController.accessBackward()) {
         this.migrationController.backward();
         return true;
@@ -850,40 +904,62 @@ struct Index {
 
       if (this.migrationVisible) {
         Column() {
-          Row() {
+          Column() {
             Text(this.migrationStatusText)
               .fontSize(12.5)
               .fontColor('#FFFFFF')
-              .layoutWeight(1)
-              .maxLines(1)
+              .width('100%')
+              .maxLines(2)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
-            Button('自动导出')
-              .fontSize(12.5)
-              .fontColor('#FFFFFF')
-              .backgroundColor(Color.Transparent)
-              .onClick(() => {
-                this.runMigrationAutoExportScript(true);
-              })
-            Button('关闭')
-              .fontSize(12.5)
-              .fontColor('#FFFFFF')
-              .backgroundColor(Color.Transparent)
-              .onClick(() => {
-                if (this.nativeMigration) {
-                  if (!this.importingMigration) {
-                    this.getUIContext().getRouter().back();
+            Row() {
+              Button(this.pendingMigrationAvailable ? '重试导入' : '自动导出')
+                .fontSize(12.5)
+                .fontColor('#FFFFFF')
+                .backgroundColor(Color.Transparent)
+                .enabled(!this.importingMigration)
+                .onClick(() => {
+                  if (this.pendingMigrationAvailable) {
+                    void this.importNativeDownload();
+                  } else {
+                    this.runMigrationAutoExportScript(true);
                   }
-                } else {
-                  this.closeMigrationOverlay();
-                }
-              })
+                })
+              if (this.pendingMigrationAvailable) {
+                Button('放弃导出包')
+                  .fontSize(12.5)
+                  .fontColor('#FFFFFF')
+                  .backgroundColor(Color.Transparent)
+                  .enabled(!this.importingMigration)
+                  .onClick(() => { this.discardPendingMigration(); })
+              } else {
+                Button('切换账号')
+                  .fontSize(12.5)
+                  .fontColor('#FFFFFF')
+                  .backgroundColor(Color.Transparent)
+                  .enabled(!this.importingMigration)
+                  .onClick(() => { this.switchMigrationAccount(); })
+              }
+              Button('关闭')
+                .fontSize(12.5)
+                .fontColor('#FFFFFF')
+                .backgroundColor(Color.Transparent)
+                .enabled(!this.importingMigration)
+                .onClick(() => {
+                  if (this.nativeMigration) {
+                    this.getUIContext().getRouter().back();
+                  } else {
+                    this.closeMigrationOverlay();
+                  }
+                })
+            }
+            .width('100%').justifyContent(FlexAlign.End)
           }
           .width('100%')
           .padding({ left: 14, right: 8, top: 10, bottom: 10 })
           .backgroundColor('#1D4ED8')
 
           Web({
-            src: 'https://chat.deepseek.com/',
+            src: CHAT_URL,
             controller: this.migrationController,
           })
             .width('100%')
@@ -897,14 +973,13 @@ struct Index {
               name: 'HarmonyMigrationBridge',
               methodList: ['onLoggedIn', 'onStep', 'onWaitingExport', 'onAutoExportTimeout'],
               controller: this.migrationController,
+              permission: MIGRATION_BRIDGE_PERMISSION,
             })
             .onControllerAttached(() => {
               this.setupMigrationDownloadDelegate();
             })
             .onPageEnd(() => {
-              if (!this.migrationAutoExportTriggered) {
-                this.checkMigrationLoginState();
-              }
+              this.onMigrationPageEnd();
             })
         }
         .width('100%')

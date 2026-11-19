@@ -89,9 +89,6 @@ interface ShareNode {
   children: ShareNode[];
 }
 
-let recentShareArchive = '';
-const recentShareTemplates = new Map<string, string>();
-
 function invalidGraph(): never {
   throw new Error('分享对话中的消息分支无效');
 }
@@ -327,31 +324,6 @@ function buildSession(payload: SharePayload, raw: ShareRow[], now: number): Nati
     messages: ordered.map((node: ShareNode): NativeConversationMessage => node.message),
     archiveJson: JSON.stringify(archive),
   };
-}
-
-export function nativeShareTemplate(session: NativeConversation, messageId: string): string {
-  if (!session.archiveJson) {
-    return '';
-  }
-  if (recentShareArchive !== session.archiveJson) {
-    recentShareArchive = session.archiveJson;
-    recentShareTemplates.clear();
-    try {
-      const origin = JSON.parse(session.archiveJson) as ShareArchiveOrigin;
-      if (origin.session?.share_import) {
-        for (const message of origin.session.messages) {
-          const text = message.fragments.filter((fragment: ShareArchiveFragment): boolean =>
-            fragment.type === 'TEMPLATE_RESPONSE').map((fragment: ShareArchiveFragment): string => fragment.content).join('\n');
-          if (text) {
-            recentShareTemplates.set(message.id.toString(), text);
-          }
-        }
-      }
-    } catch {
-      recentShareTemplates.clear();
-    }
-  }
-  return recentShareTemplates.get(messageId) ?? '';
 }
 
 export async function importNativeShareLink(input: string): Promise<NativeConversation> {
