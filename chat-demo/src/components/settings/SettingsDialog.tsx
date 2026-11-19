@@ -74,10 +74,11 @@ import { Modal } from '../base/Modal.js'
 import { Select } from '../base/Select.js'
 import { showToast } from '../base/toastState.js'
 import { ApiKeyConfirm, ApiKeyField, useApiKeyEditor } from './ApiKeyField.js'
+import { FeedbackReportPage } from './FeedbackReportPage.js'
 import styles from './Settings.module.css'
 import { closeSettings, useSettingsDialog } from './settingsDialogState.js'
 
-type SettingsPage = 'root' | 'account' | 'data' | 'changelog'
+type SettingsPage = 'root' | 'account' | 'data' | 'changelog' | 'feedback'
 
 const DOCS_URL = 'https://api-docs.deepseek.com/zh-cn/'
 
@@ -127,7 +128,9 @@ const SettingsContent = () => {
         ? t('settingsDataManage')
         : page === 'changelog'
           ? t('settingsReleaseNotes')
-          : t('settings')
+          : page === 'feedback'
+            ? '日志上报与问题反馈'
+            : t('settings')
 
   const onSignOutAll = () => {
     void logoutDeepSeekAccount()
@@ -311,6 +314,19 @@ const SettingsContent = () => {
                     <IconChevronRightOutline14 />
                   </span>
                 </button>
+                <button
+                  type="button"
+                  className={clsx(styles.groupRow, styles.groupRowButton)}
+                  onClick={() => setPage('feedback')}
+                >
+                  <span className={styles.rowIcon}>
+                    <IconInfoCircleOutline18 />
+                  </span>
+                  <span className={styles.rowLabel}>问题反馈与日志上报</span>
+                  <span className={styles.rowChevron}>
+                    <IconChevronRightOutline14 />
+                  </span>
+                </button>
                 {harmonyBridge?.openPrivacyPolicy && (
                   <button
                     type="button"
@@ -369,6 +385,8 @@ const SettingsContent = () => {
             </>
           ) : page === 'changelog' ? (
             <ReleaseNotesPage />
+          ) : page === 'feedback' ? (
+            <FeedbackReportPage />
           ) : (
             <>
               <div className={styles.groupCard}>

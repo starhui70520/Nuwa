@@ -63,3 +63,46 @@ export interface StorageInfo {
   bucket?: string;
   error?: string;
 }
+
+export type ReportStatus = 'open' | 'resolved';
+
+export interface ReportLogEntry {
+  ts: string;
+  level: 'error' | 'warn' | 'info';
+  source: string;
+  message: string;
+  detail?: string;
+}
+
+export interface ReportDeviceInfo {
+  appVersion?: string;
+  platform?: string;
+  userAgent?: string;
+  language?: string;
+  screen?: string;
+  viewport?: string;
+  online?: boolean;
+  timezone?: string;
+  apiProtocol?: string;
+  authMode?: string;
+}
+
+export interface IssueReportSummary {
+  code: string;
+  issueType: string;
+  description: string;
+  contact?: string;
+  status: ReportStatus;
+  adminNote?: string;
+  appVersion?: string;
+  platform?: string;
+  logCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface IssueReportDetail extends IssueReportSummary {
+  deviceInfo: ReportDeviceInfo;
+  logs: ReportLogEntry[];
+  clientIp?: string;
+}

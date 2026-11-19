@@ -1,4 +1,5 @@
 import { translate, type TranslationMessage } from '../../i18n/index.js'
+import { recordAppLog } from '../errorLog.js'
 import { isUsingDeepSeekAccount, useSettings } from '../settings.js'
 import { buildOpenAIChatBody, parseOpenAIStream, resolveOpenAIEndpoint } from './openai.js'
 import { readMessageEvent } from './parseEvent.js'
@@ -76,10 +77,19 @@ export const request = async (url: string, init: RequestInit): Promise<Response>
     if (init.signal?.aborted) {
       throw error
     }
-    throw new ApiError('network', error instanceof Error ? error.message : String(error))
+    const msg = error instanceof Error ? error.message : String(error)
+    recordAppLog('error', 'api.network', `${init.method || 'GET'} ${url.split('?')[0]}`, msg)
+    throw new ApiError('network', msg)
   }
   if (!response.ok) {
-    throw await readErrorResponse(response)
+    const apiErr = await readErrorResponse(response)
+    recordAppLog(
+      'error',
+      'api.http',
+      `${init.method || 'GET'} ${url.split('?')[0]} -> HTTP ${response.status}`,
+      apiErr.message
+    )
+    throw apiErr
   }
   return response
 }

@@ -3,13 +3,22 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as Minio from 'minio';
-import type { ArticleItem, PortalManifest, StorageInfo } from './types.js';
+import type {
+  ArticleItem,
+  IssueReportDetail,
+  IssueReportSummary,
+  PortalManifest,
+  StorageInfo
+} from './types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.resolve(__dirname, '../data');
 const LOCAL_FILES_DIR = path.join(DATA_DIR, 'files');
 const LOCAL_MANIFEST_PATH = path.join(DATA_DIR, 'releases.json');
+const LOCAL_REPORTS_INDEX_PATH = path.join(DATA_DIR, 'reports-index.json');
+const LOCAL_REPORTS_DIR = path.join(DATA_DIR, 'reports');
 const MINIO_MANIFEST_KEY = 'metadata/releases.json';
+const MINIO_REPORTS_INDEX_KEY = 'metadata/reports-index.json';
 
 function loadSeedArticles(): ArticleItem[] {
   try {
@@ -234,5 +243,105 @@ export class StorageService {
       throw new Error('Invalid object key');
     }
     return full;
+  }
+
+  private getReportObjectKey(code: string): string {
+    const safe = code.replace(/[^A-Z0-9-]/gi, '').toUpperCase();
+    return `reports/${safe}.json`;
+  }
+
+  private resolveLocalReportPath(code: string): string {
+    const safe = code.replace(/[^A-Z0-9-]/gi, '').toUpperCase();
+    const full = path.resolve(LOCAL_REPORTS_DIR, `${safe}.json`);
+    if (!full.startsWith(LOCAL_REPORTS_DIR)) {
+      throw new Error('Invalid report code');
+    }
+    return full;
+  }
+
+  async readReportsIndex(): Promise<IssueReportSummary[]> {
+    if (this.driver === 'minio' && this.client) {
+      try {
+        const stream = await this.client.getObject(this.bucket, MINIO_REPORTS_INDEX_KEY);
+        const chunks: Buffer[] = [];
+        for await (const chunk of stream) {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        }
+        const parsed = JSON.parse(Buffer.concat(chunks).toString('utf-8'));
+        return Array.isArray(parsed) ? (parsed as IssueReportSummary[]) : [];
+      } catch {
+        return [];
+      }
+    }
+
+    try {
+      const raw = await fsp.readFile(LOCAL_REPORTS_INDEX_PATH, 'utf-8');
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? (parsed as IssueReportSummary[]) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  async writeReportsIndex(items: IssueReportSummary[]): Promise<void> {
+    const payload = JSON.stringify(items, null, 2);
+    if (this.driver === 'minio' && this.client) {
+      const buf = Buffer.from(payload, 'utf-8');
+      await this.client.putObject(this.bucket, MINIO_REPORTS_INDEX_KEY, buf, buf.length, {
+        'Content-Type': 'application/json; charset=utf-8'
+      });
+      return;
+    }
+
+    await fsp.mkdir(DATA_DIR, { recursive: true });
+    await fsp.writeFile(LOCAL_REPORTS_INDEX_PATH, payload, 'utf-8');
+  }
+
+  async writeReportDetail(report: IssueReportDetail): Promise<void> {
+    const payload = JSON.stringify(report, null, 2);
+    if (this.driver === 'minio' && this.client) {
+      const buf = Buffer.from(payload, 'utf-8');
+      await this.client.putObject(this.bucket, this.getReportObjectKey(report.code), buf, buf.length, {
+        'Content-Type': 'application/json; charset=utf-8'
+      });
+      return;
+    }
+
+    await fsp.mkdir(LOCAL_REPORTS_DIR, { recursive: true });
+    await fsp.writeFile(this.resolveLocalReportPath(report.code), payload, 'utf-8');
+  }
+
+  async readReportDetail(code: string): Promise<IssueReportDetail | null> {
+    if (this.driver === 'minio' && this.client) {
+      try {
+        const stream = await this.client.getObject(this.bucket, this.getReportObjectKey(code));
+        const chunks: Buffer[] = [];
+        for await (const chunk of stream) {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        }
+        return JSON.parse(Buffer.concat(chunks).toString('utf-8')) as IssueReportDetail;
+      } catch {
+        return null;
+      }
+    }
+
+    try {
+      const raw = await fsp.readFile(this.resolveLocalReportPath(code), 'utf-8');
+      return JSON.parse(raw) as IssueReportDetail;
+    } catch {
+      return null;
+    }
+  }
+
+  async deleteReportDetail(code: string): Promise<void> {
+    if (this.driver === 'minio' && this.client) {
+      await this.client.removeObject(this.bucket, this.getReportObjectKey(code)).catch(() => {});
+      return;
+    }
+
+    const filePath = this.resolveLocalReportPath(code);
+    if (fs.existsSync(filePath)) {
+      await fsp.unlink(filePath).catch(() => {});
+    }
   }
 }

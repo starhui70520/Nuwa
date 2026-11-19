@@ -9,7 +9,18 @@ import dotenv from 'dotenv';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import multer from 'multer';
 import { StorageService } from './storage.js';
-import type { ArticleItem, HarmonyStatus, IosStatus, Platform, ReleaseItem } from './types.js';
+import type {
+  ArticleItem,
+  HarmonyStatus,
+  IosStatus,
+  IssueReportDetail,
+  IssueReportSummary,
+  Platform,
+  ReleaseItem,
+  ReportDeviceInfo,
+  ReportLogEntry,
+  ReportStatus
+} from './types.js';
 
 dotenv.config();
 
@@ -538,10 +549,221 @@ async function main() {
     }
   });
 
+  // ---- Issue & Log Reports (Public submit + Admin review) ----
+  const REPORT_CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+  const reportRateMap = new Map<string, number[]>();
+
+  function generateReportCode(existing: Set<string>): string {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      let suffix = '';
+      const bytes = crypto.randomBytes(6);
+      for (let i = 0; i < 6; i++) {
+        suffix += REPORT_CODE_ALPHABET[bytes[i] % REPORT_CODE_ALPHABET.length];
+      }
+      const code = `NW-${suffix}`;
+      if (!existing.has(code)) return code;
+    }
+    return `NW-${Date.now().toString(36).toUpperCase().slice(-6)}`;
+  }
+
+  function sanitizeLogEntries(raw: unknown): ReportLogEntry[] {
+    if (!Array.isArray(raw)) return [];
+    const out: ReportLogEntry[] = [];
+    for (const entry of raw.slice(-200)) {
+      if (!entry || typeof entry !== 'object') continue;
+      const obj = entry as Record<string, unknown>;
+      const rawLevel = String(obj.level || 'info').toLowerCase();
+      const level: ReportLogEntry['level'] =
+        rawLevel === 'error' || rawLevel === 'warn' ? rawLevel : 'info';
+      out.push({
+        ts: String(obj.ts || new Date().toISOString()).slice(0, 40),
+        level,
+        source: String(obj.source || 'app').slice(0, 80),
+        message: String(obj.message || '').slice(0, 1000),
+        detail: obj.detail ? String(obj.detail).slice(0, 3000) : undefined
+      });
+    }
+    return out;
+  }
+
+  function sanitizeDeviceInfo(raw: unknown): ReportDeviceInfo {
+    if (!raw || typeof raw !== 'object') return {};
+    const obj = raw as Record<string, unknown>;
+    const pick = (k: string, max = 300) =>
+      typeof obj[k] === 'string' ? (obj[k] as string).trim().slice(0, max) : undefined;
+    return {
+      appVersion: pick('appVersion', 64),
+      platform: pick('platform', 64),
+      userAgent: pick('userAgent', 500),
+      language: pick('language', 40),
+      screen: pick('screen', 64),
+      viewport: pick('viewport', 64),
+      online: typeof obj.online === 'boolean' ? obj.online : undefined,
+      timezone: pick('timezone', 64),
+      apiProtocol: pick('apiProtocol', 32),
+      authMode: pick('authMode', 32)
+    };
+  }
+
+  app.post('/api/reports', async (req, res) => {
+    try {
+      const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+      const clientIp = forwarded || req.ip || 'unknown';
+      const now = Date.now();
+      const windowMs = 10 * 60 * 1000;
+      const hits = (reportRateMap.get(clientIp) || []).filter((t) => now - t < windowMs);
+      if (hits.length >= 15) {
+        res.status(429).json({ error: '提交过于频繁，请稍后再试' });
+        return;
+      }
+      hits.push(now);
+      reportRateMap.set(clientIp, hits);
+
+      const issueType = String(req.body?.issueType || '').trim().slice(0, 80);
+      const description = String(req.body?.description || '').trim().slice(0, 4000);
+      const contact = String(req.body?.contact || '').trim().slice(0, 120) || undefined;
+
+      if (!issueType) {
+        res.status(400).json({ error: '请选择遇到的问题类型' });
+        return;
+      }
+      if (!description) {
+        res.status(400).json({ error: '请填写问题描述' });
+        return;
+      }
+
+      const deviceInfo = sanitizeDeviceInfo(req.body?.deviceInfo);
+      const logs = sanitizeLogEntries(req.body?.logs);
+
+      const index = await storage.readReportsIndex();
+      const existingCodes = new Set(index.map((item) => item.code));
+      const code = generateReportCode(existingCodes);
+      const nowIso = new Date().toISOString();
+
+      const summary: IssueReportSummary = {
+        code,
+        issueType,
+        description,
+        contact,
+        status: 'open',
+        appVersion: deviceInfo.appVersion,
+        platform: deviceInfo.platform,
+        logCount: logs.length,
+        createdAt: nowIso,
+        updatedAt: nowIso
+      };
+
+      const detail: IssueReportDetail = {
+        ...summary,
+        deviceInfo,
+        logs,
+        clientIp
+      };
+
+      await storage.writeReportDetail(detail);
+      index.unshift(summary);
+      if (index.length > 1000) {
+        index.length = 1000;
+      }
+      await storage.writeReportsIndex(index);
+
+      res.status(201).json({ code, createdAt: nowIso });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ error: `日志上报失败: ${message}` });
+    }
+  });
+
+  app.get('/api/admin/reports', requireAdmin, async (req, res) => {
+    const q = String(req.query.q || '').trim().toLowerCase();
+    const statusFilter = String(req.query.status || '').trim().toLowerCase();
+    let list = await storage.readReportsIndex();
+    if (statusFilter === 'open' || statusFilter === 'resolved') {
+      list = list.filter((item) => item.status === statusFilter);
+    }
+    if (q) {
+      list = list.filter(
+        (item) =>
+          item.code.toLowerCase().includes(q) ||
+          item.issueType.toLowerCase().includes(q) ||
+          item.description.toLowerCase().includes(q) ||
+          (item.appVersion || '').toLowerCase().includes(q) ||
+          (item.platform || '').toLowerCase().includes(q) ||
+          (item.contact || '').toLowerCase().includes(q)
+      );
+    }
+    res.json({ reports: list });
+  });
+
+  app.get('/api/admin/reports/:code', requireAdmin, async (req, res) => {
+    const code = String(req.params.code || '').trim().toUpperCase();
+    const detail = await storage.readReportDetail(code);
+    if (!detail) {
+      res.status(404).json({ error: '未找到该记录码对应的日志' });
+      return;
+    }
+    res.json({ report: detail });
+  });
+
+  app.patch('/api/admin/reports/:code', requireAdmin, async (req, res) => {
+    const code = String(req.params.code || '').trim().toUpperCase();
+    const detail = await storage.readReportDetail(code);
+    if (!detail) {
+      res.status(404).json({ error: '未找到该记录码对应的日志' });
+      return;
+    }
+
+    const nextStatus = req.body?.status as ReportStatus | undefined;
+    if (nextStatus === 'open' || nextStatus === 'resolved') {
+      detail.status = nextStatus;
+    }
+    if (typeof req.body?.adminNote === 'string') {
+      detail.adminNote = req.body.adminNote.trim().slice(0, 1000) || undefined;
+    }
+    detail.updatedAt = new Date().toISOString();
+
+    await storage.writeReportDetail(detail);
+
+    const index = await storage.readReportsIndex();
+    const target = index.find((item) => item.code === code);
+    if (target) {
+      target.status = detail.status;
+      target.adminNote = detail.adminNote;
+      target.updatedAt = detail.updatedAt;
+      await storage.writeReportsIndex(index);
+    }
+
+    res.json({ report: detail });
+  });
+
+  app.delete('/api/admin/reports/:code', requireAdmin, async (req, res) => {
+    const code = String(req.params.code || '').trim().toUpperCase();
+    const index = await storage.readReportsIndex();
+    const next = index.filter((item) => item.code !== code);
+    if (next.length === index.length) {
+      res.status(404).json({ error: '未找到该记录码对应的日志' });
+      return;
+    }
+    await storage.writeReportsIndex(next);
+    await storage.deleteReportDetail(code);
+    res.json({ ok: true });
+  });
+
   if (process.env.NODE_ENV === 'production') {
     const clientDir = path.resolve(__dirname, '../client');
-    app.use(express.static(clientDir));
+    app.use(
+      express.static(clientDir, {
+        maxAge: '30d',
+        immutable: true,
+        setHeaders: (res, filePath) => {
+          if (filePath.endsWith('.html')) {
+            res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=300');
+          }
+        }
+      })
+    );
     app.get('*', (_req, res) => {
+      res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=300');
       res.sendFile(path.join(clientDir, 'index.html'));
     });
   }

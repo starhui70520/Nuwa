@@ -8,6 +8,7 @@ import type {
   ReleaseItem
 } from '../types';
 import { formatBytes, formatDate, getPlatformLabel } from '../utils';
+import { AdminReportsTab } from './AdminReportsTab';
 
 interface AdminPanelProps {
   onDataChanged: () => void;
@@ -15,7 +16,7 @@ interface AdminPanelProps {
 
 const TOKEN_STORAGE_KEY = 'nuwa_portal_admin_token';
 
-type AdminTab = 'apps' | 'articles';
+type AdminTab = 'apps' | 'articles' | 'reports';
 
 export function AdminPanel({ onDataChanged }: AdminPanelProps) {
   const [token, setToken] = useState<string>(() => localStorage.getItem(TOKEN_STORAGE_KEY) || '');
@@ -26,6 +27,7 @@ export function AdminPanel({ onDataChanged }: AdminPanelProps) {
   const [tab, setTab] = useState<AdminTab>('apps');
   const [data, setData] = useState<AdminReleasesResponse | null>(null);
   const [articles, setArticles] = useState<ArticleItem[]>([]);
+  const [reportsCount, setReportsCount] = useState<number>(0);
   const [loading, setLoading] = useState(false);
   const [actionMsg, setActionMsg] = useState<string | null>(null);
 
@@ -68,16 +70,19 @@ export function AdminPanel({ onDataChanged }: AdminPanelProps) {
     if (!activeToken) return;
     setLoading(true);
     try {
-      const [relRes, artRes] = await Promise.all([
+      const [relRes, artRes, repRes] = await Promise.all([
         fetch('/api/admin/releases', {
           headers: { Authorization: `Bearer ${activeToken}` }
         }),
         fetch('/api/admin/articles', {
           headers: { Authorization: `Bearer ${activeToken}` }
+        }),
+        fetch('/api/admin/reports', {
+          headers: { Authorization: `Bearer ${activeToken}` }
         })
       ]);
 
-      if (relRes.status === 401 || artRes.status === 401) {
+      if (relRes.status === 401 || artRes.status === 401 || repRes.status === 401) {
         localStorage.removeItem(TOKEN_STORAGE_KEY);
         setToken('');
         setAuthError('会话已过期，请重新输入管理密码。');
@@ -99,6 +104,10 @@ export function AdminPanel({ onDataChanged }: AdminPanelProps) {
       if (artRes.ok) {
         const artJson = (await artRes.json()) as { articles: ArticleItem[] };
         setArticles(artJson.articles || []);
+      }
+      if (repRes.ok) {
+        const repJson = (await repRes.json()) as { reports?: unknown[] };
+        setReportsCount(Array.isArray(repJson.reports) ? repJson.reports.length : 0);
       }
     } catch (err) {
       setActionMsg(`读取管理数据失败：${err instanceof Error ? err.message : String(err)}`);
@@ -489,6 +498,17 @@ export function AdminPanel({ onDataChanged }: AdminPanelProps) {
             >
               文章内容管理 ({articles.length})
             </button>
+            <button
+              type="button"
+              onClick={() => setTab('reports')}
+              className={`h-[38px] px-5 rounded-full text-[13px] font-medium transition-colors cursor-pointer ${
+                tab === 'reports'
+                  ? 'bg-[#18181b] text-white'
+                  : 'bg-[#f6f6f6] text-[#18181b] hover:bg-[#e8e8e8]'
+              }`}
+            >
+              问题日志 ({reportsCount})
+            </button>
           </div>
         </div>
 
@@ -523,7 +543,14 @@ export function AdminPanel({ onDataChanged }: AdminPanelProps) {
         </div>
       )}
 
-      {tab === 'apps' ? (
+      {tab === 'reports' ? (
+        <AdminReportsTab
+          token={token}
+          onUnauthorized={handleLogout}
+          onNotify={setActionMsg}
+          onCountChange={setReportsCount}
+        />
+      ) : tab === 'apps' ? (
         <>
           <div className="grid grid-cols-1 min-[1041px]:grid-cols-[minmax(0,1.45fr)_minmax(320px,0.85fr)] gap-[28px]">
             <form
