@@ -33,6 +33,12 @@ extension Color {
             : UIColor(red: 228 / 255, green: 237 / 255, blue: 253 / 255, alpha: 1)  // --dsw-static-blue-100
     })
 
+    static let nuwaDrawerCardFill = Color(UIColor { trait in
+        trait.userInterfaceStyle == .dark
+            ? UIColor(red: 39 / 255, green: 40 / 255, blue: 43 / 255, alpha: 1)
+            : UIColor(red: 255 / 255, green: 255 / 255, blue: 255 / 255, alpha: 1)
+    })
+
     static let nuwaBubbleFill = Color(UIColor { trait in
         trait.userInterfaceStyle == .dark
             ? UIColor(red: 44 / 255, green: 44 / 255, blue: 46 / 255, alpha: 1)     // --dsw-static-neutral-bluish-850
@@ -68,10 +74,35 @@ extension Color {
             ? UIColor(red: 72 / 255, green: 104 / 255, blue: 178 / 255, alpha: 1)   // --dsw-static-blue-600
             : UIColor(red: 183 / 255, green: 200 / 255, blue: 254 / 255, alpha: 1)  // --dsw-static-blue-300
     })
+
+    static let nuwaControlFill = Color(UIColor { trait in
+        trait.userInterfaceStyle == .dark
+            ? UIColor(white: 1.0, alpha: 0.08)
+            : UIColor(red: 15 / 255, green: 23 / 255, blue: 42 / 255, alpha: 0.05)
+    })
+
+    static let nuwaControlBorder = Color(UIColor { trait in
+        trait.userInterfaceStyle == .dark
+            ? UIColor(white: 1.0, alpha: 0.12)
+            : UIColor(red: 15 / 255, green: 23 / 255, blue: 42 / 255, alpha: 0.09)
+    })
 }
 
-/// Applies native iOS 26 Liquid Glass when available, falling back to translucent material
-/// with a specular hairline border on iOS 17-18.
+/// Crisp, zero-latency tactile press button style that never conflicts with Liquid Glass or ScrollViews.
+struct NuwaTactileButtonStyle: ButtonStyle {
+    var pressedScale: CGFloat = 0.96
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? pressedScale : 1.0)
+            .opacity(configuration.isPressed ? 0.78 : 1.0)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
+/// Applies native iOS 26 Liquid Glass strictly on top-level floating chrome (header, composer container,
+/// floating scroll-to-bottom button, toast), with a lightweight fallback on iOS 17-18.
+/// NEVER nest `.nuwaGlass` inside another `.nuwaGlass` or place it inside scrolling message lists.
 struct NuwaGlassModifier<S: InsettableShape>: ViewModifier {
     let shape: S
     let tint: Color?
@@ -83,12 +114,15 @@ struct NuwaGlassModifier<S: InsettableShape>: ViewModifier {
         #if compiler(>=6.2)
         if #available(iOS 26.0, *) {
             content
+                .contentShape(shape)
                 .glassEffect(glassStyle, in: shape)
         } else {
             fallbackView(content: content)
+                .contentShape(shape)
         }
         #else
         fallbackView(content: content)
+            .contentShape(shape)
         #endif
     }
 
@@ -119,23 +153,56 @@ struct NuwaGlassModifier<S: InsettableShape>: ViewModifier {
             }
             .overlay {
                 shape.strokeBorder(
-                    LinearGradient(
-                        colors: [
-                            Color.white.opacity(colorScheme == .dark ? 0.24 : 0.72),
-                            Color.white.opacity(colorScheme == .dark ? 0.06 : 0.16),
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
+                    Color.primary.opacity(colorScheme == .dark ? 0.14 : 0.08),
                     lineWidth: 0.75
                 )
             }
             .shadow(
-                color: Color.black.opacity(colorScheme == .dark ? 0.30 : 0.06),
-                radius: 10,
+                color: Color.black.opacity(colorScheme == .dark ? 0.22 : 0.05),
+                radius: 8,
                 x: 0,
-                y: 3
+                y: 2
             )
+    }
+}
+
+/// Lightweight GPU-free pill surface for controls inside glass cards or scrolling lists (120Hz zero jank).
+struct NuwaPillSurfaceModifier: ViewModifier {
+    let selected: Bool
+    let destructive: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .background(fillColor, in: Capsule())
+            .overlay(
+                Capsule()
+                    .strokeBorder(borderColor, lineWidth: selected ? 1.0 : 0.75)
+            )
+    }
+
+    private var fillColor: Color {
+        if destructive { return Color.red.opacity(0.09) }
+        return selected ? Color.nuwaToggleActiveFill : Color.nuwaControlFill
+    }
+
+    private var borderColor: Color {
+        if destructive { return Color.red.opacity(0.28) }
+        return selected ? Color.nuwaToggleActiveBorder : Color.nuwaControlBorder
+    }
+}
+
+/// Disables iOS 26 automatic ScrollView edge tinting so sidebar & chat headers stay 100% color-uniform.
+struct NuwaNoScrollEdgeEffectModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+            content.scrollEdgeEffectHidden(true, for: .all)
+        } else {
+            content
+        }
+        #else
+        content
+        #endif
     }
 }
 
@@ -161,9 +228,17 @@ extension View {
             )
         )
     }
+
+    func nuwaPillSurface(selected: Bool = false, destructive: Bool = false) -> some View {
+        modifier(NuwaPillSurfaceModifier(selected: selected, destructive: destructive))
+    }
+
+    func nuwaNoScrollEdgeEffect() -> some View {
+        modifier(NuwaNoScrollEdgeEffectModifier())
+    }
 }
 
-/// Groups adjacent Liquid Glass controls on iOS 26 so they morph and refract together.
+/// Groups adjacent floating Liquid Glass chrome buttons on iOS 26.
 struct NuwaGlassGroup<Content: View>: View {
     let spacing: CGFloat
     @ViewBuilder let content: () -> Content

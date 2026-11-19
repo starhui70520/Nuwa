@@ -153,6 +153,7 @@ struct SettingsView: View {
                     .padding(.top, 4)
                     .padding(.bottom, 32)
                 }
+                .nuwaNoScrollEdgeEffect()
             }
         }
         .task {
@@ -216,13 +217,17 @@ struct SettingsView: View {
             case .success(let urls):
                 guard let url = urls.first else { return }
                 let accessed = url.startAccessingSecurityScopedResource()
-                defer { if accessed { url.stopAccessingSecurityScopedResource() } }
-                do {
-                    let data = try Data(contentsOf: url)
-                    let count = try chatStore.importFromFileData(data)
-                    chatStore.showToast(count == 1 ? "已导入 1 个对话" : "已导入 \(count) 个对话")
-                } catch {
-                    chatStore.showToast("导入失败：\(error.localizedDescription)")
+                Task {
+                    defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+                    do {
+                        let data = try await Task.detached(priority: .userInitiated) {
+                            try Data(contentsOf: url)
+                        }.value
+                        let count = try await chatStore.importFromFileDataAsync(data)
+                        chatStore.showToast(count == 1 ? "已导入 1 个对话" : "已导入 \(count) 个对话")
+                    } catch {
+                        chatStore.showToast("导入失败：\(error.localizedDescription)")
+                    }
                 }
             case .failure(let error):
                 chatStore.showToast("选择文件失败：\(error.localizedDescription)")
@@ -502,7 +507,8 @@ struct SettingsView: View {
                                 .foregroundStyle(Color.nuwaBrandText)
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 7)
-                                .nuwaGlass(in: Capsule(), tint: .nuwaBrand, interactive: true)
+                                .nuwaPillSurface(selected: true)
+                                .buttonStyle(NuwaTactileButtonStyle())
                             }
                             Button("退出") {
                                 settings.signOutDeepSeekAccount()
@@ -511,7 +517,8 @@ struct SettingsView: View {
                             .foregroundStyle(.red)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 7)
-                            .nuwaGlass(in: Capsule(), interactive: true)
+                            .nuwaPillSurface(destructive: true)
+                            .buttonStyle(NuwaTactileButtonStyle())
                         }
                     }
                 }
@@ -535,13 +542,9 @@ struct SettingsView: View {
                                     .foregroundStyle(selected ? Color.nuwaBrandText : Color.nuwaLabelPrimary)
                                     .padding(.horizontal, 10)
                                     .padding(.vertical, 6)
-                                    .nuwaGlass(
-                                        in: Capsule(),
-                                        tint: selected ? .nuwaBrand : nil,
-                                        interactive: true
-                                    )
+                                    .nuwaPillSurface(selected: selected)
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(NuwaTactileButtonStyle())
                         }
                     }
                 }
@@ -666,9 +669,14 @@ struct SettingsView: View {
                 subtitle: "导出标准 DeepSeek 格式 ZIP，可备份到 iCloud Drive 或导入其他端",
                 buttonTitle: "备份到 iCloud"
             ) {
-                if let data = try? chatStore.exportDeepSeekZipData() {
-                    exportDocument = ZipBackupDocument(data: data)
-                    isExporting = true
+                Task {
+                    do {
+                        let data = try await chatStore.exportDeepSeekZipDataAsync()
+                        exportDocument = ZipBackupDocument(data: data)
+                        isExporting = true
+                    } catch {
+                        chatStore.showToast("导出失败：\(error.localizedDescription)")
+                    }
                 }
             }
             rowDivider
@@ -827,7 +835,8 @@ struct SettingsView: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
-                .nuwaGlass(in: Capsule(), interactive: true)
+                .nuwaPillSurface()
+                .buttonStyle(NuwaTactileButtonStyle())
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 40)
@@ -913,7 +922,7 @@ struct SettingsView: View {
             .frame(minHeight: 50)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(NuwaTactileButtonStyle(pressedScale: 0.99))
     }
 
     private func pickerRow<Control: View>(icon: String, label: String, @ViewBuilder control: () -> Control) -> some View {
@@ -963,8 +972,9 @@ struct SettingsView: View {
                         }
                     }
                     .modifier(OptionalGlassCapsule(enabled: !primary, tint: destructive ? .red : nil))
+                    .contentShape(Capsule())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(NuwaTactileButtonStyle())
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
@@ -1077,7 +1087,7 @@ private struct OptionalGlassCapsule: ViewModifier {
 
     func body(content: Content) -> some View {
         if enabled {
-            content.nuwaGlass(in: Capsule(), tint: tint, interactive: true)
+            content.nuwaPillSurface(selected: false, destructive: tint == .red)
         } else {
             content
         }

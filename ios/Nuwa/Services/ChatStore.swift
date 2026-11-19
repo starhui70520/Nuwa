@@ -1,70 +1,30 @@
 import Foundation
 import SwiftUI
 
+/// Isolated per-session draft store so typing in the composer NEVER invalidates
+/// ChatView, MessageList, or SessionDrawerView (zero keystroke frame drops!).
 @MainActor
-final class ChatStore: ObservableObject {
-    @Published var sessions: [ChatSession] = []
-    @Published var activeSessionId: UUID?
-    @Published var isGenerating = false
-    @Published var importingHistory = false
-    @Published var toastMessage: String?
-
-    /// Per-session drafts (nil UUID key = Welcome/New Chat), matching chat-demo/src/services/chat/drafts.ts
+final class DraftStore: ObservableObject {
     @Published var drafts: [String: DraftEntry] = [:]
 
-    private var activeTask: Task<Void, Never>?
-    private var toastTask: Task<Void, Never>?
-    private var lastIcloudBackupAt: Date?
-    private var manuallyRenamedSessions: Set<UUID> = []
-    private var rejectedHistoryImageIds: Set<String> = []
-    private var consumingPendingMigration = false
-
-    private var storageURL: URL {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("Nuwa", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("sessions.json")
-    }
-
-    init() {
-        load()
-    }
-
-    var sortedSessions: [ChatSession] {
-        sessions.sorted { lhs, rhs in
-            let pinA = lhs.isPinned ? (lhs.pinnedAt ?? lhs.updatedAt).timeIntervalSince1970 : 0
-            let pinB = rhs.isPinned ? (rhs.pinnedAt ?? rhs.updatedAt).timeIntervalSince1970 : 0
-            if pinA != pinB {
-                return pinA > pinB
-            }
-            return lhs.updatedAt > rhs.updatedAt
-        }
-    }
-
-    var activeSession: ChatSession? {
-        guard let activeSessionId else { return nil }
-        return sessions.first { $0.id == activeSessionId }
-    }
-
-    // MARK: - Per-Session Drafts & Attachments
-
-    private func draftKey(for sessionId: UUID?) -> String {
+    private func key(for sessionId: UUID?) -> String {
         sessionId?.uuidString ?? "new"
     }
 
     func draft(for sessionId: UUID?) -> DraftEntry {
-        drafts[draftKey(for: sessionId)] ?? DraftEntry()
+        drafts[key(for: sessionId)] ?? DraftEntry()
     }
 
-    func setDraftText(_ text: String, for sessionId: UUID?) {
-        let key = draftKey(for: sessionId)
-        var entry = drafts[key] ?? DraftEntry()
+    func setText(_ text: String, for sessionId: UUID?) {
+        let k = key(for: sessionId)
+        var entry = drafts[k] ?? DraftEntry()
+        if entry.text == text { return }
         entry.text = text
-        drafts[key] = entry
+        drafts[k] = entry
     }
 
-    func canSendDraft(for sessionId: UUID?) -> Bool {
-        guard !importingHistory, !isGenerating else { return false }
+    func canSend(for sessionId: UUID?, isBusy: Bool) -> Bool {
+        guard !isBusy else { return false }
         let d = draft(for: sessionId)
         let hasText = !d.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let hasFiles = !d.attachments.isEmpty
@@ -72,36 +32,69 @@ final class ChatStore: ObservableObject {
         return d.attachments.allSatisfy { $0.status == .done }
     }
 
-    func addDraftFile(data: Data, fileName: String, isImage: Bool, for sessionId: UUID?, settings: SettingsStore) {
-        let key = draftKey(for: sessionId)
-        var entry = drafts[key] ?? DraftEntry()
+    func consumeDraft(for sessionId: UUID?) -> DraftEntry {
+        let k = key(for: sessionId)
+        let current = drafts[k] ?? DraftEntry()
+        drafts[k] = DraftEntry()
+        return current
+    }
+
+    func removeDraft(for sessionId: UUID?) {
+        drafts.removeValue(forKey: key(for: sessionId))
+    }
+
+    func clearAll() {
+        drafts.removeAll()
+    }
+
+    func addFile(
+        data: Data,
+        fileName: String,
+        isImage: Bool,
+        for sessionId: UUID?,
+        settings: SettingsStore,
+        onToast: @escaping (String) -> Void
+    ) {
+        let k = key(for: sessionId)
+        var entry = drafts[k] ?? DraftEntry()
         guard entry.attachments.count < AttachmentStore.maxCount else {
-            showToast("上传文件最多支持 \(AttachmentStore.maxCount) 个")
+            onToast("上传文件最多支持 \(AttachmentStore.maxCount) 个")
             return
         }
         let maxMB = AttachmentStore.uploadPurpose(fileName: fileName, isImage: isImage) == "user_data"
             ? AttachmentStore.maxUserDataSizeMB
             : AttachmentStore.maxSizeMB
         guard data.count <= maxMB * 1024 * 1024 else {
-            showToast("单个文件大小超过限制（\(maxMB)MB）")
+            onToast("单个文件大小超过限制（\(maxMB)MB）")
             return
         }
 
-        do {
-            let (file, normalizedData) = try AttachmentStore.saveLocally(data: data, originalName: fileName, isImage: isImage)
-            let item = DraftAttachment(id: file.id, file: file, status: .uploading)
-            entry.attachments.append(item)
-            drafts[key] = entry
-            uploadDraftAttachment(fileId: file.id, data: normalizedData, file: file, draftKey: key, settings: settings)
-        } catch {
-            AppLogStore.shared.record(.error, source: "attachment.save", message: error.localizedDescription)
-            showToast("读取附件失败：\(error.localizedDescription)")
+        Task.detached(priority: .userInitiated) {
+            do {
+                let (file, normalizedData) = try AttachmentStore.saveLocally(data: data, originalName: fileName, isImage: isImage)
+                await MainActor.run {
+                    var current = self.drafts[k] ?? DraftEntry()
+                    current.attachments.append(DraftAttachment(id: file.id, file: file, status: .uploading))
+                    self.drafts[k] = current
+                    self.uploadAttachment(fileId: file.id, data: normalizedData, file: file, draftKey: k, settings: settings, onToast: onToast)
+                }
+            } catch {
+                await MainActor.run {
+                    AppLogStore.shared.record(.error, source: "attachment.save", message: error.localizedDescription)
+                    onToast("读取附件失败：\(error.localizedDescription)")
+                }
+            }
         }
     }
 
-    func retryDraftAttachment(fileId: String, for sessionId: UUID?, settings: SettingsStore) {
-        let key = draftKey(for: sessionId)
-        guard var entry = drafts[key],
+    func retryAttachment(
+        fileId: String,
+        for sessionId: UUID?,
+        settings: SettingsStore,
+        onToast: @escaping (String) -> Void
+    ) {
+        let k = key(for: sessionId)
+        guard var entry = drafts[k],
               let idx = entry.attachments.firstIndex(where: { $0.id == fileId })
         else { return }
         let file = entry.attachments[idx].file
@@ -109,23 +102,24 @@ final class ChatStore: ObservableObject {
               let data = try? Data(contentsOf: url)
         else { return }
         entry.attachments[idx].status = .uploading
-        drafts[key] = entry
-        uploadDraftAttachment(fileId: fileId, data: data, file: file, draftKey: key, settings: settings)
+        drafts[k] = entry
+        uploadAttachment(fileId: fileId, data: data, file: file, draftKey: k, settings: settings, onToast: onToast)
     }
 
-    func removeDraftAttachment(fileId: String, for sessionId: UUID?) {
-        let key = draftKey(for: sessionId)
-        guard var entry = drafts[key] else { return }
+    func removeAttachment(fileId: String, for sessionId: UUID?) {
+        let k = key(for: sessionId)
+        guard var entry = drafts[k] else { return }
         entry.attachments.removeAll { $0.id == fileId }
-        drafts[key] = entry
+        drafts[k] = entry
     }
 
-    private func uploadDraftAttachment(
+    private func uploadAttachment(
         fileId: String,
         data: Data,
         file: FileAttachment,
-        draftKey key: String,
-        settings: SettingsStore
+        draftKey k: String,
+        settings: SettingsStore,
+        onToast: @escaping (String) -> Void
     ) {
         let secret = settings.activeSecret
         let useAccount = settings.isUsingDeepSeekAccount
@@ -143,22 +137,102 @@ final class ChatStore: ObservableObject {
                     useAccount: useAccount,
                     baseUrl: baseUrl
                 )
-                guard var entry = drafts[key],
+                guard var entry = drafts[k],
                       let idx = entry.attachments.firstIndex(where: { $0.id == fileId })
                 else { return }
                 entry.attachments[idx].file.serverId = serverId
                 entry.attachments[idx].status = .done
-                drafts[key] = entry
+                drafts[k] = entry
             } catch {
-                guard var entry = drafts[key],
+                guard var entry = drafts[k],
                       let idx = entry.attachments.firstIndex(where: { $0.id == fileId })
                 else { return }
                 entry.attachments[idx].status = .failed(error.localizedDescription)
-                drafts[key] = entry
+                drafts[k] = entry
                 AppLogStore.shared.record(.error, source: "attachment.upload", message: error.localizedDescription)
-                showToast("附件上传失败：\(error.localizedDescription)")
+                onToast("附件上传失败：\(error.localizedDescription)")
             }
         }
+    }
+}
+
+/// Lightweight sidebar metadata (mirrors Android SessionSummary) — NEVER changes during streaming deltas!
+struct SessionSummaryItem: Identifiable, Equatable {
+    let id: UUID
+    let title: String
+    let updatedAt: Date
+    let isPinned: Bool
+    let pinnedAt: Date?
+}
+
+/// Isolated sidebar list store so streaming tokens NEVER trigger sidebar re-sorts or date grouping!
+@MainActor
+final class SessionListStore: ObservableObject {
+    @Published private(set) var summaries: [SessionSummaryItem] = []
+
+    func sync(from sessions: [ChatSession]) {
+        let next = sessions.sorted { lhs, rhs in
+            let pinA = lhs.isPinned ? (lhs.pinnedAt ?? lhs.updatedAt).timeIntervalSince1970 : 0
+            let pinB = rhs.isPinned ? (rhs.pinnedAt ?? rhs.updatedAt).timeIntervalSince1970 : 0
+            if pinA != pinB { return pinA > pinB }
+            return lhs.updatedAt > rhs.updatedAt
+        }.map { s in
+            SessionSummaryItem(
+                id: s.id,
+                title: s.title,
+                updatedAt: s.updatedAt,
+                isPinned: s.isPinned,
+                pinnedAt: s.pinnedAt
+            )
+        }
+        if next != summaries {
+            summaries = next
+        }
+    }
+}
+
+@MainActor
+final class ChatStore: ObservableObject {
+    @Published var sessions: [ChatSession] = []
+    @Published var activeSessionId: UUID?
+    @Published var isGenerating = false
+    @Published var importingHistory = false
+    @Published var toastMessage: String?
+
+    /// Dedicated isolated sub-stores so typing and streaming NEVER cause whole-app redraws.
+    let draftStore = DraftStore()
+    let listStore = SessionListStore()
+
+    private var activeTask: Task<Void, Never>?
+    private var toastTask: Task<Void, Never>?
+    private var saveWorkItem: DispatchWorkItem?
+    private var lastIcloudBackupAt: Date?
+    private var manuallyRenamedSessions: Set<UUID> = []
+    private var rejectedHistoryImageIds: Set<String> = []
+    private var consumingPendingMigration = false
+
+    private static let persistenceQueue = DispatchQueue(label: "com.rankchord.nuwa.persistence", qos: .utility)
+
+    private static var storageURL: URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("Nuwa", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("sessions.json")
+    }
+
+    init() {
+        loadAsync()
+    }
+
+    var activeSession: ChatSession? {
+        guard let activeSessionId else { return nil }
+        return sessions.first { $0.id == activeSessionId }
+    }
+
+    func sessionMatchesQuery(_ sessionId: UUID, query: String) -> Bool {
+        guard let session = sessions.first(where: { $0.id == sessionId }) else { return false }
+        if session.title.localizedCaseInsensitiveContains(query) { return true }
+        return session.messages.contains { $0.content.localizedCaseInsensitiveContains(query) }
     }
 
     // MARK: - Session CRUD
@@ -188,7 +262,8 @@ final class ChatStore: ObservableObject {
         guard let idx = sessions.firstIndex(where: { $0.id == id }) else { return }
         sessions[idx].isPinned.toggle()
         sessions[idx].pinnedAt = sessions[idx].isPinned ? Date() : nil
-        save()
+        listStore.sync(from: sessions)
+        scheduleSave()
     }
 
     func setSessionsPinned(_ ids: Set<UUID>, pinned: Bool) {
@@ -201,7 +276,10 @@ final class ChatStore: ObservableObject {
                 changed = true
             }
         }
-        if changed { save() }
+        if changed {
+            listStore.sync(from: sessions)
+            scheduleSave()
+        }
     }
 
     func renameSession(_ id: UUID, title: String) {
@@ -210,7 +288,8 @@ final class ChatStore: ObservableObject {
         manuallyRenamedSessions.insert(id)
         sessions[idx].title = clean
         sessions[idx].updatedAt = Date()
-        save()
+        listStore.sync(from: sessions)
+        scheduleSave()
     }
 
     func deleteSession(_ id: UUID) {
@@ -219,8 +298,9 @@ final class ChatStore: ObservableObject {
             activeSessionId = nil
         }
         sessions.removeAll { $0.id == id }
-        drafts.removeValue(forKey: draftKey(for: id))
-        save()
+        draftStore.removeDraft(for: id)
+        listStore.sync(from: sessions)
+        scheduleSave()
     }
 
     func deleteSessions(_ ids: Set<UUID>) {
@@ -229,17 +309,21 @@ final class ChatStore: ObservableObject {
             activeSessionId = nil
         }
         sessions.removeAll { ids.contains($0.id) }
-        for id in ids { drafts.removeValue(forKey: draftKey(for: id)) }
-        save()
+        for id in ids { draftStore.removeDraft(for: id) }
+        listStore.sync(from: sessions)
+        scheduleSave()
     }
 
     func deleteAllSessions() {
         stopGenerating()
         sessions.removeAll()
-        drafts.removeAll()
+        draftStore.clearAll()
         activeSessionId = nil
-        AttachmentStore.deleteAllLocalFiles()
-        save()
+        listStore.sync(from: sessions)
+        Task.detached(priority: .utility) {
+            AttachmentStore.deleteAllLocalFiles()
+        }
+        scheduleSave(immediate: true)
     }
 
     func stopGenerating() {
@@ -247,10 +331,12 @@ final class ChatStore: ObservableObject {
         activeTask = nil
         isGenerating = false
         if let sIdx = sessions.firstIndex(where: { $0.id == activeSessionId }) {
+            var modified = false
             for mIdx in sessions[sIdx].messages.indices where sessions[sIdx].messages[mIdx].isStreaming {
                 sessions[sIdx].messages[mIdx].status = .stopped
+                modified = true
             }
-            save()
+            if modified { scheduleSave() }
         }
     }
 
@@ -258,11 +344,10 @@ final class ChatStore: ObservableObject {
 
     func sendCurrentDraft(settings: SettingsStore) {
         let targetId = activeSessionId
-        guard canSendDraft(for: targetId) else { return }
-        let d = draft(for: targetId)
+        guard draftStore.canSend(for: targetId, isBusy: importingHistory || isGenerating) else { return }
+        let d = draftStore.consumeDraft(for: targetId)
         let trimmed = d.text.trimmingCharacters(in: .whitespacesAndNewlines)
         let files = d.attachments.map(\.file)
-        drafts[draftKey(for: targetId)] = DraftEntry()
 
         if activeSessionId == nil || !sessions.contains(where: { $0.id == activeSessionId }) {
             let fresh = ChatSession(title: "")
@@ -286,7 +371,8 @@ final class ChatStore: ObservableObject {
 
         sessions[sIdx].appendBranch(parentId: visible.last?.id, newMessages: [userMsg, assistantMsg])
         sessions[sIdx].updatedAt = Date()
-        save()
+        listStore.sync(from: sessions)
+        scheduleSave()
 
         streamReply(
             sessionId: sessionId,
@@ -298,7 +384,6 @@ final class ChatStore: ObservableObject {
         )
     }
 
-    /// Edit a user message -> creates a new sibling branch while preserving original attachments & old branch (1:1 editMessage)
     func editUserMessage(messageId: UUID, newContent: String, settings: SettingsStore) {
         let trimmed = newContent.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !isGenerating,
@@ -324,7 +409,8 @@ final class ChatStore: ObservableObject {
 
         sessions[sIdx].appendBranch(parentId: original.parentId, newMessages: [editedUser, assistantMsg])
         sessions[sIdx].updatedAt = Date()
-        save()
+        listStore.sync(from: sessions)
+        scheduleSave()
 
         streamReply(
             sessionId: sessionId,
@@ -336,7 +422,6 @@ final class ChatStore: ObservableObject {
         )
     }
 
-    /// Regenerate any assistant message -> creates a new sibling branch under the user prompt (1:1 regenerateReply)
     func regenerateReply(messageId: UUID? = nil, settings: SettingsStore) {
         guard !isGenerating,
               let sessionId = activeSessionId,
@@ -369,7 +454,8 @@ final class ChatStore: ObservableObject {
 
         sessions[sIdx].appendBranch(parentId: question.id, newMessages: [assistantMsg])
         sessions[sIdx].updatedAt = Date()
-        save()
+        listStore.sync(from: sessions)
+        scheduleSave()
 
         streamReply(
             sessionId: sessionId,
@@ -381,7 +467,6 @@ final class ChatStore: ObservableObject {
         )
     }
 
-    /// Continue generating a stopped or max_tokens-truncated reply (1:1 continueReply)
     func continueReply(messageId: UUID, settings: SettingsStore) {
         guard !isGenerating,
               let sessionId = activeSessionId,
@@ -404,7 +489,7 @@ final class ChatStore: ObservableObject {
             sessions[sIdx].messages[mIdx].status = .streaming
             sessions[sIdx].messages[mIdx].errorMessage = nil
         }
-        save()
+        scheduleSave()
 
         streamReply(
             sessionId: sessionId,
@@ -422,10 +507,10 @@ final class ChatStore: ObservableObject {
               let sIdx = sessions.firstIndex(where: { $0.id == sessionId })
         else { return }
         sessions[sIdx].selectVersion(messageId: messageId)
-        save()
+        scheduleSave()
     }
 
-    // MARK: - Attachment Preparation & Re-upload Recovery (1:1 store.ts prepareFiles & reuploadInvalidatedFiles)
+    // MARK: - Attachment Preparation & Re-upload Recovery
 
     private func saveServerIds(sessionId: UUID, map: [String: String]) {
         guard !map.isEmpty,
@@ -439,7 +524,7 @@ final class ChatStore: ObservableObject {
                 }
             }
         }
-        save()
+        scheduleSave()
     }
 
     private func prepareFilesForRequest(
@@ -455,7 +540,6 @@ final class ChatStore: ObservableObject {
             return (history, question)
         }
 
-        // Refresh snapshots from live session
         let liveById: [UUID: ChatMessage]
         if let s = sessions.first(where: { $0.id == sessionId }) {
             liveById = Dictionary(uniqueKeysWithValues: s.messages.map { ($0.id, $0) })
@@ -467,7 +551,6 @@ final class ChatStore: ObservableObject {
 
         var uploadedMap: [String: String] = [:]
 
-        // 1. Current question files: required (throw on failure)
         for file in liveQuestion.files where file.serverId == nil {
             try Task.checkCancellation()
             guard let url = AttachmentStore.localURL(for: file),
@@ -489,7 +572,6 @@ final class ChatStore: ObservableObject {
             saveServerIds(sessionId: sessionId, map: uploadedMap)
         }
 
-        // 2. Historical user files (e.g. imported ZIP images): best-effort newest first, silently skip failures
         for msg in liveHistory.reversed() where msg.role == .user {
             for file in msg.files where file.serverId == nil && uploadedMap[file.id] == nil {
                 try Task.checkCancellation()
@@ -512,7 +594,6 @@ final class ChatStore: ObservableObject {
             }
         }
 
-        // Re-resolve updated messages
         guard let refreshedSession = sessions.first(where: { $0.id == sessionId }) else {
             return (liveHistory, liveQuestion)
         }
@@ -536,11 +617,11 @@ final class ChatStore: ObservableObject {
                 }
             }
         }
-        if clearedAny { save() }
+        if clearedAny { scheduleSave() }
         return clearedAny
     }
 
-    // MARK: - Streaming Reducer with 32K->1M Fallback, File Re-upload, Bad Image Recovery & Auto-Title
+    // MARK: - 30fps Coalesced Streaming Reducer (Zero UI Jank!)
 
     private func streamReply(
         sessionId: UUID,
@@ -600,107 +681,137 @@ final class ChatStore: ObservableObject {
                         rejectedFileIds: rejectedHistoryImageIds
                     )
 
+                    // Local working copy to coalesce rapid SSE token chunks at ~30fps (33ms)
+                    guard let initSIdx = sessions.firstIndex(where: { $0.id == sessionId }),
+                          let initMIdx = sessions[initSIdx].messages.firstIndex(where: { $0.id == assistantId })
+                    else { break }
+                    var working = sessions[initSIdx].messages[initMIdx]
+                    var pendingTitle: String?
                     var blockIndexMap: [Int: Int] = [:]
-                    for try await event in AIClient.streamChat(params) {
+                    var lastFlushTime = ContinuousClock.now
+                    var hasDirtyDelta = false
+
+                    func flushWorking(force: Bool = false) {
+                        guard force || hasDirtyDelta else { return }
                         guard let sIdx = sessions.firstIndex(where: { $0.id == sessionId }),
                               let mIdx = sessions[sIdx].messages.firstIndex(where: { $0.id == assistantId })
-                        else { break }
+                        else { return }
+                        sessions[sIdx].messages[mIdx] = working
+                        sessions[sIdx].updatedAt = Date()
+                        if let t = pendingTitle,
+                           !manuallyRenamedSessions.contains(sessionId),
+                           sessions[sIdx].title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            sessions[sIdx].title = t
+                            pendingTitle = nil
+                            listStore.sync(from: sessions)
+                        }
+                        lastFlushTime = ContinuousClock.now
+                        hasDirtyDelta = false
+                    }
 
-                        sessions[sIdx].messages[mIdx].status = .streaming
+                    for try await event in AIClient.streamChat(params) {
+                        working.status = .streaming
 
                         switch event {
                         case .blockStart(let streamIdx, let block):
                             receivedContent = true
-                            blockIndexMap[streamIdx] = sessions[sIdx].messages[mIdx].blocks.count
-                            sessions[sIdx].messages[mIdx].blocks.append(block)
+                            blockIndexMap[streamIdx] = working.blocks.count
+                            working.blocks.append(block)
+                            hasDirtyDelta = true
+                            flushWorking(force: true)
 
                         case .textDelta(let streamIdx, let delta):
                             if let localIdx = blockIndexMap[streamIdx],
-                               localIdx < sessions[sIdx].messages[mIdx].blocks.count,
-                               case .text(let id, let existing, let cites, let isTemplate) = sessions[sIdx].messages[mIdx].blocks[localIdx] {
-                                sessions[sIdx].messages[mIdx].blocks[localIdx] = .text(id: id, text: existing + delta, citations: cites, isTemplate: isTemplate)
+                               localIdx < working.blocks.count,
+                               case .text(let id, let existing, let cites, let isTemplate) = working.blocks[localIdx] {
+                                working.blocks[localIdx] = .text(id: id, text: existing + delta, citations: cites, isTemplate: isTemplate)
                             }
-                            sessions[sIdx].messages[mIdx].content += delta
+                            working.content += delta
+                            hasDirtyDelta = true
 
                         case .thinkingDelta(let streamIdx, let delta):
                             if let localIdx = blockIndexMap[streamIdx],
-                               localIdx < sessions[sIdx].messages[mIdx].blocks.count,
-                               case .thinking(let id, let existing, let sig, let start, let end, _) = sessions[sIdx].messages[mIdx].blocks[localIdx] {
+                               localIdx < working.blocks.count,
+                               case .thinking(let id, let existing, let sig, let start, let end, _) = working.blocks[localIdx] {
                                 let elapsed = start.map { Date().timeIntervalSince($0) }
-                                sessions[sIdx].messages[mIdx].blocks[localIdx] = .thinking(id: id, text: existing + delta, signature: sig, startedAt: start, endedAt: end, elapsedSeconds: elapsed)
-                                sessions[sIdx].messages[mIdx].thinkingSeconds = elapsed
+                                working.blocks[localIdx] = .thinking(id: id, text: existing + delta, signature: sig, startedAt: start, endedAt: end, elapsedSeconds: elapsed)
+                                working.thinkingSeconds = elapsed
                             }
-                            sessions[sIdx].messages[mIdx].reasoning += delta
+                            working.reasoning += delta
+                            hasDirtyDelta = true
 
                         case .signatureDelta(let streamIdx, let sigDelta):
                             if let localIdx = blockIndexMap[streamIdx],
-                               localIdx < sessions[sIdx].messages[mIdx].blocks.count,
-                               case .thinking(let id, let existing, let sig, let start, let end, let elapsed) = sessions[sIdx].messages[mIdx].blocks[localIdx] {
-                                sessions[sIdx].messages[mIdx].blocks[localIdx] = .thinking(id: id, text: existing, signature: (sig ?? "") + sigDelta, startedAt: start, endedAt: end, elapsedSeconds: elapsed)
+                               localIdx < working.blocks.count,
+                               case .thinking(let id, let existing, let sig, let start, let end, let elapsed) = working.blocks[localIdx] {
+                                working.blocks[localIdx] = .thinking(id: id, text: existing, signature: (sig ?? "") + sigDelta, startedAt: start, endedAt: end, elapsedSeconds: elapsed)
                             }
 
                         case .citationDelta(let streamIdx, let citation):
                             if let localIdx = blockIndexMap[streamIdx],
-                               localIdx < sessions[sIdx].messages[mIdx].blocks.count,
-                               case .text(let id, let existing, var cites, let isTemplate) = sessions[sIdx].messages[mIdx].blocks[localIdx] {
+                               localIdx < working.blocks.count,
+                               case .text(let id, let existing, var cites, let isTemplate) = working.blocks[localIdx] {
                                 cites.append(citation)
-                                sessions[sIdx].messages[mIdx].blocks[localIdx] = .text(id: id, text: existing, citations: cites, isTemplate: isTemplate)
+                                working.blocks[localIdx] = .text(id: id, text: existing, citations: cites, isTemplate: isTemplate)
+                                hasDirtyDelta = true
                             }
 
                         case .blockStop(let streamIdx):
                             if let localIdx = blockIndexMap.removeValue(forKey: streamIdx),
-                               localIdx < sessions[sIdx].messages[mIdx].blocks.count,
-                               case .thinking(let id, let existing, let sig, let start, _, _) = sessions[sIdx].messages[mIdx].blocks[localIdx] {
+                               localIdx < working.blocks.count,
+                               case .thinking(let id, let existing, let sig, let start, _, _) = working.blocks[localIdx] {
                                 let now = Date()
                                 let elapsed = start.map { now.timeIntervalSince($0) }
-                                sessions[sIdx].messages[mIdx].blocks[localIdx] = .thinking(id: id, text: existing, signature: sig, startedAt: start, endedAt: now, elapsedSeconds: elapsed)
-                                sessions[sIdx].messages[mIdx].thinkingSeconds = elapsed
+                                working.blocks[localIdx] = .thinking(id: id, text: existing, signature: sig, startedAt: start, endedAt: now, elapsedSeconds: elapsed)
+                                working.thinkingSeconds = elapsed
                             }
+                            hasDirtyDelta = true
+                            flushWorking(force: true)
 
                         case .messageDelta(let stopReason, let autoTitle):
-                            if let stopReason {
-                                sessions[sIdx].messages[mIdx].stopReason = stopReason
+                            if let stopReason { working.stopReason = stopReason }
+                            if let autoTitle, !autoTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                pendingTitle = autoTitle.trimmingCharacters(in: .whitespacesAndNewlines)
                             }
-                            if let autoTitle,
-                               !autoTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                               !manuallyRenamedSessions.contains(sessionId),
-                               sessions[sIdx].title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                sessions[sIdx].title = autoTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-                            }
+                            hasDirtyDelta = true
+                            flushWorking(force: true)
 
                         case .disablePrefix:
-                            sessions[sIdx].messages[mIdx].prefixEnabled = false
+                            working.prefixEnabled = false
                         }
-                        sessions[sIdx].updatedAt = Date()
+
+                        if hasDirtyDelta && (ContinuousClock.now - lastFlushTime) >= .milliseconds(33) {
+                            flushWorking()
+                        }
                     }
 
-                    // Settle reply cleanly (discard text/thinking if refusal per reply.ts)
-                    if let sIdx = sessions.firstIndex(where: { $0.id == sessionId }),
-                       let mIdx = sessions[sIdx].messages.firstIndex(where: { $0.id == assistantId }) {
-                        if sessions[sIdx].messages[mIdx].stopReason == "refusal" {
-                            sessions[sIdx].messages[mIdx].blocks.removeAll { block in
-                                switch block {
-                                case .thinking: return true
-                                case .text(_, _, _, let isTemplate): return !isTemplate
-                                default: return false
-                                }
+                    // Settle final working state
+                    if working.stopReason == "refusal" {
+                        working.blocks.removeAll { block in
+                            switch block {
+                            case .thinking: return true
+                            case .text(_, _, _, let isTemplate): return !isTemplate
+                            default: return false
                             }
-                            sessions[sIdx].messages[mIdx].content = "你好，这个问题我暂时无法回答，让我们换个话题再聊聊吧。"
-                            sessions[sIdx].messages[mIdx].reasoning = ""
                         }
-                        if sessions[sIdx].title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                           !manuallyRenamedSessions.contains(sessionId) {
-                            let fallbackTitle = question.content.trimmingCharacters(in: .whitespacesAndNewlines)
-                            sessions[sIdx].title = fallbackTitle.isEmpty ? "新对话" : String(fallbackTitle.prefix(24))
-                        }
-                        sessions[sIdx].messages[mIdx].status = Task.isCancelled ? .stopped : .done
+                        working.content = "你好，这个问题我暂时无法回答，让我们换个话题再聊聊吧。"
+                        working.reasoning = ""
+                    }
+                    working.status = Task.isCancelled ? .stopped : .done
+                    flushWorking(force: true)
+
+                    if let sIdx = sessions.firstIndex(where: { $0.id == sessionId }),
+                       sessions[sIdx].title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                       !manuallyRenamedSessions.contains(sessionId) {
+                        let fallbackTitle = question.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                        sessions[sIdx].title = fallbackTitle.isEmpty ? "新对话" : String(fallbackTitle.prefix(24))
+                        listStore.sync(from: sessions)
                     }
                     break
                 } catch let err as AIClientError where !receivedContent && !omitExtendedFor1M && err.is32kInputLimit {
                     omitExtendedFor1M = true
                     continue
                 } catch let err as AIClientError where !receivedContent && skippedBadImages < maxSkippedBadImages && err.unsupportedImageIndices() != nil {
-                    // Skip broken historical image and retry so thread doesn't deadlock
                     let candidateIds: [String] = history.flatMap { msg in
                         msg.role == .user ? msg.files.compactMap { $0.isImage ? $0.serverId : nil } : []
                     }
@@ -738,7 +849,8 @@ final class ChatStore: ObservableObject {
 
             isGenerating = false
             activeTask = nil
-            save()
+            listStore.sync(from: sessions)
+            scheduleSave(immediate: true)
             settings.schedulePostReplyBalanceRefresh()
         }
     }
@@ -762,19 +874,18 @@ final class ChatStore: ObservableObject {
 
     func showToast(_ message: String) {
         toastTask?.cancel()
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+        withAnimation(.easeOut(duration: 0.2)) {
             toastMessage = message
         }
         toastTask = Task {
             try? await Task.sleep(for: .seconds(2.2))
             guard !Task.isCancelled else { return }
-            withAnimation(.easeOut(duration: 0.25)) {
+            withAnimation(.easeOut(duration: 0.2)) {
                 toastMessage = nil
             }
         }
     }
 
-    /// Consumes any pending migration ZIP saved by MigrationWebViewController across process restarts (1:1 migrationBridge.ts).
     func checkPendingMigration() {
         guard !consumingPendingMigration, !importingHistory else { return }
         guard let pendingPath = UserDefaults.standard.string(forKey: MigrationWebViewController.keyPendingPath),
@@ -795,29 +906,26 @@ final class ChatStore: ObservableObject {
         }
     }
 
-    func exportDeepSeekZipData() throws -> Data {
-        do {
-            return try DeepSeekZipExporter.exportSessionsToZip(sessions)
-        } catch {
-            AppLogStore.shared.record(.error, source: "history.export", message: error.localizedDescription)
-            throw error
-        }
+    func exportDeepSeekZipDataAsync() async throws -> Data {
+        let snapshot = sessions
+        return try await Task.detached(priority: .userInitiated) {
+            try DeepSeekZipExporter.exportSessionsToZip(snapshot)
+        }.value
     }
 
-    func importFromFileData(_ data: Data) throws -> Int {
-        do {
+    func importFromFileDataAsync(_ data: Data) async throws -> Int {
+        importingHistory = true
+        defer { importingHistory = false }
+        let parsed: [ChatSession] = try await Task.detached(priority: .userInitiated) {
             if data.count >= 4 && data[0] == 0x50 && data[1] == 0x4B && data[2] == 0x03 && data[3] == 0x04 {
-                let parsed = try DeepSeekZipImporter.parseZipData(data)
-                return mergeSessions(parsed)
+                return try DeepSeekZipImporter.parseZipData(data)
             }
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             let archive = try decoder.decode(NuwaBackupArchive.self, from: data)
-            return mergeSessions(archive.sessions)
-        } catch {
-            AppLogStore.shared.record(.error, source: "history.import", message: error.localizedDescription)
-            throw error
-        }
+            return archive.sessions
+        }.value
+        return mergeSessions(parsed)
     }
 
     func importFromFilePath(_ path: String, onFinished: (() -> Void)? = nil) {
@@ -830,8 +938,10 @@ final class ChatStore: ObservableObject {
                 onFinished?()
             }
             do {
-                let data = try Data(contentsOf: URL(fileURLWithPath: path))
-                let count = try importFromFileData(data)
+                let data = try await Task.detached(priority: .userInitiated) {
+                    try Data(contentsOf: URL(fileURLWithPath: path))
+                }.value
+                let count = try await importFromFileDataAsync(data)
                 showToast(count == 1 ? "已导入 1 个对话" : "已导入 \(count) 个对话")
             } catch {
                 AppLogStore.shared.record(.error, source: "migration.import", message: error.localizedDescription)
@@ -845,7 +955,8 @@ final class ChatStore: ObservableObject {
             let session = try await ShareLinkImporter.fetchSharedSession(input: input)
             sessions.insert(session, at: 0)
             activeSessionId = session.id
-            save()
+            listStore.sync(from: sessions)
+            scheduleSave(immediate: true)
             return session
         } catch {
             AppLogStore.shared.record(.error, source: "shareLink.import", message: error.localizedDescription)
@@ -890,30 +1001,61 @@ final class ChatStore: ObservableObject {
                 importedCount += 1
             }
         }
-        save()
+        listStore.sync(from: sessions)
+        scheduleSave(immediate: true)
         return importedCount
     }
 
-    private func save() {
-        do {
-            let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
-            let data = try encoder.encode(sessions)
-            try data.write(to: storageURL, options: [.atomic])
-        } catch {
-            AppLogStore.shared.record(.error, source: "chatStore.save", message: error.localizedDescription)
+    // MARK: - Background Serial Disk Persistence (Never Blocks Main Thread!)
+
+    func flushPendingSave() {
+        scheduleSave(immediate: true)
+    }
+
+    private func scheduleSave(immediate: Bool = false) {
+        saveWorkItem?.cancel()
+        let snapshot = sessions
+        let targetURL = Self.storageURL
+        let work = DispatchWorkItem {
+            do {
+                let encoder = JSONEncoder()
+                encoder.dateEncodingStrategy = .iso8601
+                let data = try encoder.encode(snapshot)
+                try data.write(to: targetURL, options: [.atomic])
+            } catch {
+                Task { @MainActor in
+                    AppLogStore.shared.record(.error, source: "chatStore.save", message: error.localizedDescription)
+                }
+            }
+        }
+        saveWorkItem = work
+        if immediate {
+            Self.persistenceQueue.async(execute: work)
+        } else {
+            Self.persistenceQueue.asyncAfter(deadline: .now() + 0.25, execute: work)
         }
     }
 
-    private func load() {
-        guard let data = try? Data(contentsOf: storageURL) else { return }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        if var decoded = try? decoder.decode([ChatSession].self, from: data) {
+    private func loadAsync() {
+        let targetURL = Self.storageURL
+        Self.persistenceQueue.async { [weak self] in
+            guard let data = try? Data(contentsOf: targetURL) else { return }
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            guard var decoded = try? decoder.decode([ChatSession].self, from: data) else { return }
             for i in decoded.indices {
                 decoded[i].ensureTreeNormalized()
             }
-            sessions = decoded
+            let readySessions = decoded
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if self.sessions.isEmpty {
+                    self.sessions = readySessions
+                } else {
+                    _ = self.mergeSessions(readySessions)
+                }
+                self.listStore.sync(from: self.sessions)
+            }
         }
     }
 }

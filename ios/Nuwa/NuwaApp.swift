@@ -12,6 +12,8 @@ struct NuwaApp: App {
                 if settings.hasActiveCredential {
                     ChatView(
                         chatStore: chatStore,
+                        draftStore: chatStore.draftStore,
+                        listStore: chatStore.listStore,
                         settings: settings,
                         speech: speech
                     )

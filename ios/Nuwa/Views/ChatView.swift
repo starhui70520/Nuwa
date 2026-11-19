@@ -3,19 +3,18 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
-/// Exact 1:1 recreation of Nuwa v0.1.31 mobile UI/UX with full Android feature parity:
-/// - Full-bleed edge-to-edge background (zero top/bottom blank strips)
-/// - Interactive finger-following push drawer (dragProgress 0...1, 0.95 scale, 24pt corner radius)
-/// - Floating Liquid Glass MobileHeader (42pt circle menu + centered double-tap-to-top title + 42pt speaker/new-chat capsule)
-/// - Minimal Welcome screen (52pt NuwaLogo + greeting)
-/// - Full branching conversation tree (inline edit user message, regenerate any reply, < 1/N > switcher, continue generating)
-/// - Structured ReplyBlocks (DeepThink accordion, Web Search + Read Link / Open Page steps + SearchPanelSheet, rich Markdown + citations)
-/// - Native file & photo attachments (draft strip, upload status, thumbnails, full-screen image lightbox preview)
-/// - Per-session drafts, voice prefix append, MigrationPromptModal, pending migration recovery, Settings over open sidebar, iCloud auto-backup
+/// High-performance 120Hz native SwiftUI ChatView (1:1 Nuwa v0.1.31 UX + iOS 26 Liquid Glass chrome):
+/// - Root `Color.nuwaSidebarFill.ignoresSafeArea()` outside GeometryReader (100% uniform sidebar top color)
+/// - Zero offscreen `.mask`/`.shadow`/`.scaleEffect` when drawer is closed (`progress == 0`)
+/// - Isolated `ChatComposerContainer` & `ChatHeaderView` & `SessionDrawerView` (typing / audio metering / streaming never cascade!)
+/// - Tap-to-close overlay lives INSIDE `mainSurface`, so sidebar buttons (including Settings) are 100% unobstructed
+/// - Zero `.glassEffect()` inside ScrollView rows (Liquid Glass reserved strictly for floating chrome!)
 struct ChatView: View {
     @ObservedObject var chatStore: ChatStore
+    let draftStore: DraftStore
+    let listStore: SessionListStore
     @ObservedObject var settings: SettingsStore
-    @ObservedObject var speech: SpeechService
+    let speech: SpeechService
 
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
@@ -34,9 +33,7 @@ struct ChatView: View {
     @State private var searchPanelResults: [WebSearchResultItem]?
     @State private var previewImage: UIImage?
 
-    @State private var voiceDraftPrefix = ""
     @State private var scrollToTopToken = 0
-    @State private var lastTitleTapAt: Date?
     @State private var isAtBottom = true
 
     private let topUpURL = URL(string: "https://platform.deepseek.com/top_up")!
@@ -53,121 +50,112 @@ struct ChatView: View {
         dragProgress ?? (drawerOpen ? 1 : 0)
     }
 
-    private var currentDraftBinding: Binding<String> {
-        Binding(
-            get: { chatStore.draft(for: chatStore.activeSessionId).text },
-            set: { chatStore.setDraftText($0, for: chatStore.activeSessionId) }
-        )
-    }
-
     var body: some View {
-        GeometryReader { geo in
-            let drawerWidth = min(geo.size.width * 0.82, 310)
-            let progress = effectiveProgress
-            let scale = 1.0 - 0.05 * progress
-            let cornerRadius = 24.0 * progress
+        ZStack {
+            // Single edge-to-edge sidebar background behind GeometryReader -> zero top safe-area color seam!
+            Color.nuwaSidebarFill.ignoresSafeArea()
 
-            ZStack(alignment: .leading) {
-                SessionDrawerView(
-                    chatStore: chatStore,
-                    settings: settings,
-                    isOpen: drawerOpen,
-                    onClose: { closeDrawer() },
-                    onOpenSettings: { showSettings = true }
-                )
-                .frame(width: drawerWidth)
+            GeometryReader { geo in
+                let drawerWidth = min(geo.size.width * 0.82, 310)
+                let progress = effectiveProgress
 
-                mainSurface
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color.nuwaBgBase.ignoresSafeArea(.container, edges: .vertical))
-                    .mask {
-                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                            .ignoresSafeArea(.container, edges: .vertical)
-                    }
-                    .shadow(
-                        color: Color.black.opacity(0.14 * progress),
-                        radius: 24,
-                        x: -6,
-                        y: 0
-                    )
-                    .scaleEffect(scale, anchor: .leading)
-                    .offset(x: drawerWidth * progress)
-                    .overlay {
-                        if drawerOpen && dragProgress == nil {
-                            Color.clear
-                                .contentShape(Rectangle())
-                                .ignoresSafeArea(.container, edges: .vertical)
-                                .onTapGesture { closeDrawer() }
-                                .offset(x: drawerWidth)
-                        }
-                    }
-                    .animation(
-                        dragProgress == nil ? .spring(response: 0.28, dampingFraction: 0.88) : nil,
-                        value: drawerOpen
-                    )
-
-                if settings.showMigrationPrompt {
-                    MigrationPromptModalView(
+                ZStack(alignment: .leading) {
+                    SessionDrawerView(
+                        listStore: listStore,
                         settings: settings,
-                        chatStore: chatStore,
-                        onStartOneClickMigration: {
-                            settings.hasUsedOneClickMigration = true
-                            showMigrationWeb = true
-                        },
-                        onStartZipImport: { showZipImporter = true }
+                        activeSessionId: chatStore.activeSessionId,
+                        isOpen: drawerOpen,
+                        onSelectSession: { chatStore.selectSession($0) },
+                        onCreateNewSession: { chatStore.createNewSession(silentIfAlreadyNew: true) },
+                        onTogglePin: { chatStore.togglePin($0) },
+                        onSetSessionsPinned: { chatStore.setSessionsPinned($0, pinned: $1) },
+                        onRenameSession: { chatStore.renameSession($0, title: $1) },
+                        onDeleteSession: { chatStore.deleteSession($0) },
+                        onDeleteSessions: { chatStore.deleteSessions($0) },
+                        onMatchesQuery: { chatStore.sessionMatchesQuery($0, query: $1) },
+                        onClose: { closeDrawer() },
+                        onOpenSettings: { showSettings = true }
                     )
-                    .transition(.opacity)
-                    .zIndex(50)
-                }
+                    .frame(width: drawerWidth)
 
-                if let previewImage {
-                    ImageLightboxOverlay(image: previewImage) {
-                        withAnimation(.easeOut(duration: 0.18)) {
-                            self.previewImage = nil
-                        }
-                    }
-                    .transition(.opacity)
-                    .zIndex(60)
-                }
-            }
-            .background(Color.nuwaSidebarFill.ignoresSafeArea())
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 12, coordinateSpace: .global)
-                    .onChanged { value in
-                        guard !settings.showMigrationPrompt, !showSettings, editingMessageId == nil, previewImage == nil else { return }
-                        let dx = value.translation.width
-                        let dy = value.translation.height
-
-                        if !isTrackingHorizontalDrag {
-                            guard abs(dx) > abs(dy) * 1.25 else { return }
-                            if (!drawerOpen && dx <= 0) || (drawerOpen && dx >= 0) {
-                                return
+                    mainSurface
+                        .overlay {
+                            // Dismiss catcher sits strictly INSIDE mainSurface so it NEVER blocks sidebar touches!
+                            if drawerOpen && dragProgress == nil {
+                                Color.black.opacity(0.001)
+                                    .ignoresSafeArea(.container, edges: .vertical)
+                                    .onTapGesture { closeDrawer() }
                             }
-                            isTrackingHorizontalDrag = true
-                            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
                         }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .modifier(DrawerSurfaceTransform(progress: progress, drawerWidth: drawerWidth))
+                        .animation(
+                            dragProgress == nil ? .spring(response: 0.28, dampingFraction: 0.90) : nil,
+                            value: drawerOpen
+                        )
 
-                        let raw = drawerOpen ? (1.0 + dx / drawerWidth) : (dx / drawerWidth)
-                        dragProgress = max(0, min(1, raw))
+                    if settings.showMigrationPrompt {
+                        MigrationPromptModalView(
+                            settings: settings,
+                            chatStore: chatStore,
+                            onStartOneClickMigration: {
+                                settings.hasUsedOneClickMigration = true
+                                showMigrationWeb = true
+                            },
+                            onStartZipImport: { showZipImporter = true }
+                        )
+                        .transition(.opacity)
+                        .zIndex(50)
                     }
-                    .onEnded { value in
-                        guard isTrackingHorizontalDrag else { return }
-                        let current = dragProgress ?? (drawerOpen ? 1 : 0)
-                        let predictedDx = value.predictedEndTranslation.width
-                        let predictedProgress = drawerOpen
-                            ? (1.0 + predictedDx / drawerWidth)
-                            : (predictedDx / drawerWidth)
 
-                        isTrackingHorizontalDrag = false
-                        dragProgress = nil
-
-                        if drawerOpen {
-                            drawerOpen = !(current < 0.72 || predictedProgress < 0.55)
-                        } else {
-                            drawerOpen = (current > 0.28 || predictedProgress > 0.45)
+                    if let previewImage {
+                        ImageLightboxOverlay(image: previewImage) {
+                            withAnimation(.easeOut(duration: 0.16)) {
+                                self.previewImage = nil
+                            }
                         }
+                        .transition(.opacity)
+                        .zIndex(60)
                     }
-            )
+                }
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 20, coordinateSpace: .global)
+                        .onChanged { value in
+                            guard !settings.showMigrationPrompt, !showSettings, editingMessageId == nil, previewImage == nil else { return }
+                            let dx = value.translation.width
+                            let dy = value.translation.height
+
+                            if !isTrackingHorizontalDrag {
+                                guard abs(dx) > abs(dy) * 1.6 else { return }
+                                if (!drawerOpen && dx <= 0) || (drawerOpen && dx >= 0) {
+                                    return
+                                }
+                                isTrackingHorizontalDrag = true
+                                UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                            }
+
+                            let raw = drawerOpen ? (1.0 + dx / drawerWidth) : (dx / drawerWidth)
+                            dragProgress = max(0, min(1, raw))
+                        }
+                        .onEnded { value in
+                            guard isTrackingHorizontalDrag else { return }
+                            let current = dragProgress ?? (drawerOpen ? 1 : 0)
+                            let predictedDx = value.predictedEndTranslation.width
+                            let predictedProgress = drawerOpen
+                                ? (1.0 + predictedDx / drawerWidth)
+                                : (predictedDx / drawerWidth)
+
+                            isTrackingHorizontalDrag = false
+                            dragProgress = nil
+
+                            if drawerOpen {
+                                drawerOpen = !(current < 0.72 || predictedProgress < 0.55)
+                            } else {
+                                drawerOpen = (current > 0.28 || predictedProgress > 0.45)
+                            }
+                        }
+                )
+            }
         }
         .onAppear {
             chatStore.checkPendingMigration()
@@ -176,6 +164,8 @@ struct ChatView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 chatStore.checkPendingMigration()
+            } else if phase == .background {
+                chatStore.flushPendingSave()
             }
         }
         .onChange(of: chatStore.activeSessionId) { _, _ in
@@ -212,13 +202,17 @@ struct ChatView: View {
             case .success(let urls):
                 guard let url = urls.first else { return }
                 let accessed = url.startAccessingSecurityScopedResource()
-                defer { if accessed { url.stopAccessingSecurityScopedResource() } }
-                do {
-                    let data = try Data(contentsOf: url)
-                    let count = try chatStore.importFromFileData(data)
-                    chatStore.showToast(count == 1 ? "已导入 1 个对话" : "已导入 \(count) 个对话")
-                } catch {
-                    chatStore.showToast("导入失败：\(error.localizedDescription)")
+                Task {
+                    defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+                    do {
+                        let data = try await Task.detached(priority: .userInitiated) {
+                            try Data(contentsOf: url)
+                        }.value
+                        let count = try await chatStore.importFromFileDataAsync(data)
+                        chatStore.showToast(count == 1 ? "已导入 1 个对话" : "已导入 \(count) 个对话")
+                    } catch {
+                        chatStore.showToast("导入失败：\(error.localizedDescription)")
+                    }
                 }
             case .failure(let error):
                 chatStore.showToast("选择文件失败：\(error.localizedDescription)")
@@ -234,25 +228,25 @@ struct ChatView: View {
                 let targetSession = chatStore.activeSessionId
                 for url in urls {
                     let accessed = url.startAccessingSecurityScopedResource()
-                    defer { if accessed { url.stopAccessingSecurityScopedResource() } }
-                    if let data = try? Data(contentsOf: url) {
-                        let name = url.lastPathComponent
-                        chatStore.addDraftFile(
-                            data: data,
-                            fileName: name,
-                            isImage: AttachmentStore.isImageName(name),
-                            for: targetSession,
-                            settings: settings
-                        )
+                    let name = url.lastPathComponent
+                    Task.detached(priority: .userInitiated) {
+                        defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+                        if let data = try? Data(contentsOf: url) {
+                            await MainActor.run {
+                                draftStore.addFile(
+                                    data: data,
+                                    fileName: name,
+                                    isImage: AttachmentStore.isImageName(name),
+                                    for: targetSession,
+                                    settings: settings,
+                                    onToast: { chatStore.showToast($0) }
+                                )
+                            }
+                        }
                     }
                 }
             case .failure(let error):
                 chatStore.showToast("选择文件失败：\(error.localizedDescription)")
-            }
-        }
-        .onChange(of: speech.errorMessage) { _, newError in
-            if let newError {
-                chatStore.showToast(newError)
             }
         }
     }
@@ -273,7 +267,16 @@ struct ChatView: View {
                 .background(Color.nuwaBrand)
             }
 
-            mobileHeader
+            ChatHeaderView(
+                speech: speech,
+                settings: settings,
+                hasMessages: hasMessages,
+                sessionTitle: chatStore.activeSession?.title ?? "",
+                onOpenDrawer: { openDrawer() },
+                onScrollToTop: { scrollToTopToken += 1 },
+                onCreateNewSession: { chatStore.createNewSession() },
+                onToast: { chatStore.showToast($0) }
+            )
 
             ZStack(alignment: .top) {
                 if let session = chatStore.activeSession, !visibleMessages.isEmpty {
@@ -297,128 +300,21 @@ struct ChatView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            let sid = chatStore.activeSessionId
-            let currentDraft = chatStore.draft(for: sid)
-            ChatComposerView(
-                text: currentDraftBinding,
-                attachments: currentDraft.attachments,
-                thinkingEnabled: $settings.thinkingEnabled,
-                searchEnabled: $settings.searchEnabled,
-                locale: settings.locale,
-                canSend: chatStore.canSendDraft(for: sid),
+            ChatComposerContainer(
+                draftStore: draftStore,
+                settings: settings,
+                speech: speech,
+                sessionId: chatStore.activeSessionId,
                 isGenerating: chatStore.isGenerating,
-                isRecording: speech.isRecording,
-                isTranscribing: speech.isTranscribing,
-                recordingSeconds: speech.recordingSeconds,
-                audioLevel: speech.audioLevel,
+                isImporting: chatStore.importingHistory,
                 onSend: sendMessage,
                 onStop: {
                     speech.stopSpeaking()
                     chatStore.stopGenerating()
                 },
-                onToggleVoice: {
-                    if !speech.isRecording {
-                        voiceDraftPrefix = chatStore.draft(for: sid).text.trimmingCharacters(in: .whitespacesAndNewlines)
-                    }
-                    let capturedPrefix = voiceDraftPrefix
-                    speech.toggleRecording(settings: settings) { transcript in
-                        let clean = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !clean.isEmpty else { return }
-                        if capturedPrefix.isEmpty {
-                            chatStore.setDraftText(clean, for: sid)
-                        } else {
-                            chatStore.setDraftText("\(capturedPrefix) \(clean)", for: sid)
-                        }
-                    }
-                },
-                onCancelVoice: { speech.cancelRecording() },
-                onPickPhotos: { items in handlePickedPhotos(items, sessionId: sid) },
                 onPickFiles: { showAttachmentFilePicker = true },
-                onRetryAttachment: { fileId in
-                    chatStore.retryDraftAttachment(fileId: fileId, for: sid, settings: settings)
-                },
-                onRemoveAttachment: { fileId in
-                    chatStore.removeDraftAttachment(fileId: fileId, for: sid)
-                }
+                onToast: { chatStore.showToast($0) }
             )
-        }
-    }
-
-    private var mobileHeader: some View {
-        NuwaGlassGroup(spacing: 10) {
-            HStack(spacing: 10) {
-                Button {
-                    openDrawer()
-                } label: {
-                    Image(systemName: "line.3.horizontal")
-                        .font(.system(size: 17, weight: .medium))
-                        .foregroundStyle(Color.nuwaLabelPrimary)
-                        .frame(width: 42, height: 42)
-                        .nuwaGlass(in: Circle(), interactive: true)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("打开边栏")
-
-                if hasMessages {
-                    let displayTitle = (chatStore.activeSession?.title.isEmpty == false)
-                        ? chatStore.activeSession!.title
-                        : L10n.t("untitledChat", locale: settings.locale)
-                    Text(displayTitle)
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(Color.nuwaLabelPrimary)
-                        .lineLimit(1)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            // Double-tap title to scroll to top (1:1 SessionView.tsx onTitleTap)
-                            let now = Date()
-                            if let last = lastTitleTapAt, now.timeIntervalSince(last) <= 0.4 {
-                                lastTitleTapAt = nil
-                                scrollToTopToken += 1
-                            } else {
-                                lastTitleTapAt = now
-                            }
-                        }
-                } else {
-                    Spacer(minLength: 0)
-                }
-
-                HStack(spacing: 2) {
-                    Button {
-                        if speech.isSpeaking {
-                            speech.stopSpeaking()
-                            settings.ttsMuted = true
-                        } else {
-                            settings.ttsMuted.toggle()
-                            chatStore.showToast(settings.ttsMuted ? "已静音朗读" : "已取消朗读静音")
-                        }
-                    } label: {
-                        Image(systemName: (speech.isSpeaking || !settings.ttsMuted) ? "speaker.wave.2" : "speaker.slash")
-                            .font(.system(size: 16, weight: .medium))
-                            .foregroundStyle(Color.nuwaLabelPrimary)
-                            .frame(width: 38, height: 34)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("朗读开关")
-
-                    Button {
-                        chatStore.createNewSession()
-                    } label: {
-                        Image(systemName: "plus.bubble")
-                            .font(.system(size: 16, weight: .medium))
-                            .foregroundStyle(Color.nuwaLabelPrimary)
-                            .frame(width: 38, height: 34)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("开启新对话")
-                }
-                .padding(.horizontal, 4)
-                .frame(height: 42)
-                .nuwaGlass(in: Capsule(), interactive: true)
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 8)
-            .padding(.bottom, 6)
         }
     }
 
@@ -469,6 +365,7 @@ struct ChatView: View {
                     .padding(.horizontal, 16)
                     .padding(.top, 12)
                 }
+                .nuwaNoScrollEdgeEffect()
                 .scrollDismissesKeyboard(.interactively)
                 .onChange(of: messages.count) { _, _ in
                     withAnimation(.easeOut(duration: 0.2)) {
@@ -481,14 +378,14 @@ struct ChatView: View {
                     }
                 }
                 .onChange(of: scrollToTopToken) { _, _ in
-                    withAnimation(.easeOut(duration: 0.28)) {
+                    withAnimation(.easeOut(duration: 0.25)) {
                         proxy.scrollTo("top-anchor", anchor: .top)
                     }
                 }
 
                 if !isAtBottom {
                     Button {
-                        withAnimation(.easeOut(duration: 0.25)) {
+                        withAnimation(.easeOut(duration: 0.22)) {
                             proxy.scrollTo("bottom-anchor", anchor: .bottom)
                         }
                     } label: {
@@ -519,7 +416,6 @@ struct ChatView: View {
                 }
 
                 if isEditing {
-                    // 1:1 Inline Editor matching UserMessage.tsx .editor
                     VStack(alignment: .trailing, spacing: 10) {
                         TextField("修改提问内容", text: $editDraftText, axis: .vertical)
                             .lineLimit(1...8)
@@ -537,9 +433,9 @@ struct ChatView: View {
                                     .foregroundStyle(Color.nuwaLabelSecondary)
                                     .padding(.horizontal, 14)
                                     .padding(.vertical, 7)
-                                    .nuwaGlass(in: Capsule(), interactive: true)
+                                    .nuwaPillSurface()
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(NuwaTactileButtonStyle())
 
                             let canSaveEdit = !chatStore.isGenerating && (!editDraftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !message.files.isEmpty)
                             Button {
@@ -554,12 +450,13 @@ struct ChatView: View {
                                     .padding(.vertical, 7)
                                     .background(canSaveEdit ? Color.nuwaBrand : Color.nuwaBrand.opacity(0.4), in: Capsule())
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(NuwaTactileButtonStyle())
                             .disabled(!canSaveEdit)
                         }
                     }
                     .padding(12)
-                    .nuwaGlassCard(cornerRadius: 20, interactive: false)
+                    .background(Color.nuwaDrawerCardFill, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(Color.nuwaControlBorder, lineWidth: 0.75))
                 } else {
                     if !message.content.isEmpty {
                         HStack {
@@ -577,7 +474,6 @@ struct ChatView: View {
                         }
                     }
 
-                    // User action row: Copy, Inline Edit, Branch Switcher (< 1/N >)
                     HStack(spacing: 8) {
                         BranchSwitcherView(versionInfo: versionInfo) { targetId in
                             chatStore.selectVersion(messageId: targetId)
@@ -589,11 +485,12 @@ struct ChatView: View {
                                 chatStore.showToast(L10n.t("copied", locale: settings.locale))
                             } label: {
                                 Image(systemName: "doc.on.doc")
-                                    .font(.system(size: 11))
+                                    .font(.system(size: 12))
                                     .foregroundStyle(Color.nuwaLabelTertiary)
-                                    .frame(width: 26, height: 26)
+                                    .frame(width: 28, height: 28)
+                                    .contentShape(Rectangle())
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(NuwaTactileButtonStyle())
                         }
 
                         if !chatStore.isGenerating {
@@ -602,11 +499,12 @@ struct ChatView: View {
                                 editingMessageId = message.id
                             } label: {
                                 Image(systemName: "pencil")
-                                    .font(.system(size: 12))
+                                    .font(.system(size: 13))
                                     .foregroundStyle(Color.nuwaLabelTertiary)
-                                    .frame(width: 26, height: 26)
+                                    .frame(width: 28, height: 28)
+                                    .contentShape(Rectangle())
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(NuwaTactileButtonStyle())
                         }
                     }
                 }
@@ -657,6 +555,7 @@ struct ChatView: View {
                         fontSize: settings.chatFontSize,
                         onCopyCode: { _ in chatStore.showToast(L10n.t("copied", locale: settings.locale)) }
                     )
+                    .equatable()
                 } else if message.isStreaming && displayThink.isEmpty && !isActivelySearching {
                     HStack(spacing: 8) {
                         ProgressView()
@@ -698,67 +597,62 @@ struct ChatView: View {
                 }
 
                 if !message.isStreaming {
-                    NuwaGlassGroup(spacing: 6) {
-                        HStack(spacing: 8) {
-                            if !displayText.isEmpty {
-                                Button {
-                                    UIPasteboard.general.string = displayText
-                                    chatStore.showToast(L10n.t("copied", locale: settings.locale))
-                                } label: {
-                                    Image(systemName: "doc.on.doc")
-                                        .font(.caption)
-                                        .foregroundStyle(Color.nuwaLabelSecondary)
-                                        .frame(width: 30, height: 30)
-                                        .nuwaGlass(in: Circle(), interactive: true)
-                                }
-                                .buttonStyle(.plain)
-
-                                if !refused {
-                                    Button {
-                                        speech.toggleSpeak(messageId: message.id, text: displayText, settings: settings)
-                                    } label: {
-                                        Image(systemName: speech.speakingMessageId == message.id ? "speaker.slash.fill" : "speaker.wave.2")
-                                            .font(.caption)
-                                            .foregroundStyle(speech.speakingMessageId == message.id ? Color.nuwaBrandText : Color.nuwaLabelSecondary)
-                                            .frame(width: 30, height: 30)
-                                            .nuwaGlass(in: Circle(), interactive: true)
-                                    }
-                                    .buttonStyle(.plain)
-                                }
+                    // Lightweight flat native icon buttons (matching original Nuwa IconButton — zero scroll jank!)
+                    HStack(spacing: 6) {
+                        if !displayText.isEmpty {
+                            Button {
+                                UIPasteboard.general.string = displayText
+                                chatStore.showToast(L10n.t("copied", locale: settings.locale))
+                            } label: {
+                                Image(systemName: "doc.on.doc")
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(Color.nuwaLabelSecondary)
+                                    .frame(width: 30, height: 30)
+                                    .contentShape(Rectangle())
                             }
+                            .buttonStyle(NuwaTactileButtonStyle())
 
                             if !refused {
-                                Button {
-                                    speech.stopSpeaking()
-                                    chatStore.regenerateReply(messageId: message.id, settings: settings)
-                                } label: {
-                                    Image(systemName: "arrow.clockwise")
-                                        .font(.caption)
-                                        .foregroundStyle(Color.nuwaLabelSecondary)
-                                        .frame(width: 30, height: 30)
-                                        .nuwaGlass(in: Circle(), interactive: true)
-                                }
-                                .buttonStyle(.plain)
+                                MessageReadAloudButton(
+                                    speech: speech,
+                                    messageId: message.id,
+                                    text: displayText,
+                                    settings: settings
+                                )
                             }
+                        }
 
-                            if isLast && message.canContinueReply {
-                                Button {
-                                    speech.stopSpeaking()
-                                    chatStore.continueReply(messageId: message.id, settings: settings)
-                                } label: {
-                                    Text(L10n.t("continueGen", locale: settings.locale))
-                                        .font(.caption.weight(.medium))
-                                        .foregroundStyle(Color.nuwaBrandText)
-                                        .padding(.horizontal, 10)
-                                        .frame(height: 30)
-                                        .nuwaGlass(in: Capsule(), tint: .nuwaBrand, interactive: true)
-                                }
-                                .buttonStyle(.plain)
+                        if !refused {
+                            Button {
+                                speech.stopSpeaking()
+                                chatStore.regenerateReply(messageId: message.id, settings: settings)
+                            } label: {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(Color.nuwaLabelSecondary)
+                                    .frame(width: 30, height: 30)
+                                    .contentShape(Rectangle())
                             }
+                            .buttonStyle(NuwaTactileButtonStyle())
+                        }
 
-                            BranchSwitcherView(versionInfo: versionInfo) { targetId in
-                                chatStore.selectVersion(messageId: targetId)
+                        if isLast && message.canContinueReply {
+                            Button {
+                                speech.stopSpeaking()
+                                chatStore.continueReply(messageId: message.id, settings: settings)
+                            } label: {
+                                Text(L10n.t("continueGen", locale: settings.locale))
+                                    .font(.caption.weight(.medium))
+                                    .foregroundStyle(Color.nuwaBrandText)
+                                    .padding(.horizontal, 10)
+                                    .frame(height: 28)
+                                    .nuwaPillSurface(selected: true)
                             }
+                            .buttonStyle(NuwaTactileButtonStyle())
+                        }
+
+                        BranchSwitcherView(versionInfo: versionInfo) { targetId in
+                            chatStore.selectVersion(messageId: targetId)
                         }
                     }
                 }
@@ -772,19 +666,21 @@ struct ChatView: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 ForEach(files) { file in
-                    if file.isImage, let img = AttachmentStore.loadLocalImage(for: file) {
+                    if file.isImage, let thumb = AttachmentStore.loadThumbnail(for: file, targetPointSize: 72) {
                         Button {
-                            withAnimation(.easeInOut(duration: 0.18)) {
-                                previewImage = img
+                            if let full = AttachmentStore.loadLocalImage(for: file) {
+                                withAnimation(.easeInOut(duration: 0.16)) {
+                                    previewImage = full
+                                }
                             }
                         } label: {
-                            Image(uiImage: img)
+                            Image(uiImage: thumb)
                                 .resizable()
                                 .scaledToFill()
                                 .frame(width: 72, height: 72)
                                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(NuwaTactileButtonStyle())
                     } else {
                         HStack(spacing: 6) {
                             Image(systemName: file.isImage ? "photo" : "doc.text.fill")
@@ -809,24 +705,6 @@ struct ChatView: View {
         }
     }
 
-    private func handlePickedPhotos(_ items: [PhotosPickerItem], sessionId: UUID?) {
-        Task {
-            for (idx, item) in items.enumerated() {
-                if let data = try? await item.loadTransferable(type: Data.self) {
-                    let ext = item.supportedContentTypes.first?.preferredFilenameExtension ?? "jpg"
-                    let name = "photo_\(Int(Date().timeIntervalSince1970))_\(idx).\(ext)"
-                    chatStore.addDraftFile(
-                        data: data,
-                        fileName: name,
-                        isImage: true,
-                        for: sessionId,
-                        settings: settings
-                    )
-                }
-            }
-        }
-    }
-
     private func openDrawer() {
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
         drawerOpen = true
@@ -846,5 +724,238 @@ struct ChatView: View {
         }
         speech.stopSpeaking()
         chatStore.sendCurrentDraft(settings: settings)
+    }
+}
+
+// MARK: - Zero-Overhead Main Surface Drawer Transform
+
+private struct DrawerSurfaceTransform: ViewModifier {
+    let progress: CGFloat
+    let drawerWidth: CGFloat
+
+    func body(content: Content) -> some View {
+        if progress <= 0.001 {
+            // Drawer completely closed: ZERO mask, ZERO shadow, ZERO scaleEffect -> pure 120Hz!
+            content
+                .background(Color.nuwaBgBase.ignoresSafeArea())
+        } else {
+            let scale = 1.0 - 0.05 * progress
+            let cornerRadius = 24.0 * progress
+            content
+                .background(Color.nuwaBgBase.ignoresSafeArea(.container, edges: .vertical))
+                .mask {
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .ignoresSafeArea(.container, edges: .vertical)
+                }
+                .shadow(
+                    color: Color.black.opacity(0.12 * progress),
+                    radius: 12,
+                    x: -4,
+                    y: 0
+                )
+                .scaleEffect(scale, anchor: .leading)
+                .offset(x: drawerWidth * progress)
+        }
+    }
+}
+
+// MARK: - Isolated Floating Liquid Glass Header
+
+private struct ChatHeaderView: View {
+    @ObservedObject var speech: SpeechService
+    @ObservedObject var settings: SettingsStore
+    let hasMessages: Bool
+    let sessionTitle: String
+    let onOpenDrawer: () -> Void
+    let onScrollToTop: () -> Void
+    let onCreateNewSession: () -> Void
+    let onToast: (String) -> Void
+
+    @State private var lastTitleTapAt: Date?
+
+    var body: some View {
+        NuwaGlassGroup(spacing: 10) {
+            HStack(spacing: 10) {
+                Button(action: onOpenDrawer) {
+                    Image(systemName: "line.3.horizontal")
+                        .font(.system(size: 17, weight: .medium))
+                        .foregroundStyle(Color.nuwaLabelPrimary)
+                        .frame(width: 42, height: 42)
+                        .nuwaGlass(in: Circle(), interactive: true)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("打开边栏")
+
+                if hasMessages {
+                    let displayTitle = sessionTitle.isEmpty ? L10n.t("untitledChat", locale: settings.locale) : sessionTitle
+                    Text(displayTitle)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(Color.nuwaLabelPrimary)
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            let now = Date()
+                            if let last = lastTitleTapAt, now.timeIntervalSince(last) <= 0.4 {
+                                lastTitleTapAt = nil
+                                onScrollToTop()
+                            } else {
+                                lastTitleTapAt = now
+                            }
+                        }
+                } else {
+                    Spacer(minLength: 0)
+                }
+
+                HStack(spacing: 2) {
+                    Button {
+                        if speech.isSpeaking {
+                            speech.stopSpeaking()
+                            settings.ttsMuted = true
+                        } else {
+                            settings.ttsMuted.toggle()
+                            onToast(settings.ttsMuted ? "已静音朗读" : "已取消朗读静音")
+                        }
+                    } label: {
+                        Image(systemName: (speech.isSpeaking || !settings.ttsMuted) ? "speaker.wave.2" : "speaker.slash")
+                            .font(.system(size: 16, weight: .medium))
+                            .foregroundStyle(Color.nuwaLabelPrimary)
+                            .frame(width: 38, height: 34)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("朗读开关")
+
+                    Button(action: onCreateNewSession) {
+                        Image(systemName: "plus.bubble")
+                            .font(.system(size: 16, weight: .medium))
+                            .foregroundStyle(Color.nuwaLabelPrimary)
+                            .frame(width: 38, height: 34)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("开启新对话")
+                }
+                .padding(.horizontal, 4)
+                .frame(height: 42)
+                .nuwaGlass(in: Capsule(), interactive: true)
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
+            .padding(.bottom, 6)
+        }
+    }
+}
+
+// MARK: - Isolated Composer Container (Typing & Audio Level NEVER Trigger ChatView Re-renders!)
+
+private struct ChatComposerContainer: View {
+    @ObservedObject var draftStore: DraftStore
+    @ObservedObject var settings: SettingsStore
+    @ObservedObject var speech: SpeechService
+    let sessionId: UUID?
+    let isGenerating: Bool
+    let isImporting: Bool
+    let onSend: () -> Void
+    let onStop: () -> Void
+    let onPickFiles: () -> Void
+    let onToast: (String) -> Void
+
+    @State private var voiceDraftPrefix = ""
+
+    private var textBinding: Binding<String> {
+        Binding(
+            get: { draftStore.draft(for: sessionId).text },
+            set: { draftStore.setText($0, for: sessionId) }
+        )
+    }
+
+    var body: some View {
+        let currentDraft = draftStore.draft(for: sessionId)
+        ChatComposerView(
+            text: textBinding,
+            attachments: currentDraft.attachments,
+            thinkingEnabled: $settings.thinkingEnabled,
+            searchEnabled: $settings.searchEnabled,
+            locale: settings.locale,
+            canSend: draftStore.canSend(for: sessionId, isBusy: isImporting || isGenerating),
+            isGenerating: isGenerating,
+            isRecording: speech.isRecording,
+            isTranscribing: speech.isTranscribing,
+            recordingSeconds: speech.recordingSeconds,
+            audioLevel: speech.audioLevel,
+            onSend: onSend,
+            onStop: onStop,
+            onToggleVoice: {
+                if !speech.isRecording {
+                    voiceDraftPrefix = draftStore.draft(for: sessionId).text.trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                let capturedPrefix = voiceDraftPrefix
+                speech.toggleRecording(settings: settings) { transcript in
+                    let clean = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !clean.isEmpty else { return }
+                    if capturedPrefix.isEmpty {
+                        draftStore.setText(clean, for: sessionId)
+                    } else {
+                        draftStore.setText("\(capturedPrefix) \(clean)", for: sessionId)
+                    }
+                }
+            },
+            onCancelVoice: { speech.cancelRecording() },
+            onPickPhotos: { items in handlePickedPhotos(items) },
+            onPickFiles: onPickFiles,
+            onRetryAttachment: { fileId in
+                draftStore.retryAttachment(fileId: fileId, for: sessionId, settings: settings, onToast: onToast)
+            },
+            onRemoveAttachment: { fileId in
+                draftStore.removeAttachment(fileId: fileId, for: sessionId)
+            }
+        )
+        .onChange(of: speech.errorMessage) { _, newError in
+            if let newError { onToast(newError) }
+        }
+    }
+
+    private func handlePickedPhotos(_ items: [PhotosPickerItem]) {
+        let targetSession = sessionId
+        Task {
+            for (idx, item) in items.enumerated() {
+                if let data = try? await item.loadTransferable(type: Data.self) {
+                    let ext = item.supportedContentTypes.first?.preferredFilenameExtension ?? "jpg"
+                    let name = "photo_\(Int(Date().timeIntervalSince1970))_\(idx).\(ext)"
+                    draftStore.addFile(
+                        data: data,
+                        fileName: name,
+                        isImage: true,
+                        for: targetSession,
+                        settings: settings,
+                        onToast: onToast
+                    )
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Isolated Per-Message ReadAloud Button
+
+private struct MessageReadAloudButton: View {
+    @ObservedObject var speech: SpeechService
+    let messageId: UUID
+    let text: String
+    let settings: SettingsStore
+
+    var body: some View {
+        let active = speech.speakingMessageId == messageId
+        Button {
+            speech.toggleSpeak(messageId: messageId, text: text, settings: settings)
+        } label: {
+            Image(systemName: active ? "speaker.slash.fill" : "speaker.wave.2")
+                .font(.system(size: 13))
+                .foregroundStyle(active ? Color.nuwaBrandText : Color.nuwaLabelSecondary)
+                .frame(width: 30, height: 30)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(NuwaTactileButtonStyle())
     }
 }

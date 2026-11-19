@@ -3,51 +3,58 @@ import SwiftUI
 private struct SessionGroup: Identifiable {
     let id: String
     let title: String
-    let sessions: [ChatSession]
+    let sessions: [SessionSummaryItem]
 }
 
 /// Exact 1:1 recreation of chat-demo/src/components/sider/Sider.tsx + SessionItem.tsx
-/// including multi-select batch pin/delete, time-grouped list, bilingual labels,
-/// low-balance highlight, empty state, and direct settings opening (without jumping back to chat first!).
+/// Performance & UX hardened:
+/// - Observes ONLY `SessionListStore` (NEVER re-renders during typing or streaming deltas!)
+/// - Inherits 100% uniform `Color.nuwaSidebarFill` from root container (zero top safe-area color seam!)
+/// - Disables iOS 26 scrollEdgeEffect tint band on top of ScrollView
+/// - Full-width tactile bottom Settings card with zero gesture conflict (opens Settings immediately on tap!)
 struct SessionDrawerView: View {
-    @ObservedObject var chatStore: ChatStore
+    @ObservedObject var listStore: SessionListStore
     @ObservedObject var settings: SettingsStore
+    let activeSessionId: UUID?
     let isOpen: Bool
+    let onSelectSession: (UUID) -> Void
+    let onCreateNewSession: () -> Void
+    let onTogglePin: (UUID) -> Void
+    let onSetSessionsPinned: (Set<UUID>, Bool) -> Void
+    let onRenameSession: (UUID, String) -> Void
+    let onDeleteSession: (UUID) -> Void
+    let onDeleteSessions: (Set<UUID>) -> Void
+    let onMatchesQuery: (UUID, String) -> Bool
     let onClose: () -> Void
     let onOpenSettings: () -> Void
-
-    @Environment(\.openURL) private var openURL
 
     @State private var searchText = ""
     @State private var selectMode = false
     @State private var selectedIds: Set<UUID> = []
     @State private var showBatchDeleteConfirm = false
-    @State private var deletingSession: ChatSession?
-    @State private var renamingSession: ChatSession?
+    @State private var deletingSession: SessionSummaryItem?
+    @State private var renamingSession: SessionSummaryItem?
     @State private var renameDraft = ""
-
-    private let topUpURL = URL(string: "https://platform.deepseek.com/top_up")!
 
     private var loc: AppLocale { settings.locale }
 
-    private var filteredSessions: [ChatSession] {
-        let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !q.isEmpty else { return chatStore.sortedSessions }
-        return chatStore.sortedSessions.filter { session in
-            session.title.lowercased().contains(q) ||
-            session.messages.contains { $0.fullTextContent.lowercased().contains(q) }
+    private var filteredSessions: [SessionSummaryItem] {
+        let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return listStore.summaries }
+        return listStore.summaries.filter { item in
+            item.title.localizedCaseInsensitiveContains(q) || onMatchesQuery(item.id, q)
         }
     }
 
     private var groupedSessions: [SessionGroup] {
         let calendar = Calendar.current
         let now = Date()
-        var pinned: [ChatSession] = []
-        var today: [ChatSession] = []
-        var yesterday: [ChatSession] = []
-        var last7Days: [ChatSession] = []
-        var last30Days: [ChatSession] = []
-        var earlier: [ChatSession] = []
+        var pinned: [SessionSummaryItem] = []
+        var today: [SessionSummaryItem] = []
+        var yesterday: [SessionSummaryItem] = []
+        var last7Days: [SessionSummaryItem] = []
+        var last30Days: [SessionSummaryItem] = []
+        var earlier: [SessionSummaryItem] = []
 
         for s in filteredSessions {
             if s.isPinned {
@@ -81,19 +88,19 @@ struct SessionDrawerView: View {
     }
 
     private var validSelectedIds: Set<UUID> {
-        let existing = Set(chatStore.sessions.map(\.id))
+        let existing = Set(listStore.summaries.map(\.id))
         return selectedIds.intersection(existing)
     }
 
     private var allSelectedPinned: Bool {
         guard !validSelectedIds.isEmpty else { return false }
-        let byId = Dictionary(uniqueKeysWithValues: chatStore.sessions.map { ($0.id, $0) })
+        let byId = Dictionary(uniqueKeysWithValues: listStore.summaries.map { ($0.id, $0) })
         return validSelectedIds.allSatisfy { byId[$0]?.isPinned == true }
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            // Top Header: Select Mode header OR Search bar (matching Sider.tsx)
+            // Top Header: Select Mode header OR Search bar (clean uniform background, zero edge-tint artifact)
             if selectMode {
                 HStack {
                     Text(loc == .enUS ? "\(validSelectedIds.count) selected" : "已选择 \(validSelectedIds.count) 个对话")
@@ -107,9 +114,10 @@ struct SessionDrawerView: View {
                             .font(.system(size: 13, weight: .semibold))
                             .foregroundStyle(Color.nuwaLabelPrimary)
                             .frame(width: 32, height: 32)
-                            .nuwaGlass(in: Circle(), interactive: true)
+                            .background(Color.nuwaControlFill, in: Circle())
+                            .contentShape(Circle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(NuwaTactileButtonStyle())
                     .accessibilityLabel("退出多选")
                 }
                 .padding(.horizontal, 14)
@@ -136,14 +144,15 @@ struct SessionDrawerView: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 9)
-                .nuwaGlass(in: Capsule(), interactive: false)
+                .background(Color.nuwaDrawerCardFill, in: Capsule())
+                .overlay(Capsule().strokeBorder(Color.nuwaControlBorder, lineWidth: 0.75))
                 .padding(.horizontal, 14)
                 .padding(.top, 12)
                 .padding(.bottom, 10)
             }
 
             // Session list / Empty state
-            if chatStore.sessions.isEmpty {
+            if listStore.summaries.isEmpty {
                 VStack(spacing: 10) {
                     Spacer()
                     Text(L10n.t("emptyTitle", locale: loc))
@@ -154,7 +163,7 @@ struct SessionDrawerView: View {
                         .foregroundStyle(Color.nuwaLabelTertiary)
                         .multilineTextAlignment(.center)
                     Button {
-                        chatStore.createNewSession(silentIfAlreadyNew: true)
+                        onCreateNewSession()
                         onClose()
                     } label: {
                         Text(L10n.t("newChat", locale: loc))
@@ -162,9 +171,10 @@ struct SessionDrawerView: View {
                             .foregroundStyle(Color.nuwaLabelPrimary)
                             .padding(.horizontal, 16)
                             .padding(.vertical, 8)
-                            .nuwaGlass(in: Capsule(), interactive: true)
+                            .nuwaPillSurface()
+                            .contentShape(Capsule())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(NuwaTactileButtonStyle())
                     .padding(.top, 4)
                     Spacer()
                 }
@@ -198,13 +208,14 @@ struct SessionDrawerView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
                 }
+                .nuwaNoScrollEdgeEffect()
             }
 
-            // Bottom bar: Batch select bar OR Account/Settings button (matching Sider.tsx lines 324-387)
+            // Bottom bar: Batch select bar OR Direct Settings Card (100% responsive full-width hit target!)
             if selectMode {
                 HStack(spacing: 0) {
                     Button {
-                        chatStore.setSessionsPinned(validSelectedIds, pinned: !allSelectedPinned)
+                        onSetSessionsPinned(validSelectedIds, !allSelectedPinned)
                         exitSelectMode()
                     } label: {
                         HStack(spacing: 6) {
@@ -217,7 +228,7 @@ struct SessionDrawerView: View {
                         .frame(maxWidth: .infinity, minHeight: 44)
                         .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(NuwaTactileButtonStyle())
                     .disabled(validSelectedIds.isEmpty)
 
                     Rectangle()
@@ -237,14 +248,17 @@ struct SessionDrawerView: View {
                         .frame(maxWidth: .infinity, minHeight: 44)
                         .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(NuwaTactileButtonStyle())
                     .disabled(validSelectedIds.isEmpty)
                 }
-                .nuwaGlassCard(cornerRadius: 16, interactive: false)
+                .background(Color.nuwaDrawerCardFill, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .strokeBorder(Color.nuwaControlBorder, lineWidth: 0.75)
+                )
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
             } else {
-                // Direct Settings trigger — does NOT close drawer back to chat first!
                 Button {
                     onOpenSettings()
                 } label: {
@@ -265,11 +279,10 @@ struct SessionDrawerView: View {
                                     .font(.system(size: 12, weight: .medium))
                                     .foregroundStyle(settings.isBalanceLow ? .red : Color.nuwaBrandText)
                                     .lineLimit(1)
-                                    .onTapGesture { openURL(topUpURL) }
                             }
                         }
 
-                        Spacer()
+                        Spacer(minLength: 8)
 
                         Image(systemName: "ellipsis")
                             .font(.system(size: 15, weight: .medium))
@@ -277,14 +290,19 @@ struct SessionDrawerView: View {
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
-                    .nuwaGlassCard(cornerRadius: 16, interactive: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.nuwaDrawerCardFill, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .strokeBorder(Color.nuwaControlBorder, lineWidth: 0.75)
+                    )
+                    .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(NuwaTactileButtonStyle(pressedScale: 0.97))
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
             }
         }
-        .background(Color.nuwaSidebarFill.ignoresSafeArea())
         .onChange(of: isOpen) { _, open in
             if open {
                 Task { await settings.refreshBalance() }
@@ -300,7 +318,7 @@ struct SessionDrawerView: View {
             Button(L10n.t("cancel", locale: loc), role: .cancel) { renamingSession = nil }
             Button(L10n.t("confirm", locale: loc)) {
                 if let target = renamingSession {
-                    chatStore.renameSession(target.id, title: renameDraft)
+                    onRenameSession(target.id, renameDraft)
                 }
                 renamingSession = nil
             }
@@ -312,7 +330,7 @@ struct SessionDrawerView: View {
             Button(L10n.t("cancel", locale: loc), role: .cancel) { deletingSession = nil }
             Button(L10n.t("delete", locale: loc), role: .destructive) {
                 if let target = deletingSession {
-                    chatStore.deleteSession(target.id)
+                    onDeleteSession(target.id)
                 }
                 deletingSession = nil
             }
@@ -322,7 +340,7 @@ struct SessionDrawerView: View {
         .alert("删除选中的 \(validSelectedIds.count) 个对话", isPresented: $showBatchDeleteConfirm) {
             Button(L10n.t("cancel", locale: loc), role: .cancel) {}
             Button(L10n.t("delete", locale: loc), role: .destructive) {
-                chatStore.deleteSessions(validSelectedIds)
+                onDeleteSessions(validSelectedIds)
                 exitSelectMode()
             }
         } message: {
@@ -331,8 +349,8 @@ struct SessionDrawerView: View {
     }
 
     @ViewBuilder
-    private func sessionRow(_ session: ChatSession) -> some View {
-        let isActive = !selectMode && session.id == chatStore.activeSessionId
+    private func sessionRow(_ session: SessionSummaryItem) -> some View {
+        let isActive = !selectMode && session.id == activeSessionId
         let isSelected = selectedIds.contains(session.id)
 
         HStack(spacing: 10) {
@@ -365,7 +383,7 @@ struct SessionDrawerView: View {
             if selectMode {
                 toggleSelected(session.id)
             } else {
-                chatStore.selectSession(session.id)
+                onSelectSession(session.id)
                 onClose()
             }
         }
@@ -382,7 +400,7 @@ struct SessionDrawerView: View {
                     Label(L10n.t("multiSelect", locale: loc), systemImage: "checkmark.circle")
                 }
                 Button {
-                    chatStore.togglePin(session.id)
+                    onTogglePin(session.id)
                 } label: {
                     Label(L10n.t(session.isPinned ? "unpin" : "pin", locale: loc), systemImage: session.isPinned ? "pin.slash" : "pin")
                 }
@@ -402,14 +420,14 @@ struct SessionDrawerView: View {
     }
 
     private func enterSelectMode(initialId: UUID) {
-        withAnimation(.easeInOut(duration: 0.18)) {
+        withAnimation(.easeInOut(duration: 0.16)) {
             selectMode = true
             selectedIds = [initialId]
         }
     }
 
     private func exitSelectMode() {
-        withAnimation(.easeInOut(duration: 0.18)) {
+        withAnimation(.easeInOut(duration: 0.16)) {
             selectMode = false
             selectedIds.removeAll()
         }

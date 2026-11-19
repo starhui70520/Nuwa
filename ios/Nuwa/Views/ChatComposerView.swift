@@ -1,9 +1,10 @@
 import PhotosUI
 import SwiftUI
+import UIKit
 
 /// Exact 1:1 recreation of chat-demo/src/components/chatInput/ChatInput.tsx
-/// including DraftAttachments strip, PhotosPicker & Document picker, live Voice Spectrum,
-/// 深度思考 + 智能搜索 toggles, native keyboard avoidance, and iOS 26 Liquid Glass controls.
+/// Single floating iOS 26 Liquid Glass container (ZERO nested glass-on-glass!).
+/// DeepThink & Search toggles use crisp Nuwa blue pills + light haptic + tactile scale feedback.
 struct ChatComposerView: View {
     @Binding var text: String
     let attachments: [DraftAttachment]
@@ -29,10 +30,12 @@ struct ChatComposerView: View {
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
     @State private var showPhotoPicker = false
 
+    private static let lightImpact = UIImpactFeedbackGenerator(style: .light)
+
     var body: some View {
         VStack(spacing: 8) {
             VStack(spacing: 10) {
-                // Draft attachments strip (images + files with status/retry/remove)
+                // Draft attachments strip (cached thumbnails + status/retry/remove)
                 if !attachments.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
@@ -45,7 +48,7 @@ struct ChatComposerView: View {
                     }
                 }
 
-                // Recording waveform spectrum OR TextField (matching ChatInput.tsx lines 326-378)
+                // Recording waveform spectrum OR TextField
                 if isRecording {
                     VoiceSpectrumBar(level: audioLevel, seconds: recordingSeconds, onCancel: onCancelVoice)
                         .frame(minHeight: 40)
@@ -60,46 +63,47 @@ struct ChatComposerView: View {
                         .padding(.top, 2)
                 }
 
-                NuwaGlassGroup(spacing: 8) {
-                    HStack(spacing: 8) {
-                        HStack(spacing: 6) {
-                            togglePill(
-                                title: L10n.t("thinking", locale: locale),
-                                systemImage: "atom",
-                                selected: thinkingEnabled
-                            ) {
-                                withAnimation(.spring(response: 0.25, dampingFraction: 0.82)) {
-                                    thinkingEnabled.toggle()
-                                }
-                            }
-
-                            togglePill(
-                                title: L10n.t("search", locale: locale),
-                                systemImage: "globe",
-                                selected: searchEnabled
-                            ) {
-                                withAnimation(.spring(response: 0.25, dampingFraction: 0.82)) {
-                                    searchEnabled.toggle()
-                                }
+                // Bottom action row — lightweight crisp native controls inside ONE Liquid Glass card
+                HStack(spacing: 8) {
+                    HStack(spacing: 6) {
+                        togglePill(
+                            title: L10n.t("thinking", locale: locale),
+                            systemImage: "atom",
+                            selected: thinkingEnabled
+                        ) {
+                            Self.lightImpact.impactOccurred()
+                            withAnimation(.easeInOut(duration: 0.16)) {
+                                thinkingEnabled.toggle()
                             }
                         }
 
-                        Spacer(minLength: 4)
-
-                        HStack(spacing: 6) {
-                            if isGenerating {
-                                attachmentMenuButton
-                                stopButton
-                            } else if isRecording || isTranscribing {
-                                voiceButton
-                            } else if !canSend {
-                                attachmentMenuButton
-                                voiceButton
-                            } else {
-                                voiceButton
-                                attachmentMenuButton
-                                sendButton
+                        togglePill(
+                            title: L10n.t("search", locale: locale),
+                            systemImage: "globe",
+                            selected: searchEnabled
+                        ) {
+                            Self.lightImpact.impactOccurred()
+                            withAnimation(.easeInOut(duration: 0.16)) {
+                                searchEnabled.toggle()
                             }
+                        }
+                    }
+
+                    Spacer(minLength: 4)
+
+                    HStack(spacing: 6) {
+                        if isGenerating {
+                            attachmentMenuButton
+                            stopButton
+                        } else if isRecording || isTranscribing {
+                            voiceButton
+                        } else if !canSend {
+                            attachmentMenuButton
+                            voiceButton
+                        } else {
+                            voiceButton
+                            attachmentMenuButton
+                            sendButton
                         }
                     }
                 }
@@ -129,7 +133,7 @@ struct ChatComposerView: View {
     private func draftAttachmentChip(_ item: DraftAttachment) -> some View {
         ZStack(alignment: .topTrailing) {
             Group {
-                if item.file.isImage, let uiImg = AttachmentStore.loadLocalImage(for: item.file) {
+                if item.file.isImage, let uiImg = AttachmentStore.loadThumbnail(for: item.file, targetPointSize: 56) {
                     Image(uiImage: uiImg)
                         .resizable()
                         .scaledToFill()
@@ -214,21 +218,18 @@ struct ChatComposerView: View {
         Button(action: action) {
             HStack(spacing: 4) {
                 Image(systemName: systemImage)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 12.5, weight: .semibold))
                 Text(title)
                     .font(.system(size: 13, weight: .medium))
                     .lineLimit(1)
             }
             .foregroundStyle(selected ? Color.nuwaBrandText : Color.nuwaLabelPrimary)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .nuwaGlass(
-                in: Capsule(),
-                tint: selected ? .nuwaBrand : nil,
-                interactive: true
-            )
+            .padding(.horizontal, 11)
+            .padding(.vertical, 6.5)
+            .nuwaPillSurface(selected: selected)
+            .contentShape(Capsule())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(NuwaTactileButtonStyle(pressedScale: 0.95))
     }
 
     private var attachmentMenuButton: some View {
@@ -244,11 +245,13 @@ struct ChatComposerView: View {
                 Label("选取文件 (PDF / Word / 代码等)", systemImage: "doc")
             }
         } label: {
-            Image(systemName: "plus.circle")
-                .font(.system(size: 20, weight: .regular))
+            Image(systemName: "plus")
+                .font(.system(size: 16, weight: .medium))
                 .foregroundStyle(Color.nuwaLabelSecondary)
                 .frame(width: 32, height: 32)
-                .nuwaGlass(in: Circle(), interactive: true)
+                .background(Color.nuwaControlFill, in: Circle())
+                .overlay(Circle().strokeBorder(Color.nuwaControlBorder, lineWidth: 0.75))
+                .contentShape(Circle())
         }
         .accessibilityLabel("上传文件")
     }
@@ -265,14 +268,13 @@ struct ChatComposerView: View {
                 }
             }
             .frame(width: 32, height: 32)
-            .background {
-                if isRecording {
-                    Circle().fill(Color.nuwaBrand)
-                }
-            }
-            .modifier(VoiceGlassHelper(enabled: !isRecording))
+            .background(isRecording ? Color.nuwaBrand : Color.nuwaControlFill, in: Circle())
+            .overlay(
+                Circle().strokeBorder(isRecording ? Color.clear : Color.nuwaControlBorder, lineWidth: 0.75)
+            )
+            .contentShape(Circle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(NuwaTactileButtonStyle(pressedScale: 0.92))
         .accessibilityLabel(isRecording ? "结束录音并转写" : "语音输入")
     }
 
@@ -286,8 +288,9 @@ struct ChatComposerView: View {
                 .foregroundStyle(.white)
                 .frame(width: 32, height: 32)
                 .background(canSend ? Color.nuwaBrand : Color.nuwaBrand.opacity(0.35), in: Circle())
+                .contentShape(Circle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(NuwaTactileButtonStyle(pressedScale: 0.92))
         .disabled(!canSend)
         .accessibilityLabel("发送")
     }
@@ -299,20 +302,10 @@ struct ChatComposerView: View {
                 .foregroundStyle(.white)
                 .frame(width: 32, height: 32)
                 .background(Color.nuwaBrand, in: Circle())
+                .contentShape(Circle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(NuwaTactileButtonStyle(pressedScale: 0.92))
         .accessibilityLabel("停止生成")
-    }
-}
-
-private struct VoiceGlassHelper: ViewModifier {
-    let enabled: Bool
-    func body(content: Content) -> some View {
-        if enabled {
-            content.nuwaGlass(in: Circle(), interactive: true)
-        } else {
-            content
-        }
     }
 }
 
@@ -329,9 +322,10 @@ private struct VoiceSpectrumBar: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Color.nuwaLabelSecondary)
                     .frame(width: 28, height: 28)
-                    .nuwaGlass(in: Circle(), interactive: true)
+                    .background(Color.nuwaControlFill, in: Circle())
+                    .contentShape(Circle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(NuwaTactileButtonStyle())
 
             HStack(spacing: 3) {
                 ForEach(0..<18, id: \.self) { i in

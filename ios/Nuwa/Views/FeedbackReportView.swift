@@ -66,9 +66,9 @@ struct FeedbackReportView: View {
                                 .foregroundStyle(Color.nuwaLabelPrimary)
                                 .padding(.horizontal, 16)
                                 .padding(.vertical, 10)
-                                .nuwaGlass(in: Capsule(), interactive: true)
+                                .nuwaPillSurface()
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(NuwaTactileButtonStyle())
                     }
                 }
                 .padding(20)
@@ -91,9 +91,9 @@ struct FeedbackReportView: View {
                                     .padding(.horizontal, 10)
                                     .padding(.vertical, 7)
                                     .frame(maxWidth: .infinity)
-                                    .nuwaGlass(in: Capsule(), tint: selected ? .nuwaBrand : nil, interactive: true)
+                                    .nuwaPillSurface(selected: selected)
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(NuwaTactileButtonStyle())
                         }
                     }
 

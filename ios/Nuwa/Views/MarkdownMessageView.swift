@@ -1,13 +1,13 @@
 import SwiftUI
 import UIKit
 
-// MARK: - Rich Markdown Parser (Headings, Lists, Blockquotes, Tables, Math, Code, Rules)
+// MARK: - Cached Rich Markdown Parser (Zero Regex Re-compilation, Zero Scroll Jank)
 
 private enum MarkdownBlock: Identifiable {
-    case heading(id: Int, level: Int, text: String)
-    case paragraph(id: Int, text: String)
-    case listItem(id: Int, marker: String, text: String)
-    case blockquote(id: Int, text: String)
+    case heading(id: Int, level: Int, attributed: AttributedString)
+    case paragraph(id: Int, attributed: AttributedString)
+    case listItem(id: Int, marker: String, attributed: AttributedString)
+    case blockquote(id: Int, attributed: AttributedString)
     case code(id: Int, language: String, code: String)
     case math(id: Int, formula: String)
     case table(id: Int, headers: [String], rows: [[String]])
@@ -28,13 +28,232 @@ private enum MarkdownBlock: Identifiable {
     }
 }
 
-struct MarkdownMessageView: View {
+private final class CachedMarkdownBlocks: NSObject {
+    let blocks: [MarkdownBlock]
+    init(_ blocks: [MarkdownBlock]) { self.blocks = blocks }
+}
+
+private enum MarkdownParseCache {
+    static let citationRegex: NSRegularExpression? = try? NSRegularExpression(pattern: "\\[citation:(\\d+)\\]")
+    static let inlineOptions = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+
+    static let cache: NSCache<NSString, CachedMarkdownBlocks> = {
+        let c = NSCache<NSString, CachedMarkdownBlocks>()
+        c.countLimit = 250
+        return c
+    }()
+
+    static func parse(_ rawInput: String) -> [MarkdownBlock] {
+        let key = rawInput as NSString
+        if let hit = cache.object(forKey: key) {
+            return hit.blocks
+        }
+        let cleaned = cleanCitationTags(rawInput)
+        let parsed = parseBlocks(cleaned)
+        cache.setObject(CachedMarkdownBlocks(parsed), forKey: key)
+        return parsed
+    }
+
+    private static func inlineAttributed(_ raw: String) -> AttributedString {
+        if let attributed = try? AttributedString(markdown: raw, options: inlineOptions) {
+            return attributed
+        }
+        return AttributedString(raw)
+    }
+
+    private static func cleanCitationTags(_ input: String) -> String {
+        guard let regex = citationRegex, input.contains("[citation:") else {
+            return input
+        }
+        let range = NSRange(input.startIndex..., in: input)
+        return regex.stringByReplacingMatches(in: input, range: range, withTemplate: " [$1]")
+    }
+
+    private static func parseBlocks(_ input: String) -> [MarkdownBlock] {
+        var result: [MarkdownBlock] = []
+        let lines = input.components(separatedBy: "\n")
+        var idx = 0
+        var nextId = 0
+        var paraBuf: [String] = []
+
+        func flushParagraph() {
+            let joined = paraBuf.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !joined.isEmpty {
+                result.append(.paragraph(id: nextId, attributed: inlineAttributed(joined)))
+                nextId += 1
+            }
+            paraBuf.removeAll(keepingCapacity: true)
+        }
+
+        while idx < lines.count {
+            let line = lines[idx]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            if trimmed.hasPrefix("```") {
+                flushParagraph()
+                let lang = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                var codeLines: [String] = []
+                idx += 1
+                while idx < lines.count {
+                    if lines[idx].trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                        idx += 1
+                        break
+                    }
+                    codeLines.append(lines[idx])
+                    idx += 1
+                }
+                result.append(.code(id: nextId, language: lang, code: codeLines.joined(separator: "\n")))
+                nextId += 1
+                continue
+            }
+
+            if trimmed == "$$" || trimmed == "\\[" {
+                flushParagraph()
+                let closer = trimmed == "$$" ? "$$" : "\\]"
+                var mathLines: [String] = []
+                idx += 1
+                while idx < lines.count {
+                    if lines[idx].trimmingCharacters(in: .whitespaces) == closer {
+                        idx += 1
+                        break
+                    }
+                    mathLines.append(lines[idx])
+                    idx += 1
+                }
+                result.append(.math(id: nextId, formula: mathLines.joined(separator: "\n")))
+                nextId += 1
+                continue
+            }
+            if trimmed.hasPrefix("$$") && trimmed.hasSuffix("$$") && trimmed.count > 4 {
+                flushParagraph()
+                let inner = String(trimmed.dropFirst(2).dropLast(2)).trimmingCharacters(in: .whitespaces)
+                result.append(.math(id: nextId, formula: inner))
+                nextId += 1
+                idx += 1
+                continue
+            }
+
+            if trimmed.contains("|") && idx + 1 < lines.count && isTableSeparator(lines[idx + 1]) {
+                flushParagraph()
+                let headers = splitTableRow(trimmed)
+                idx += 2
+                var rows: [[String]] = []
+                while idx < lines.count {
+                    let rowLine = lines[idx].trimmingCharacters(in: .whitespaces)
+                    if rowLine.isEmpty || !rowLine.contains("|") { break }
+                    rows.append(splitTableRow(rowLine))
+                    idx += 1
+                }
+                result.append(.table(id: nextId, headers: headers, rows: rows))
+                nextId += 1
+                continue
+            }
+
+            if trimmed.isEmpty {
+                flushParagraph()
+                idx += 1
+                continue
+            }
+
+            if trimmed == "---" || trimmed == "***" || trimmed == "___" {
+                flushParagraph()
+                result.append(.divider(id: nextId))
+                nextId += 1
+                idx += 1
+                continue
+            }
+
+            if trimmed.hasPrefix("#") {
+                let hashes = trimmed.prefix { $0 == "#" }
+                let level = hashes.count
+                if (1...4).contains(level), trimmed.dropFirst(level).hasPrefix(" ") {
+                    flushParagraph()
+                    let content = String(trimmed.dropFirst(level + 1)).trimmingCharacters(in: .whitespaces)
+                    result.append(.heading(id: nextId, level: level, attributed: inlineAttributed(content)))
+                    nextId += 1
+                    idx += 1
+                    continue
+                }
+            }
+
+            if trimmed.hasPrefix("> ") || trimmed == ">" {
+                flushParagraph()
+                var quoteLines: [String] = []
+                while idx < lines.count {
+                    let t = lines[idx].trimmingCharacters(in: .whitespaces)
+                    if t.hasPrefix("> ") {
+                        quoteLines.append(String(t.dropFirst(2)))
+                        idx += 1
+                    } else if t == ">" {
+                        quoteLines.append("")
+                        idx += 1
+                    } else {
+                        break
+                    }
+                }
+                result.append(.blockquote(id: nextId, attributed: inlineAttributed(quoteLines.joined(separator: "\n"))))
+                nextId += 1
+                continue
+            }
+
+            if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("• ") {
+                flushParagraph()
+                let content = String(trimmed.dropFirst(2))
+                result.append(.listItem(id: nextId, marker: "•", attributed: inlineAttributed(content)))
+                nextId += 1
+                idx += 1
+                continue
+            }
+
+            if let dotIdx = trimmed.firstIndex(of: "."),
+               trimmed[..<dotIdx].allSatisfy(\.isNumber),
+               !trimmed[..<dotIdx].isEmpty,
+               trimmed.index(after: dotIdx) < trimmed.endIndex,
+               trimmed[trimmed.index(after: dotIdx)] == " " {
+                flushParagraph()
+                let marker = String(trimmed[...dotIdx])
+                let afterSpace = trimmed.index(dotIdx, offsetBy: 2)
+                let content = String(trimmed[afterSpace...])
+                result.append(.listItem(id: nextId, marker: marker, attributed: inlineAttributed(content)))
+                nextId += 1
+                idx += 1
+                continue
+            }
+
+            paraBuf.append(line)
+            idx += 1
+        }
+
+        flushParagraph()
+        return result
+    }
+
+    private static func isTableSeparator(_ line: String) -> Bool {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        guard t.contains("-") && t.contains("|") else { return false }
+        let allowed = CharacterSet(charactersIn: "|-: ")
+        return t.unicodeScalars.allSatisfy { allowed.contains($0) }
+    }
+
+    private static func splitTableRow(_ line: String) -> [String] {
+        var s = line.trimmingCharacters(in: .whitespaces)
+        if s.hasPrefix("|") { s.removeFirst() }
+        if s.hasSuffix("|") { s.removeLast() }
+        return s.components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+}
+
+struct MarkdownMessageView: View, Equatable {
     let text: String
     let citations: [TextCitation]
     let fontSize: Double
     let onCopyCode: (String) -> Void
 
     @Environment(\.openURL) private var openURL
+
+    static func == (lhs: MarkdownMessageView, rhs: MarkdownMessageView) -> Bool {
+        lhs.text == rhs.text && lhs.fontSize == rhs.fontSize && lhs.citations == rhs.citations
+    }
 
     init(text: String, citations: [TextCitation] = [], fontSize: Double, onCopyCode: @escaping (String) -> Void) {
         self.text = text
@@ -43,37 +262,34 @@ struct MarkdownMessageView: View {
         self.onCopyCode = onCopyCode
     }
 
-    private var blocks: [MarkdownBlock] {
-        Self.parseBlocks(Self.cleanCitationTags(text))
-    }
-
     var body: some View {
+        let blocks = MarkdownParseCache.parse(text)
         VStack(alignment: .leading, spacing: 8) {
             ForEach(blocks) { block in
                 switch block {
-                case .heading(_, let level, let content):
+                case .heading(_, let level, let attributed):
                     let size: CGFloat = level == 1 ? fontSize + 6 : (level == 2 ? fontSize + 4 : (level == 3 ? fontSize + 2 : fontSize))
-                    markdownInline(content)
+                    Text(attributed)
                         .font(.system(size: size, weight: level <= 3 ? .bold : .semibold))
                         .foregroundStyle(Color.nuwaLabelPrimary)
                         .padding(.top, 4)
                         .textSelection(.enabled)
 
-                case .paragraph(_, let content):
-                    markdownInline(content)
+                case .paragraph(_, let attributed):
+                    Text(attributed)
                         .font(.system(size: fontSize))
                         .foregroundStyle(Color.nuwaLabelPrimary)
                         .lineSpacing(4)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
 
-                case .listItem(_, let marker, let content):
+                case .listItem(_, let marker, let attributed):
                     HStack(alignment: .top, spacing: 8) {
                         Text(marker)
                             .font(.system(size: fontSize, weight: .semibold))
                             .foregroundStyle(Color.nuwaLabelSecondary)
                             .frame(minWidth: 16, alignment: .trailing)
-                        markdownInline(content)
+                        Text(attributed)
                             .font(.system(size: fontSize))
                             .foregroundStyle(Color.nuwaLabelPrimary)
                             .lineSpacing(4)
@@ -81,12 +297,12 @@ struct MarkdownMessageView: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
-                case .blockquote(_, let content):
+                case .blockquote(_, let attributed):
                     HStack(alignment: .top, spacing: 10) {
                         RoundedRectangle(cornerRadius: 2)
                             .fill(Color.nuwaBrand.opacity(0.6))
                             .frame(width: 3)
-                        markdownInline(content)
+                        Text(attributed)
                             .font(.system(size: fontSize - 0.5))
                             .foregroundStyle(Color.nuwaLabelSecondary)
                             .lineSpacing(4)
@@ -141,217 +357,15 @@ struct MarkdownMessageView: View {
                                 }
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 5)
-                                .nuwaGlass(in: Capsule(), interactive: true)
+                                .nuwaPillSurface()
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(NuwaTactileButtonStyle())
                         }
                     }
                 }
                 .padding(.top, 2)
             }
         }
-    }
-
-    @ViewBuilder
-    private func markdownInline(_ raw: String) -> some View {
-        let options = AttributedString.MarkdownParsingOptions(
-            interpretedSyntax: .inlineOnlyPreservingWhitespace
-        )
-        if let attributed = try? AttributedString(markdown: raw, options: options) {
-            Text(attributed)
-        } else {
-            Text(raw)
-        }
-    }
-
-    private static func cleanCitationTags(_ input: String) -> String {
-        guard let regex = try? NSRegularExpression(pattern: "\\[citation:(\\d+)\\]") else {
-            return input
-        }
-        let range = NSRange(input.startIndex..., in: input)
-        return regex.stringByReplacingMatches(in: input, range: range, withTemplate: " [$1]")
-    }
-
-    private static func parseBlocks(_ input: String) -> [MarkdownBlock] {
-        var result: [MarkdownBlock] = []
-        let lines = input.components(separatedBy: "\n")
-        var idx = 0
-        var nextId = 0
-        var paraBuf: [String] = []
-
-        func flushParagraph() {
-            let joined = paraBuf.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-            if !joined.isEmpty {
-                result.append(.paragraph(id: nextId, text: joined))
-                nextId += 1
-            }
-            paraBuf.removeAll()
-        }
-
-        while idx < lines.count {
-            let line = lines[idx]
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-
-            // Fenced code block ```
-            if trimmed.hasPrefix("```") {
-                flushParagraph()
-                let lang = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
-                var codeLines: [String] = []
-                idx += 1
-                while idx < lines.count {
-                    if lines[idx].trimmingCharacters(in: .whitespaces).hasPrefix("```") {
-                        idx += 1
-                        break
-                    }
-                    codeLines.append(lines[idx])
-                    idx += 1
-                }
-                result.append(.code(id: nextId, language: lang, code: codeLines.joined(separator: "\n")))
-                nextId += 1
-                continue
-            }
-
-            // Display math block $$...$$ or \[...\]
-            if trimmed == "$$" || trimmed == "\\[" {
-                flushParagraph()
-                let closer = trimmed == "$$" ? "$$" : "\\]"
-                var mathLines: [String] = []
-                idx += 1
-                while idx < lines.count {
-                    if lines[idx].trimmingCharacters(in: .whitespaces) == closer {
-                        idx += 1
-                        break
-                    }
-                    mathLines.append(lines[idx])
-                    idx += 1
-                }
-                result.append(.math(id: nextId, formula: mathLines.joined(separator: "\n")))
-                nextId += 1
-                continue
-            }
-            if trimmed.hasPrefix("$$") && trimmed.hasSuffix("$$") && trimmed.count > 4 {
-                flushParagraph()
-                let inner = String(trimmed.dropFirst(2).dropLast(2)).trimmingCharacters(in: .whitespaces)
-                result.append(.math(id: nextId, formula: inner))
-                nextId += 1
-                idx += 1
-                continue
-            }
-
-            // Markdown table detection (header row + separator row)
-            if trimmed.contains("|") && idx + 1 < lines.count && isTableSeparator(lines[idx + 1]) {
-                flushParagraph()
-                let headers = splitTableRow(trimmed)
-                idx += 2
-                var rows: [[String]] = []
-                while idx < lines.count {
-                    let rowLine = lines[idx].trimmingCharacters(in: .whitespaces)
-                    if rowLine.isEmpty || !rowLine.contains("|") { break }
-                    rows.append(splitTableRow(rowLine))
-                    idx += 1
-                }
-                result.append(.table(id: nextId, headers: headers, rows: rows))
-                nextId += 1
-                continue
-            }
-
-            // Empty line breaks paragraph
-            if trimmed.isEmpty {
-                flushParagraph()
-                idx += 1
-                continue
-            }
-
-            // Horizontal rule
-            if trimmed == "---" || trimmed == "***" || trimmed == "___" {
-                flushParagraph()
-                result.append(.divider(id: nextId))
-                nextId += 1
-                idx += 1
-                continue
-            }
-
-            // Heading (# .. ####)
-            if trimmed.hasPrefix("#") {
-                let hashes = trimmed.prefix { $0 == "#" }
-                let level = hashes.count
-                if (1...4).contains(level), trimmed.dropFirst(level).hasPrefix(" ") {
-                    flushParagraph()
-                    let content = String(trimmed.dropFirst(level + 1)).trimmingCharacters(in: .whitespaces)
-                    result.append(.heading(id: nextId, level: level, text: content))
-                    nextId += 1
-                    idx += 1
-                    continue
-                }
-            }
-
-            // Blockquote
-            if trimmed.hasPrefix("> ") || trimmed == ">" {
-                flushParagraph()
-                var quoteLines: [String] = []
-                while idx < lines.count {
-                    let t = lines[idx].trimmingCharacters(in: .whitespaces)
-                    if t.hasPrefix("> ") {
-                        quoteLines.append(String(t.dropFirst(2)))
-                        idx += 1
-                    } else if t == ">" {
-                        quoteLines.append("")
-                        idx += 1
-                    } else {
-                        break
-                    }
-                }
-                result.append(.blockquote(id: nextId, text: quoteLines.joined(separator: "\n")))
-                nextId += 1
-                continue
-            }
-
-            // Unordered list
-            if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("• ") {
-                flushParagraph()
-                let content = String(trimmed.dropFirst(2))
-                result.append(.listItem(id: nextId, marker: "•", text: content))
-                nextId += 1
-                idx += 1
-                continue
-            }
-
-            // Ordered list (e.g. "1. item")
-            if let dotIdx = trimmed.firstIndex(of: "."),
-               trimmed[..<dotIdx].allSatisfy(\.isNumber),
-               !trimmed[..<dotIdx].isEmpty,
-               trimmed.index(after: dotIdx) < trimmed.endIndex,
-               trimmed[trimmed.index(after: dotIdx)] == " " {
-                flushParagraph()
-                let marker = String(trimmed[...dotIdx])
-                let afterSpace = trimmed.index(dotIdx, offsetBy: 2)
-                let content = String(trimmed[afterSpace...])
-                result.append(.listItem(id: nextId, marker: marker, text: content))
-                nextId += 1
-                idx += 1
-                continue
-            }
-
-            paraBuf.append(line)
-            idx += 1
-        }
-
-        flushParagraph()
-        return result
-    }
-
-    private static func isTableSeparator(_ line: String) -> Bool {
-        let t = line.trimmingCharacters(in: .whitespaces)
-        guard t.contains("-") && t.contains("|") else { return false }
-        let allowed = CharacterSet(charactersIn: "|-: ")
-        return t.unicodeScalars.allSatisfy { allowed.contains($0) }
-    }
-
-    private static func splitTableRow(_ line: String) -> [String] {
-        var s = line.trimmingCharacters(in: .whitespaces)
-        if s.hasPrefix("|") { s.removeFirst() }
-        if s.hasSuffix("|") { s.removeLast() }
-        return s.components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }
     }
 }
 
@@ -449,7 +463,7 @@ private struct CodeBlockView: View {
     }
 }
 
-// MARK: - DeepSeek Thinking Accordion & Search Results Sheet & Branch Switcher
+// MARK: - Lightweight In-Scroll Message Controls (Zero Glass Shader Overhead)
 
 struct ReasoningDisclosureView: View {
     let reasoning: String
@@ -474,7 +488,7 @@ struct ReasoningDisclosureView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Button {
-                withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+                withAnimation(.easeInOut(duration: 0.2)) {
                     expanded.toggle()
                 }
             } label: {
@@ -491,9 +505,9 @@ struct ReasoningDisclosureView: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
-                .nuwaGlass(in: Capsule(), interactive: true)
+                .nuwaPillSurface()
             }
-            .buttonStyle(.plain)
+            .buttonStyle(NuwaTactileButtonStyle())
 
             if expanded {
                 Text(reasoning)
@@ -538,9 +552,9 @@ struct SearchSummaryPillView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
-            .nuwaGlass(in: Capsule(), interactive: !isSearching)
+            .nuwaPillSurface()
         }
-        .buttonStyle(.plain)
+        .buttonStyle(NuwaTactileButtonStyle())
         .disabled(results.isEmpty)
     }
 }
@@ -613,7 +627,7 @@ struct BranchSwitcherView: View {
 
     var body: some View {
         if versionInfo.count > 1 {
-            HStack(spacing: 4) {
+            HStack(spacing: 2) {
                 Button {
                     if versionInfo.index > 0 {
                         onSelect(versionInfo.ids[versionInfo.index - 1])
@@ -623,6 +637,7 @@ struct BranchSwitcherView: View {
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(versionInfo.index > 0 ? Color.nuwaLabelSecondary : Color.nuwaLabelTertiary.opacity(0.4))
                         .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .disabled(versionInfo.index == 0)
@@ -640,13 +655,14 @@ struct BranchSwitcherView: View {
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(versionInfo.index + 1 < versionInfo.count ? Color.nuwaLabelSecondary : Color.nuwaLabelTertiary.opacity(0.4))
                         .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .disabled(versionInfo.index + 1 >= versionInfo.count)
             }
             .padding(.horizontal, 6)
             .frame(height: 28)
-            .nuwaGlass(in: Capsule(), interactive: true)
+            .nuwaPillSurface()
         }
     }
 }
@@ -712,7 +728,7 @@ struct ReplyToolsStatusView: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
-                .nuwaGlass(in: Capsule(), interactive: false)
+                .nuwaPillSurface()
             }
 
             if !fetchedPages.isEmpty {
@@ -735,9 +751,9 @@ struct ReplyToolsStatusView: View {
                                 }
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 5)
-                                .nuwaGlass(in: Capsule(), interactive: !page.failed)
+                                .nuwaPillSurface()
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(NuwaTactileButtonStyle())
                             .disabled(page.failed)
                         }
                     }

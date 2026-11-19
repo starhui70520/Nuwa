@@ -316,9 +316,10 @@ struct MigrationPromptModalView: View {
                             .font(.system(size: 13, weight: .semibold))
                             .foregroundStyle(Color.nuwaLabelSecondary)
                             .frame(width: 30, height: 30)
-                            .nuwaGlass(in: Circle(), interactive: true)
+                            .background(Color.nuwaControlFill, in: Circle())
+                            .contentShape(Circle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(NuwaTactileButtonStyle())
                 }
 
                 Image("NuwaLogo")
@@ -357,9 +358,10 @@ struct MigrationPromptModalView: View {
                             .foregroundStyle(Color.nuwaLabelPrimary)
                             .frame(maxWidth: .infinity)
                             .frame(height: 46)
-                            .nuwaGlass(in: Capsule(), interactive: true)
+                            .nuwaPillSurface()
+                            .contentShape(Capsule())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(NuwaTactileButtonStyle())
 
                     Button {
                         settings.dismissMigrationPrompt()
@@ -369,9 +371,10 @@ struct MigrationPromptModalView: View {
                             .foregroundStyle(Color.nuwaLabelSecondary)
                             .frame(maxWidth: .infinity)
                             .frame(height: 44)
-                            .nuwaGlass(in: Capsule(), interactive: true)
+                            .nuwaPillSurface()
+                            .contentShape(Capsule())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(NuwaTactileButtonStyle())
                 }
                 .padding(.top, 4)
             }
