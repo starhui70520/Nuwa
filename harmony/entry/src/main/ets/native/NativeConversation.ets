@@ -14,6 +14,11 @@ export interface NativeConversationMessage extends NativeStoredMessage {
   selectedChildId?: string;
   status?: string;
   model?: string;
+  stopReason?: string;
+  canPrefill?: boolean;
+  thinking?: boolean;
+  search?: boolean;
+  thinkingSignature?: string;
   files?: NativeAttachment[];
 }
 
@@ -93,6 +98,11 @@ function copyMessage(message: NativeConversationMessage): NativeConversationMess
     selectedChildId: message.selectedChildId,
     status: message.status,
     model: message.model,
+    stopReason: message.stopReason,
+    canPrefill: message.canPrefill,
+    thinking: message.thinking,
+    search: message.search,
+    thinkingSignature: message.thinkingSignature,
     files: message.files,
   };
 }
@@ -199,6 +209,11 @@ export function updateConversationMessage(session: NativeConversation, message: 
   updated.reasoning = message.reasoning;
   updated.status = message.status;
   updated.model = message.model;
+  updated.stopReason = message.stopReason;
+  updated.canPrefill = message.canPrefill;
+  updated.thinking = message.thinking;
+  updated.search = message.search;
+  updated.thinkingSignature = message.thinkingSignature;
   updated.files = message.files ?? previous.files;
   const next = copyConversation(session);
   next.updatedAt = updatedAt;

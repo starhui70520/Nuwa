@@ -1,6 +1,12 @@
-import { bundleManager } from '@kit.AbilityKit';
+import { preferences } from '@kit.ArkData';
+import { bundleManager, common } from '@kit.AbilityKit';
 import { url } from '@kit.ArkTS';
 import { http } from '@kit.NetworkKit';
+
+const STORE_NAME = 'nuwa_native_updates';
+export const UPDATE_POLL_MS: number = 30 * 60 * 1000;
+export const UPDATE_RESUME_MS: number = 10 * 60 * 1000;
+const UPDATE_SNOOZE_MS = 6 * 60 * 60 * 1000;
 
 const PORTAL_BASE_URL: string = 'https://dl.rankchord.com';
 const PORTAL_RELEASES_URL: string = 'https://dl.rankchord.com/api/releases';
@@ -223,4 +229,38 @@ export async function checkNativeUpdate(): Promise<NativeUpdateCheck> {
     appGalleryUrl: storeUrl,
     appGalleryNote: storeNote,
   };
+}
+
+export interface NativeUpdatePreferences {
+  checkAt: number;
+  dismissedAt: number;
+  dismissedVersion: string;
+}
+
+export class NativeUpdateSchedule {
+  async load(context: common.UIAbilityContext): Promise<NativeUpdatePreferences> {
+    const store = await preferences.getPreferences(context, STORE_NAME);
+    return {
+      checkAt: await store.get('checkAt', 0) as number,
+      dismissedAt: await store.get('dismissedAt', 0) as number,
+      dismissedVersion: await store.get('dismissedVersion', '') as string,
+    };
+  }
+
+  async checked(context: common.UIAbilityContext, checkAt: number): Promise<void> {
+    const store = await preferences.getPreferences(context, STORE_NAME);
+    await store.put('checkAt', checkAt);
+    await store.flush();
+  }
+
+  async dismissed(context: common.UIAbilityContext, version: string, at: number): Promise<void> {
+    const store = await preferences.getPreferences(context, STORE_NAME);
+    await store.put('dismissedVersion', version);
+    await store.put('dismissedAt', at);
+    await store.flush();
+  }
+}
+
+export function isUpdateSnoozed(update: NativeUpdateCheck, state: NativeUpdatePreferences, now: number): boolean {
+  return state.dismissedVersion === update.latestVersion && now - state.dismissedAt < UPDATE_SNOOZE_MS;
 }

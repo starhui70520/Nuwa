@@ -3,7 +3,7 @@ import { KeyboardAvoidMode, LengthMetrics } from '@kit.ArkUI';
 import { url, util } from '@kit.ArkTS';
 import { webview } from '@kit.ArkWeb';
 import { pasteboard } from '@kit.BasicServicesKit';
-import { NativeChatClient, NativeChatConfig, NativeChatFileRef, NativeChatMessage } from '../native/NativeChatClient';
+import { NativeChatClient, NativeChatConfig, NativeChatFileRef, NativeChatMessage, NativeReplyOutcome } from '../native/NativeChatClient';
 import { loadNativeAccount, saveNativeAccount } from '../native/NativeAccountStore';
 import { NativeApiCredential, verifyNativeApiCredential } from '../native/NativeApiCredential';
 import { NativeDataSettings } from '../native/NativeDataSettings';
@@ -21,7 +21,10 @@ import {
 import { NativeMarkdown } from '../native/NativeMarkdown';
 import { NativeSettings, NativeSettingsController, NATIVE_CHAT_FONT_SIZES } from '../native/NativeSettings';
 import { fetchNativeProviderBalance } from '../native/NativeProviderBalance';
-import { checkNativeUpdate, fetchNativeReleaseHistory, getNativeCurrentVersion, NativeReleaseHistoryItem } from '../native/NativeUpdates';
+import {
+  checkNativeUpdate, fetchNativeReleaseHistory, getNativeCurrentVersion, isUpdateSnoozed, NativeReleaseHistoryItem,
+  NativeUpdateCheck, NativeUpdatePreferences, NativeUpdateSchedule, UPDATE_POLL_MS, UPDATE_RESUME_MS,
+} from '../native/NativeUpdates';
 import { importNativeShareLink, nativeShareTemplate } from '../native/NativeShareImport';
 import { openNuwaPrivacyPolicy } from '../native/PrivacyPolicy';
 import { HarmonySpeechRecognition } from '../speech/HarmonySpeechRecognition';
@@ -104,6 +107,10 @@ struct NativeChat {
 
   private readonly storage = new NativeChatStorage();
   private readonly settingsStore = new NativeSettingsController();
+  private readonly updateSchedule = new NativeUpdateSchedule();
+  private updatePreferences: NativeUpdatePreferences = { checkAt: 0, dismissedAt: 0, dismissedVersion: '' };
+  private pendingUpdate: NativeUpdateCheck | null = null;
+  private updateTimer: number = -1;
   private readonly attachments = new NativeChatAttachments();
   private readonly backup = new NativeChatBackup();
   private readonly accountController = new NativeDeepSeekAccountController();
@@ -146,12 +153,16 @@ struct NativeChat {
     this.getUIContext().setKeyboardAvoidMode(KeyboardAvoidMode.RESIZE);
     void this.load();
     void getNativeCurrentVersion().then((version: string) => { this.appVersion = version; }).catch(() => {});
+    void this.startUpdateChecks();
   }
 
   onPageShow(): void {
     this.visible = true;
     if (this.loaded) {
       void this.refreshBalance();
+    }
+    if (this.updateTimer >= 0) {
+      void this.resumeUpdateChecks();
     }
     if (this.migrationInProgress) {
       this.migrationInProgress = false;
@@ -178,6 +189,10 @@ struct NativeChat {
     this.stopVoice();
     this.speaker.destroy();
     this.accountController.cancel();
+    if (this.updateTimer >= 0) {
+      clearInterval(this.updateTimer);
+      this.updateTimer = -1;
+    }
   }
 
   onBackPress(): boolean {
@@ -778,7 +793,7 @@ struct NativeChat {
   }
 
   private usableContextReply(message: NativeConversationMessage | undefined): boolean {
-    return !!message && message.role === 'assistant' && !!message.content &&
+    return !!message && message.role === 'assistant' && !!message.content && message.stopReason !== 'refusal' &&
       (message.status === 'done' || message.status === 'stopped');
   }
 
@@ -792,7 +807,11 @@ struct NativeChat {
       this.openSettings('account');
       return;
     }
-    const message = createConversationMessage('assistant', '', '', Date.now(), 'pending', config.accountToken ? 'deepseek-flash' : config.model);
+    const message = createConversationMessage('assistant', '', '', Date.now(), 'pending',
+      config.accountToken ? 'deepseek-flash' : config.model);
+    message.thinking = config.thinking;
+    message.search = config.search;
+    message.canPrefill = true;
     const next = appendBranch(session, parentId, prompt ? [prompt, message] : [message]);
     const reply: NativeReply = {
       sessionId: next.id, message, client: new NativeChatClient(), stopped: false, uploadingIds: [],
@@ -818,6 +837,8 @@ struct NativeChat {
       id: reply.message.id, role: 'assistant', createdAt: reply.message.createdAt,
       parentId: reply.message.parentId, content: reply.message.content, reasoning: reply.message.reasoning,
       model: reply.message.model, status,
+      stopReason: reply.message.stopReason, canPrefill: reply.message.canPrefill,
+      thinking: reply.message.thinking, search: reply.message.search, thinkingSignature: reply.message.thinkingSignature,
     };
   }
 
@@ -842,7 +863,7 @@ struct NativeChat {
       if (reply.stopped) {
         return;
       }
-      await reply.client.send(config, messages, (content: string, reasoning: string) => {
+      const outcome: NativeReplyOutcome = await reply.client.send(config, messages, (content: string, reasoning: string) => {
         if (this.history.activeId === session.id && this.visible && this.scroller.isAtEnd()) {
           this.scrollToLatest();
         }
@@ -854,6 +875,9 @@ struct NativeChat {
           void this.save(context);
         }
       });
+      reply.message.stopReason = outcome.stopReason;
+      reply.message.canPrefill = outcome.canPrefill;
+      reply.message.thinkingSignature = outcome.thinkingSignature || reply.message.thinkingSignature;
     } catch (cause) {
       error = !reply.stopped;
       if (error && this.history.activeId === session.id) {
@@ -888,6 +912,46 @@ struct NativeChat {
     const message = createConversationMessage('user', text, '');
     message.files = this.draftFiles.map<NativeAttachment>((file: NativeDraftAttachment): NativeAttachment => file.item);
     this.startReply(session, thread.length ? thread[thread.length - 1].id : null, message, true);
+  }
+
+  private canContinue(message: NativeConversationMessage): boolean {
+    const path = this.messages();
+    return path[path.length - 1]?.id === message.id && path[path.length - 2]?.role === 'user' &&
+      message.canPrefill === true && message.stopReason !== 'refusal' && message.stopReason !== 'tool_use' &&
+      (message.status === 'stopped' || (message.status === 'done' && message.stopReason === 'max_tokens'));
+  }
+
+  private continueReply(message: NativeConversationMessage): void {
+    const session = this.session();
+    if (!session || this.backupBusy || this.reply(session.id) || !this.canContinue(message)) {
+      return;
+    }
+    const config = this.requestConfig();
+    config.model = message.model || config.model;
+    config.thinking = message.thinking ?? config.thinking;
+    config.search = message.search ?? config.search;
+    config.prefill = {
+      text: message.content, reasoning: message.reasoning, thinkingSignature: message.thinkingSignature ?? '',
+    };
+    const reply: NativeReply = {
+      sessionId: session.id, message, client: new NativeChatClient(), stopped: false, uploadingIds: [],
+      attachmentBinding: this.settings.attachmentBinding,
+    };
+    const pending = this.streamMessage(reply, 'pending');
+    pending.stopReason = undefined;
+    const next = updateConversationMessage(session, pending, Date.now());
+    const current = next.messages.find((item: NativeConversationMessage): boolean => item.id === pending.id);
+    if (!current) {
+      return;
+    }
+    reply.message = current;
+    this.stopVoice();
+    this.status = '';
+    this.history = upsertConversation(this.history, next);
+    this.replies = [...this.replies, reply];
+    this.lastStreamSave = Date.now();
+    this.scrollToLatest();
+    void this.receive(this.host(), config, next, reply);
   }
 
   private retry(message: NativeConversationMessage): void {
@@ -1323,6 +1387,11 @@ struct NativeChat {
           this.branchControls(message)
         }
         .padding({ top: 6, bottom: 12 })
+        if (this.canContinue(message)) {
+          Button('继续生成', { type: ButtonType.Capsule, buttonStyle: ButtonStyleMode.TEXTUAL })
+            .fontSize(13).border({ width: 1, color: $r('app.color.native_chat_stroke') })
+            .enabled(!this.reply()).onClick(() => { this.continueReply(message); })
+        }
       }
     }
     .width('100%').alignItems(HorizontalAlign.Start).padding({ bottom: 8 })
@@ -1461,27 +1530,79 @@ struct NativeChat {
     return session ? nativeShareTemplate(session, message.id) : '';
   }
 
-  private async checkUpdate(): Promise<void> {
+  private async startUpdateChecks(): Promise<void> {
+    try {
+      this.updatePreferences = await this.updateSchedule.load(this.host());
+    } catch {
+      // Update checks remain available if the schedule could not be restored.
+    }
+    if (this.updateTimer < 0) {
+      this.updateTimer = setInterval(() => {
+        if (this.visible) {
+          void this.checkUpdate(true, false);
+        }
+      }, UPDATE_POLL_MS);
+      await this.checkUpdate(true);
+    }
+  }
+
+  private async resumeUpdateChecks(): Promise<void> {
+    if (this.pendingUpdate && !this.checkingUpdate && !this.authorizing && !this.backupBusy &&
+      !isUpdateSnoozed(this.pendingUpdate, this.updatePreferences, Date.now())) {
+      const update = this.pendingUpdate;
+      this.checkingUpdate = true;
+      try {
+        await this.presentUpdate(update);
+      } catch {
+        // The visible page can change before the update dialog opens.
+      } finally {
+        this.checkingUpdate = false;
+      }
+    }
+    if (Date.now() - this.updatePreferences.checkAt >= UPDATE_RESUME_MS) {
+      await this.checkUpdate(true);
+    }
+  }
+
+  private async presentUpdate(update: NativeUpdateCheck): Promise<void> {
+    const result = await this.getUIContext().getPromptAction().showDialog({
+      title: `发现新版本 v${update.latestVersion}`,
+      message: `当前版本：v${update.currentVersion}\n\n${update.notes || '包含体验优化与问题修复。'}`,
+      buttons: [{ text: '暂不更新', color: '#61666B' }, { text: '前往下载', color: '#3964FE' }],
+    });
+    if (result.index === 1) {
+      await this.openLink(update.appGalleryUrl ?? update.downloadUrl ?? update.releaseUrl);
+    } else {
+      this.updatePreferences.dismissedVersion = update.latestVersion;
+      this.updatePreferences.dismissedAt = Date.now();
+      void this.updateSchedule.dismissed(this.host(), update.latestVersion, this.updatePreferences.dismissedAt).catch(() => {});
+    }
+  }
+
+  private async checkUpdate(silent: boolean = false, prompt: boolean = true): Promise<void> {
     if (this.checkingUpdate) {
       return;
     }
     this.checkingUpdate = true;
     try {
       const update = await checkNativeUpdate();
+      this.updatePreferences.checkAt = Date.now();
+      void this.updateSchedule.checked(this.host(), this.updatePreferences.checkAt).catch(() => {});
+      this.pendingUpdate = update.hasUpdate ? update : null;
       if (!update.hasUpdate) {
-        this.toast('当前已是最新版本');
+        if (!silent) {
+          this.toast('当前已是最新版本');
+        }
         return;
       }
-      const result = await this.getUIContext().getPromptAction().showDialog({
-        title: `发现新版本 v${update.latestVersion}`,
-        message: `当前版本：v${update.currentVersion}\n\n${update.notes || '包含体验优化与问题修复。'}`,
-        buttons: [{ text: '暂不更新', color: '#61666B' }, { text: '前往下载', color: '#3964FE' }],
-      });
-      if (result.index === 1) {
-        await this.openLink(update.appGalleryUrl ?? update.downloadUrl ?? update.releaseUrl);
+      if (!silent || (prompt && this.visible && !this.authorizing && !this.backupBusy &&
+        !isUpdateSnoozed(update, this.updatePreferences, Date.now()))) {
+        await this.presentUpdate(update);
       }
     } catch {
-      this.toast('检查更新失败，请稍后重试');
+      if (!silent) {
+        this.toast('检查更新失败，请稍后重试');
+      }
     } finally {
       this.checkingUpdate = false;
     }

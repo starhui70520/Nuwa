@@ -13,6 +13,18 @@ export interface NativeChatMessage {
   files?: NativeChatFileRef[];
 }
 
+export interface NativeReplyOutcome {
+  stopReason: string;
+  canPrefill: boolean;
+  thinkingSignature: string;
+}
+
+export interface NativeReplyPrefill {
+  text: string;
+  reasoning: string;
+  thinkingSignature: string;
+}
+
 export interface NativeChatConfig {
   baseUrl: string;
   apiKey: string;
@@ -24,6 +36,7 @@ export interface NativeChatConfig {
   system?: string;
   thinking?: boolean;
   search?: boolean;
+  prefill?: NativeReplyPrefill;
 }
 
 interface ChatRequestBody {
@@ -39,6 +52,7 @@ interface ChatDelta {
 }
 
 interface ChatChoice {
+  finish_reason?: string | null;
   delta?: ChatDelta;
 }
 
@@ -56,15 +70,25 @@ interface AnthropicEventDelta {
   type?: string;
   text?: string;
   thinking?: string;
+  signature?: string;
+  stop_reason?: string | null;
 }
 
 interface AnthropicEventError {
   message?: string;
 }
 
+interface AnthropicStartedBlock {
+  type?: string;
+  text?: string;
+  thinking?: string;
+  signature?: string;
+}
+
 interface AnthropicDeltaEvent {
   type?: string;
   delta?: AnthropicEventDelta;
+  content_block?: AnthropicStartedBlock;
   error?: AnthropicEventError;
   message?: string;
 }
@@ -88,7 +112,9 @@ interface AnthropicFileSource {
 }
 
 interface AnthropicContentBlock {
-  type: 'text' | 'image' | 'document';
+  type: 'text' | 'image' | 'document' | 'thinking';
+  thinking?: string;
+  signature?: string;
   source?: AnthropicFileSource;
   text?: string;
 }
@@ -175,6 +201,7 @@ class ChatStream {
   private dataLines: string[] = [];
   private done: boolean = false;
   private hasReply: boolean = false;
+  private outcome: NativeReplyOutcome = { stopReason: '', canPrefill: true, thinkingSignature: '' };
   private readonly onDelta: (content: string, reasoning: string) => void;
   private readonly protocol: 'openai' | 'anthropic';
 
@@ -188,14 +215,19 @@ class ChatStream {
     this.appendText(this.decoder.decodeToString(new Uint8Array(bytes), { stream: true }));
   }
 
-  end(): void {
+  end(): NativeReplyOutcome {
     this.appendText(this.decoder.decodeToString(new Uint8Array(0), { stream: false }));
     if (this.pendingLine.endsWith('\r')) {
       this.readLine(this.pendingLine.slice(0, -1));
     }
-    if (!this.hasReply) {
+    if (!this.hasReply && !this.outcome.stopReason) {
       throw new Error('模型未返回可读取的回复，请检查服务器地址和模型名称');
     }
+    return this.outcome;
+  }
+
+  currentOutcome(): NativeReplyOutcome {
+    return this.outcome;
   }
 
   // Match the Web client's SSE framing, including a CRLF split across chunks.
@@ -264,7 +296,13 @@ class ChatStream {
       const message = chunk.error?.message ?? chunk.message;
       throw new Error(typeof message === 'string' && message ? message : '服务端报告了流式错误');
     }
-    const delta = chunk.choices?.[0]?.delta;
+    const choice = chunk.choices?.[0];
+    const finish = choice?.finish_reason;
+    if (finish) {
+      this.outcome.stopReason = finish === 'length' ? 'max_tokens' : finish === 'content_filter' ? 'refusal' :
+        finish === 'tool_calls' || finish === 'function_call' ? 'tool_use' : 'end_turn';
+    }
+    const delta = choice?.delta;
     const content = typeof delta?.content === 'string' ? delta.content : '';
     const reasoningValue = delta?.reasoning_content ?? delta?.reasoning;
     const reasoning = typeof reasoningValue === 'string' ? reasoningValue : '';
@@ -290,8 +328,23 @@ class ChatStream {
       return;
     }
     const delta = event.delta;
-    const content = delta?.type === 'text_delta' && typeof delta.text === 'string' ? delta.text : '';
-    const reasoning = delta?.type === 'thinking_delta' && typeof delta.thinking === 'string' ? delta.thinking : '';
+    const block = event.type === 'content_block_start' ? event.content_block : undefined;
+    if (block && ['tool_use', 'server_tool_use', 'web_search_tool_result', 'web_fetch_tool_result'].includes(block.type ?? '')) {
+      this.outcome.canPrefill = false;
+    }
+    if (event.type === 'message_delta' && delta?.stop_reason) {
+      this.outcome.stopReason = delta.stop_reason;
+    }
+    if (block?.type === 'thinking') {
+      this.outcome.thinkingSignature = block.signature ?? '';
+    }
+    if (delta?.type === 'signature_delta') {
+      this.outcome.thinkingSignature += delta.signature ?? '';
+    }
+    const content = delta?.type === 'text_delta' && typeof delta.text === 'string' ? delta.text :
+      block?.type === 'text' ? block.text ?? '' : '';
+    const reasoning = delta?.type === 'thinking_delta' && typeof delta.thinking === 'string' ? delta.thinking :
+      block?.type === 'thinking' ? block.thinking ?? '' : '';
     if (content || reasoning) {
       this.hasReply = true;
       this.onDelta(content, reasoning);
@@ -321,7 +374,7 @@ export class NativeChatClient {
   }
 
   async send(config: NativeChatConfig, messages: NativeChatMessage[],
-    onDelta: (content: string, reasoning: string) => void): Promise<void> {
+    onDelta: (content: string, reasoning: string) => void): Promise<NativeReplyOutcome> {
     this.cancel();
     const apiKey = config.apiKey.trim();
     const accountToken = config.accountToken?.trim() ?? '';
@@ -368,10 +421,24 @@ export class NativeChatClient {
       }
       const lastPrompt = messages.length ? messages[messages.length - 1].content : '';
       const omitExtended = withDocuments && !config.search && !/https?:\/\//i.test(lastPrompt);
+      const anthropicMessages = messages.map<AnthropicChatMessage>(anthropicMessage);
+      const prefill = config.prefill;
+      if (prefill) {
+        const blocks: AnthropicContentBlock[] = [];
+        if (config.thinking && prefill.reasoning && prefill.thinkingSignature) {
+          blocks.push({ type: 'thinking', thinking: prefill.reasoning, signature: prefill.thinkingSignature });
+        }
+        if (prefill.text) {
+          blocks.push({ type: 'text', text: prefill.text });
+        }
+        if (blocks.length) {
+          anthropicMessages.push({ role: 'assistant', content: blocks });
+        }
+      }
       body = {
         model: model,
         system: config.system ?? DEFAULT_DEEPSEEK_SYSTEM,
-        messages: messages.map<AnthropicChatMessage>(anthropicMessage),
+        messages: anthropicMessages,
         stream: true,
         thinking: { type: config.thinking ? 'enabled' : 'disabled' },
         safety_check: { level: omitExtended ? 'low' : 'high' },
@@ -382,6 +449,9 @@ export class NativeChatClient {
         .map<NativeChatMessage>((message: NativeChatMessage): NativeChatMessage => ({
           role: message.role, content: message.content,
         }));
+      if (config.prefill?.text) {
+        textMessages.push({ role: 'assistant', content: config.prefill.text });
+      }
       body = { model: model, messages: textMessages, stream: true } as ChatRequestBody;
     }
     const options: http.HttpRequestOptions = {
@@ -394,7 +464,7 @@ export class NativeChatClient {
       readTimeout: 300000,
     };
     const request = http.createHttp();
-    return new Promise<void>((resolve, reject) => {
+    return new Promise<NativeReplyOutcome>((resolve, reject) => {
       const settle = (error?: Error): void => {
         if (this.settleRequest !== settle) {
           return;
@@ -408,7 +478,7 @@ export class NativeChatClient {
         if (error) {
           reject(error);
         } else {
-          resolve();
+          resolve(stream.currentOutcome());
         }
       };
       const stream = new ChatStream((content: string, reasoning: string): void => {

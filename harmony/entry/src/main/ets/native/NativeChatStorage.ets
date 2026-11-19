@@ -63,6 +63,11 @@ function validateConversation(session: NativeConversation): boolean {
       !isTimestamp(message.createdAt) || (message.parentId !== null && !byId.has(message.parentId)) ||
       (message.status !== undefined && typeof message.status !== 'string') ||
       (message.model !== undefined && typeof message.model !== 'string') ||
+      (message.stopReason !== undefined && typeof message.stopReason !== 'string') ||
+      (message.canPrefill !== undefined && typeof message.canPrefill !== 'boolean') ||
+      (message.thinking !== undefined && typeof message.thinking !== 'boolean') ||
+      (message.search !== undefined && typeof message.search !== 'boolean') ||
+      (message.thinkingSignature !== undefined && typeof message.thinkingSignature !== 'string') ||
       (message.files !== undefined && (!Array.isArray(message.files) || !message.files.every(validAttachment)))) {
       return false;
     }
