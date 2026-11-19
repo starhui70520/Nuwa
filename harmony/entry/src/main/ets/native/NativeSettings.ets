@@ -18,6 +18,7 @@ export interface NativeSettings {
   authMode: NativeAuthMode;
   theme: NativeTheme;
   chatFontSize: number;
+  attachmentBinding: string;
   thinking: boolean;
   search: boolean;
   ttsMuted: boolean;
@@ -115,6 +116,7 @@ export class NativeSettingsController {
     const authMode = await store.get('authMode', 'api-key') as string;
     const theme = await store.get('theme', 'system') as string;
     const chatFontSize = await store.get('chatFontSize', 16) as number;
+    const binding = await store.get('attachmentBinding', '') as string;
     const thinking = await store.get('thinking', false) as boolean;
     const search = await store.get('search', false) as boolean;
     const ttsMuted = await store.get('ttsMuted', true) as boolean;
@@ -129,6 +131,7 @@ export class NativeSettingsController {
       authMode: authMode === 'deepseek-account' ? 'deepseek-account' : 'api-key',
       theme: theme === 'dark' || theme === 'light' ? theme : 'system',
       chatFontSize: NATIVE_CHAT_FONT_SIZES.includes(chatFontSize) ? chatFontSize : 16,
+      attachmentBinding: binding || util.generateRandomUUID(true),
       thinking,
       search,
       ttsMuted,
@@ -156,6 +159,7 @@ export class NativeSettingsController {
         store.put('authMode', settings.authMode),
         store.put('theme', settings.theme),
         store.put('chatFontSize', settings.chatFontSize),
+        store.put('attachmentBinding', settings.attachmentBinding),
         store.put('thinking', settings.thinking),
         store.put('search', settings.search),
         store.put('ttsMuted', settings.ttsMuted),

@@ -49,6 +49,7 @@ export async function verifyNativeApiCredential(credential: NativeApiCredential)
       method: http.RequestMethod.GET,
       header: headers,
       usingCache: false,
+      maxRedirects: 0,
       connectTimeout: 10000,
       readTimeout: 15000,
     });

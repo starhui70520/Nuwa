@@ -2,9 +2,15 @@ import { url, util } from '@kit.ArkTS';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { http } from '@kit.NetworkKit';
 
+export interface NativeChatFileRef {
+  serverId: string;
+  isImage: boolean;
+}
+
 export interface NativeChatMessage {
   role: string;
   content: string;
+  files?: NativeChatFileRef[];
 }
 
 export interface NativeChatConfig {
@@ -68,7 +74,7 @@ interface AnthropicThinking {
 }
 
 interface AnthropicSafetyCheck {
-  level: 'high';
+  level: 'high' | 'low';
 }
 
 interface AnthropicTool {
@@ -76,14 +82,30 @@ interface AnthropicTool {
   name: 'deepseek_read_url' | 'deepseek_web_search';
 }
 
+interface AnthropicFileSource {
+  type: 'file';
+  file_id: string;
+}
+
+interface AnthropicContentBlock {
+  type: 'text' | 'image' | 'document';
+  source?: AnthropicFileSource;
+  text?: string;
+}
+
+interface AnthropicChatMessage {
+  role: string;
+  content: string | AnthropicContentBlock[];
+}
+
 interface AnthropicRequestBody {
   model: string;
   system: string;
-  messages: NativeChatMessage[];
+  messages: AnthropicChatMessage[];
   stream: boolean;
   thinking: AnthropicThinking;
   safety_check: AnthropicSafetyCheck;
-  tools: AnthropicTool[];
+  tools?: AnthropicTool[];
 }
 
 const DEEPSEEK_ACCOUNT_ORIGIN: string = 'https://api.deepseek.com';
@@ -115,13 +137,10 @@ function resolveAnthropicEndpoint(baseUrl: string): string {
     throw new Error('Anthropic 兼容服务地址必须使用 HTTPS');
   }
   let path = endpoint.pathname.replace(/\/+$/, '');
-  if (path.endsWith('/anthropic/v1/messages')) {
-    endpoint.pathname = path;
-  } else if (path.endsWith('/v1')) {
-    endpoint.pathname = `${path.slice(0, -3)}/anthropic/v1/messages`;
-  } else {
-    endpoint.pathname = `${path.replace(/\/anthropic\/v1$/, '')}/anthropic/v1/messages`;
+  if (!path.endsWith('/anthropic/v1/messages')) {
+    path = `${path.replace(/\/(?:anthropic\/v1|v1)$/i, '')}/anthropic/v1/messages`;
   }
+  endpoint.pathname = path;
   return endpoint.href;
 }
 
@@ -280,6 +299,20 @@ class ChatStream {
   }
 }
 
+function anthropicMessage(message: NativeChatMessage): AnthropicChatMessage {
+  if (!message.files?.length || message.role !== 'user') {
+    return { role: message.role, content: message.content };
+  }
+  const blocks: AnthropicContentBlock[] = message.files.map<AnthropicContentBlock>(
+    (file: NativeChatFileRef): AnthropicContentBlock => ({
+      type: file.isImage ? 'image' : 'document', source: { type: 'file', file_id: file.serverId },
+    }));
+  if (message.content) {
+    blocks.push({ type: 'text', text: message.content });
+  }
+  return { role: message.role, content: blocks };
+}
+
 export class NativeChatClient {
   private settleRequest?: (error?: Error) => void;
 
@@ -326,23 +359,37 @@ export class NativeChatClient {
       if (config.search) {
         tools.push({ type: 'deepseek_web_search', name: 'deepseek_web_search' });
       }
+      const withDocuments = messages.some((message: NativeChatMessage): boolean =>
+        message.files?.some((file: NativeChatFileRef): boolean => !file.isImage) ?? false);
+      const withImages = messages.some((message: NativeChatMessage): boolean =>
+        message.files?.some((file: NativeChatFileRef): boolean => file.isImage) ?? false);
+      if (withImages) {
+        headers['anthropic-beta'] = 'files-api-2025-04-14';
+      }
+      const lastPrompt = messages.length ? messages[messages.length - 1].content : '';
+      const omitExtended = withDocuments && !config.search && !/https?:\/\//i.test(lastPrompt);
       body = {
         model: model,
         system: config.system ?? DEFAULT_DEEPSEEK_SYSTEM,
-        messages: messages,
+        messages: messages.map<AnthropicChatMessage>(anthropicMessage),
         stream: true,
         thinking: { type: config.thinking ? 'enabled' : 'disabled' },
-        safety_check: { level: 'high' },
-        tools: tools,
+        safety_check: { level: omitExtended ? 'low' : 'high' },
+        tools: omitExtended ? undefined : tools,
       } as AnthropicRequestBody;
     } else {
-      body = { model: model, messages: messages, stream: true } as ChatRequestBody;
+      const textMessages = messages.filter((message: NativeChatMessage): boolean => !!message.content)
+        .map<NativeChatMessage>((message: NativeChatMessage): NativeChatMessage => ({
+          role: message.role, content: message.content,
+        }));
+      body = { model: model, messages: textMessages, stream: true } as ChatRequestBody;
     }
     const options: http.HttpRequestOptions = {
       method: http.RequestMethod.POST,
       header: headers,
       extraData: JSON.stringify(body),
       usingCache: false,
+      maxRedirects: 0,
       connectTimeout: 15000,
       readTimeout: 300000,
     };

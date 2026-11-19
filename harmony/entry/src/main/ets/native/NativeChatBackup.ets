@@ -1,6 +1,9 @@
 import { common } from '@kit.AbilityKit';
 import { util } from '@kit.ArkTS';
 import { fileIo, picker } from '@kit.CoreFileKit';
+import {
+  attachmentMime, attachmentPurpose, attachmentRasterMime, NativeAttachment, NativeChatAttachments,
+} from './NativeChatAttachments';
 import { NativeConversation, NativeConversationMessage, NativeConversationState, visibleMessages } from './NativeConversation';
 import {
   backupPath, backupText, backupUtf8, MAX_BACKUP_BYTES, NativeBackupZipEntry, readBackupZip, writeBackupZip,
@@ -12,6 +15,7 @@ const USER = 'user.json';
 const VERSION = 3;
 const IO_CHUNK = 256 * 1024;
 const MAX_IMAGE_BYTES = 16 * 1024 * 1024;
+const MAX_PREVIEW_BYTES = 1024 * 1024;
 const base64 = new util.Base64Helper();
 
 interface ArchiveManifest {
@@ -22,8 +26,12 @@ interface ArchiveFile {
   id: string;
   file_name: string;
   file_size: number;
+  token_usage?: number | null;
+  inserted_at: string;
   export_path: string | null;
   is_image: boolean;
+  width?: number | null;
+  height?: number | null;
 }
 
 interface ArchiveFragment {
@@ -70,6 +78,12 @@ interface ArchiveImage {
 interface ArchiveOrigin {
   session: ArchiveSession;
   images: ArchiveImage[];
+}
+
+interface ArchiveRaster {
+  encoded: string;
+  data: Uint8Array;
+  mimeType: string;
 }
 
 export interface NativeBackupMergeResult {
@@ -188,6 +202,7 @@ function validateFragment(fragment: ArchiveFragment, sessionId: string, imagePat
         (file.export_path !== null && typeof file.export_path !== 'string')) {
         invalidArchive();
       }
+      timestamp(file.inserted_at);
       if (file.is_image && file.export_path) {
         const path = backupPath(file.export_path);
         if (!path.startsWith(filesPrefix(sessionId)) || path.endsWith('/') ||
@@ -209,6 +224,78 @@ function original(session: NativeConversation): ArchiveOrigin | undefined {
   return session.archiveJson ? JSON.parse(session.archiveJson) as ArchiveOrigin : undefined;
 }
 
+function archiveRaster(session: NativeConversation, item: NativeAttachment): ArchiveRaster | undefined {
+  if (!item.isImage || item.local || item.size > MAX_PREVIEW_BYTES || !session.archiveJson) {
+    return undefined;
+  }
+  try {
+    const archive = original(session);
+    if (!archive || archive.images.length === 0) {
+      return undefined;
+    }
+    for (const message of archive.session.messages) {
+      for (const fragment of message.fragments) {
+        if (fragment.type !== 'FILE') {
+          continue;
+        }
+        for (const file of fragment.files ?? []) {
+          if (!file.is_image || file.id !== (item.archiveId ?? item.id) ||
+            file.file_name !== item.name || !file.export_path) {
+            continue;
+          }
+          const path = backupPath(file.export_path);
+          const entry = archive.images.find((image: ArchiveImage): boolean => image.path === path);
+          if (!entry || entry.bytes.length > Math.ceil(MAX_PREVIEW_BYTES / 3) * 4) {
+            continue;
+          }
+          const bytes = base64.decodeSync(entry.bytes);
+          const mime = attachmentRasterMime(bytes);
+          if (mime && bytes.length <= MAX_PREVIEW_BYTES) {
+            return { encoded: entry.bytes, data: bytes, mimeType: mime };
+          }
+        }
+      }
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+export function importedAttachmentPreview(session: NativeConversation, item: NativeAttachment): string {
+  const raster = archiveRaster(session, item);
+  return raster ? 'data:' + raster.mimeType + ';base64,' + raster.encoded : '';
+}
+
+export async function hydrateImportedAttachment(context: common.UIAbilityContext, session: NativeConversation,
+  item: NativeAttachment): Promise<NativeAttachment | null> {
+  const raster = archiveRaster(session, item);
+  return raster ? new NativeChatAttachments().storeOriginal(context, item, raster.data, raster.mimeType) : null;
+}
+
+function nativeFiles(message: ArchiveMessage): NativeAttachment[] | undefined {
+  const result: NativeAttachment[] = [];
+  for (const fragment of message.fragments) {
+    if (fragment.type !== 'FILE') {
+      continue;
+    }
+    for (const file of fragment.files ?? []) {
+      result.push({
+        id: file.id,
+        name: file.file_name,
+        size: file.file_size,
+        isImage: file.is_image,
+        mimeType: attachmentMime(file.file_name),
+        purpose: attachmentPurpose(file.file_name, file.is_image),
+        createdAt: timestamp(file.inserted_at),
+        serverId: null,
+        local: false,
+      });
+    }
+  }
+  return result.length > 0 ? result : undefined;
+}
+
 function nativeSession(source: ArchiveSession, entries: Map<string, Uint8Array>): NativeConversation {
   validateSummary(source);
   if (!Array.isArray(source.messages) || !count(source.current_message_id)) {
@@ -216,11 +303,11 @@ function nativeSession(source: ArchiveSession, entries: Map<string, Uint8Array>)
   }
   const byId = new Map<string, NativeConversationMessage>();
   const imagePaths = new Map<string, string>();
+  source.messages.forEach(validateMessage);
   const ordered = source.messages.slice().sort((left: ArchiveMessage, right: ArchiveMessage): number =>
     left.id - right.id);
   const messages: NativeConversationMessage[] = [];
   for (const raw of ordered) {
-    validateMessage(raw);
     raw.fragments.forEach((fragment: ArchiveFragment): void => validateFragment(fragment, source.id, imagePaths));
     const id = raw.id.toString();
     const parentId = raw.parent_id === null ? null : raw.parent_id.toString();
@@ -237,6 +324,7 @@ function nativeSession(source: ArchiveSession, entries: Map<string, Uint8Array>)
       reasoning: textFragments(raw, 'THINK'),
       createdAt: timestamp(raw.inserted_at),
       status: role === 'user' ? undefined : nativeStatus(raw.status),
+      files: nativeFiles(raw),
     };
     if (parent) {
       parent.selectedChildId = id;
@@ -385,19 +473,66 @@ function rewriteImagePath(path: string, source: string, target: string): string 
   return filesPrefix(target) + normalized.slice(prefix.length);
 }
 
-function archiveSession(session: NativeConversation, images: NativeBackupZipEntry[]): ArchiveSession {
+function safeFileName(name: string): string {
+  const safe = name.replace(/[/\\\0]/g, '_');
+  return safe && safe !== '.' && safe !== '..' ? safe : 'unnamed';
+}
+
+function outgoingFile(item: NativeAttachment, sessionId: string, originalFiles: Map<string, ArchiveFile>,
+  sourceId: string, images: Map<string, Uint8Array>, liveImages: Map<string, Uint8Array>): ArchiveFile {
+  const existing = originalFiles.get(item.archiveId ?? item.id);
+  if (existing) {
+    const retained = JSON.parse(JSON.stringify(existing)) as ArchiveFile;
+    if (retained.is_image && retained.export_path) {
+      retained.export_path = rewriteImagePath(retained.export_path, sourceId, sessionId);
+    }
+    return retained;
+  }
+  let path: string | null = null;
+  if (item.isImage && item.local) {
+    const bytes = liveImages.get(item.id);
+    if (!bytes || bytes.length !== item.size) {
+      throw new Error('本地图片原件未能读取：' + item.name);
+    }
+    path = backupPath(filesPrefix(sessionId) + safeFileName(item.id) + '_' + safeFileName(item.name));
+    images.set(path, bytes);
+  }
+  return {
+    id: item.id,
+    file_name: item.name,
+    file_size: item.size,
+    token_usage: null,
+    inserted_at: archiveDate(item.createdAt),
+    export_path: path,
+    is_image: item.isImage,
+    width: null,
+    height: null,
+  };
+}
+
+function archiveSession(session: NativeConversation, images: Map<string, Uint8Array>,
+  liveImages: Map<string, Uint8Array>): ArchiveSession {
   if (!validId(session.id)) {
     return invalidArchive();
   }
   const previous = original(session);
+  const sourceId = previous?.session.id ?? session.id;
   const rawById = new Map<string, ArchiveMessage>();
+  const originalFiles = new Map<string, ArchiveFile>();
   if (previous) {
     for (const message of previous.session.messages) {
       rawById.set(message.id.toString(), message);
+      for (const fragment of message.fragments) {
+        if (fragment.type === 'FILE') {
+          for (const file of fragment.files ?? []) {
+            originalFiles.set(file.id, JSON.parse(JSON.stringify(file)) as ArchiveFile);
+          }
+        }
+      }
     }
     for (const image of previous.images) {
-      const path = rewriteImagePath(image.path, previous.session.id, session.id);
-      images.push({ name: path, data: base64.decodeSync(image.bytes) });
+      const path = rewriteImagePath(image.path, sourceId, session.id);
+      images.set(path, base64.decodeSync(image.bytes));
     }
   }
   const ids = new Map<string, number>();
@@ -409,7 +544,8 @@ function archiveSession(session: NativeConversation, images: NativeBackupZipEntr
       (item.parentId === null ? role !== 'USER' : parent === undefined || roles.get(item.parentId) === role)) {
       throw new Error('本地对话的消息分支不符合历史备份格式。');
     }
-    let message = rawById.get(item.id);
+    const preexisting = rawById.get(item.id);
+    let message = preexisting;
     if (!message) {
       message = {
         id: index + 1,
@@ -430,11 +566,14 @@ function archiveSession(session: NativeConversation, images: NativeBackupZipEntr
         message.status = archiveStatus(item.status);
       }
       message.inserted_at = archiveDate(item.createdAt, message.inserted_at);
-      if (previous && previous.session.id !== session.id) {
+      if (sourceId !== session.id) {
         for (const fragment of message.fragments) {
+          if (fragment.type !== 'FILE') {
+            continue;
+          }
           for (const file of fragment.files ?? []) {
             if (file.is_image && file.export_path) {
-              file.export_path = rewriteImagePath(file.export_path, previous.session.id, session.id);
+              file.export_path = rewriteImagePath(file.export_path, sourceId, session.id);
             }
           }
         }
@@ -444,6 +583,11 @@ function archiveSession(session: NativeConversation, images: NativeBackupZipEntr
       updateText(message, 'THINK', item.reasoning);
     }
     updateText(message, role === 'USER' ? 'REQUEST' : 'RESPONSE', item.content);
+    if (!preexisting && item.files?.length) {
+      const files = item.files.map((file: NativeAttachment): ArchiveFile =>
+        outgoingFile(file, session.id, originalFiles, sourceId, images, liveImages));
+      message.fragments.push({ type: 'FILE', files: files });
+    }
     ids.set(item.id, index + 1);
     roles.set(item.id, role);
     return message;
@@ -467,13 +611,14 @@ function jsonEntry(name: string, value: Object): NativeBackupZipEntry {
   return { name: name, data: backupUtf8(JSON.stringify(value)) };
 }
 
-export function encodeChatBackup(sessions: NativeConversation[]): Uint8Array {
+export function encodeChatBackup(sessions: NativeConversation[],
+  liveImages: Map<string, Uint8Array> = new Map<string, Uint8Array>()): Uint8Array {
   const manifest: ArchiveManifest = { export_format_version: VERSION };
   const entries = [jsonEntry(MANIFEST, manifest)];
-  const images: NativeBackupZipEntry[] = [];
+  const images = new Map<string, Uint8Array>();
   const index: ArchiveIndexEntry[] = [];
   for (const session of sessions) {
-    const file = archiveSession(session, images);
+    const file = archiveSession(session, images, liveImages);
     entries.push(jsonEntry(sessionPath(file.id), file));
     index.push({
       id: file.id,
@@ -485,7 +630,15 @@ export function encodeChatBackup(sessions: NativeConversation[]): Uint8Array {
     });
   }
   entries.push(jsonEntry(SESSION_INDEX, index));
-  return writeBackupZip(entries.concat(images));
+  let imageBytes = 0;
+  images.forEach((data: Uint8Array, name: string): void => {
+    imageBytes += data.length;
+    if (imageBytes > MAX_IMAGE_BYTES) {
+      throw new Error('图片原件超过 16 MB，无法导出此历史备份。');
+    }
+    entries.push({ name: name, data: data });
+  });
+  return writeBackupZip(entries);
 }
 
 function pathHash(seed: string, text: string): string {
@@ -516,6 +669,9 @@ function messagePaths(session: NativeConversation): Set<string> {
       }
       const files: string[] = [];
       for (const fragment of row.fragments) {
+        if (fragment.type !== 'FILE') {
+          continue;
+        }
         for (const file of fragment.files ?? []) {
           files.push(file.file_name + ':' + file.file_size.toString());
         }
@@ -527,7 +683,9 @@ function messagePaths(session: NativeConversation): Set<string> {
   const paths = new Set<string>();
   for (const row of session.messages) {
     const seed = row.parentId === null ? '' : (parents.get(row.parentId) ?? '');
-    const key = row.role === 'user' ? 'U:' + row.content + '|' + (signatures.get(row.id) ?? '') : 'A:' + row.content;
+    const files = row.files?.map((item: NativeAttachment): string => item.name + ':' + item.size.toString()).join(',') ??
+      signatures.get(row.id) ?? '';
+    const key = row.role === 'user' ? 'U:' + row.content + '|' + files : 'A:' + row.content;
     const digest = pathHash(seed, key);
     parents.set(row.id, digest);
     paths.add(digest);
@@ -546,6 +704,19 @@ function hasNewPath(paths: Set<string>, other: Set<string>): boolean {
 
 function withPrefix(title: string, prefix: string): string {
   return prefix + (title.replace(/^[ND]分支·/, '') || '未命名对话');
+}
+
+function copyMerged(session: NativeConversation, id: string, title: string, pinnedAt?: number): NativeConversation {
+  return {
+    id: id,
+    title: title,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    pinnedAt: pinnedAt,
+    rootMessageId: session.rootMessageId,
+    messages: session.messages,
+    archiveJson: session.archiveJson,
+  };
 }
 
 export function mergeChatBackup(history: NativeConversationState, imported: NativeConversation[]): NativeBackupMergeResult {
@@ -571,23 +742,11 @@ export function mergeChatBackup(history: NativeConversationState, imported: Nati
     }
     total++;
     if (!hasNewPath(localPaths, addedPaths)) {
-      incoming.pinnedAt = existing.pinnedAt;
-      sessions[index] = incoming;
+      sessions[index] = copyMerged(incoming, incoming.id, incoming.title, existing.pinnedAt);
       continue;
     }
-    sessions[index] = {
-      id: existing.id,
-      title: withPrefix(existing.title, 'N分支·'),
-      createdAt: existing.createdAt,
-      updatedAt: existing.updatedAt,
-      pinnedAt: existing.pinnedAt,
-      rootMessageId: existing.rootMessageId,
-      messages: existing.messages,
-      archiveJson: existing.archiveJson,
-    };
-    incoming.id = util.generateRandomUUID(true);
-    incoming.title = withPrefix(incoming.title, 'D分支·');
-    sessions.push(incoming);
+    sessions[index] = copyMerged(existing, existing.id, withPrefix(existing.title, 'N分支·'), existing.pinnedAt);
+    sessions.push(copyMerged(incoming, util.generateRandomUUID(true), withPrefix(incoming.title, 'D分支·')));
   }
   return { history: { sessions: sessions, activeId: history.activeId }, importedCount: total };
 }
@@ -635,6 +794,8 @@ async function writeFile(uri: string, bytes: Uint8Array): Promise<void> {
 }
 
 export class NativeChatBackup {
+  private readonly attachments = new NativeChatAttachments();
+
   async importFromUri(uri: string): Promise<NativeConversation[]> {
     return decodeChatBackup(await readFile(uri));
   }
@@ -648,7 +809,27 @@ export class NativeChatBackup {
   }
 
   async exportToPicker(context: common.UIAbilityContext, sessions: NativeConversation[]): Promise<boolean> {
-    const bytes = encodeChatBackup(sessions);
+    const images = new Map<string, Uint8Array>();
+    let size = 0;
+    for (const session of sessions) {
+      for (const message of session.messages) {
+        for (const file of message.files ?? []) {
+          if (!file.isImage || !file.local || file.archiveId || images.has(file.id)) {
+            continue;
+          }
+          size += file.size;
+          if (size > MAX_IMAGE_BYTES) {
+            throw new Error('图片原件超过 16 MB，无法导出此历史备份。');
+          }
+          const bytes = await this.attachments.readOriginal(context, file);
+          if (!bytes) {
+            throw new Error('本地图片原件未能读取：' + file.name);
+          }
+          images.set(file.id, bytes);
+        }
+      }
+    }
+    const bytes = encodeChatBackup(sessions, images);
     const options = new picker.DocumentSaveOptions();
     const date = new Date();
     const day = date.getFullYear().toString() + '-' + (date.getMonth() + 1).toString().padStart(2, '0') + '-' +

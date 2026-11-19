@@ -333,6 +333,7 @@ export class NativeDeepSeekAccountController {
       await request.request(`${PLATFORM_ORIGIN}/auth-api/v0/users/logout`, {
         method: http.RequestMethod.POST,
         header: headers,
+        maxRedirects: 0,
         connectTimeout: 10000,
         readTimeout: 10000,
       });
@@ -354,6 +355,7 @@ export class NativeDeepSeekAccountController {
       const response = await request.request(`${API_ORIGIN}/user/balance`, {
         method: http.RequestMethod.GET,
         header: headers,
+        maxRedirects: 0,
         connectTimeout: 10000,
         readTimeout: 10000,
         expectDataType: http.HttpDataType.STRING,
@@ -449,6 +451,7 @@ export class NativeDeepSeekAccountController {
         method: http.RequestMethod.POST,
         header: platformHeaders(locale),
         extraData: body,
+        maxRedirects: 0,
         connectTimeout: 15000,
         readTimeout: 15000,
         expectDataType: http.HttpDataType.STRING,

@@ -1,0 +1,631 @@
+import { common } from '@kit.AbilityKit';
+import { uniformTypeDescriptor } from '@kit.ArkData';
+import { url, util } from '@kit.ArkTS';
+import { fileIo, fileUri, picker } from '@kit.CoreFileKit';
+import { image } from '@kit.ImageKit';
+import { http } from '@kit.NetworkKit';
+import { NativeChatConfig } from './NativeChatClient';
+
+export interface NativeAttachment {
+  id: string;
+  name: string;
+  size: number;
+  isImage: boolean;
+  mimeType: string;
+  purpose: string | null;
+  createdAt: number;
+  serverId: string | null;
+  serverBinding?: string;
+  archiveId?: string;
+  local: boolean;
+}
+
+interface UploadFile {
+  localPath: string;
+  mimeType: string;
+  name: string;
+  temporary: boolean;
+}
+
+interface UploadData {
+  id?: string;
+}
+
+interface AttachmentTransfer {
+  config: NativeChatConfig;
+  canceled: boolean;
+  request?: http.HttpRequest;
+  result?: Promise<string>;
+}
+
+interface AttachmentJob {
+  run: () => Promise<string>;
+  resolve: (serverId: string) => void;
+  reject: (error: Error) => void;
+}
+
+const DIRECTORY = 'nuwa-attachments';
+const ACCOUNT_ORIGIN = 'https://api.deepseek.com';
+const MAX_COUNT = 50;
+const MAX_BYTES = 64 * 1024 * 1024;
+const IO_CHUNK = 256 * 1024;
+const MAX_ACTIVE_UPLOADS = 3;
+const MAX_PREVIEW_SIDE = 8192;
+const MAX_PREVIEW_PIXELS = 16 * 1024 * 1024;
+const BINARY_MIME = 'application/octet-stream';
+const FILE_TYPES: Set<string> = new Set<string>([
+  'wxml wxss wxs axml acss sjs swan ttml ttss qml qss pdf png jpg jpeg svg svgz bmp gif webp ico xbm dib',
+  'pjp tif pjpeg avif apng tiff jfif txt md csv tsv html json log dot go h c cpp cxx cc cs java js css jsp',
+  'php py py3 asp yaml yml ini conf ts tsx doc docx ppt pptx xls xlsx abap asc ash ampl mod g4 apib apl',
+  'dyalog asax ascx ashx asmx aspx axd dats hats sats as adb ada ads agda als apacheconf vhost cls',
+  'applescript scpt arc ino asciidoc adoc aj asm a51 inc nasm aug ahk ahkl au3 awk auk gawk mawk nawk bat',
+  'cmd befunge bison bb decls bmx bsv boo b bf brs bro cats idc w cake cshtml csx c++ cp h++ hh hpp hxx inl',
+  'ipp tcc tpp c-objdump chs clp cmake in cob cbl ccp cobol cpy capnp mss ceylon chpl ch ck cirru clw icl',
+  'dcl click clj boot cl2 cljc cljs hl cljscm cljx hic coffee _coffee cjsx cjs cts mjs mts cson iced cfm',
+  'cfml cfc lisp asd cl l lsp ny podsl sexp cps coq v cppobjdump c++-objdump c++objdump cpp-objdump',
+  'cxx-objdump creole cr feature cu cuh cy pyx pxd pxi d di d-objdump com dm zone arpa darcspatch dpatch',
+  'dart diff patch dockerfile djs dylan dyl intr lid E ecl eclxml sch brd epj e ex exs elm el emacs desktop',
+  'em emberscript erl es escript hrl xrl yrl fs fsi fsx fx flux f90 f f03 f08 f77 f95 for fpp factor fy',
+  'fancypack fan fth 4th forth fr frt ftl g gco gcode gms gap gd gi tst s ms glsl fp frag frg fsh fshader',
+  'geo geom glslv gshader shader vert vrx vsh vshader gml kid ebuild eclass po pot glf gp gnu gnuplot plot',
+  'plt golo gs gst gsx vark grace gradle gf graphql gv man 1in 1m 1x 3in 3m 3qt 3x me n rno roff groovy grt',
+  'gtpl gvy gsp hcl tf hlsl fxh hlsli htm st xht xhtml mustache jinja eex erb deface phtml http haml',
+  'handlebars hbs hb hs hsc hx hxsl hy pro dlm ipf cfg prefs properties irclog weechatlog idr lidr ni i7x',
+  'iss io ik thy ijs flex jflex geojson lock topojson json5 jsonld jq jsx jade j _js bones es6 jake jsb',
+  'jscad jsfl jsm jss njs pac ssjs sublime-build sublime-commands sublime-completions sublime-keymap',
+  'sublime-macro sublime-menu sublime-mousemap sublime-project sublime-settings sublime-theme',
+  'sublime-workspace sublime_metrics sublime_session xsjs xsjslib jl ipynb krl kicad_pcb kit kt ktm kts lfe',
+  'll lol lsl lslp lvproj lasso las lasso8 lasso9 ldml latte lean hlean less lex ly ily m ld lds liquid',
+  'lagda litcoffee lhs ls _ls xm x xi lgt logtalk lookml lua fcgi nse pd_lua rbxs wlua mumps m4 mcfunction',
+  'mcr mtml muf mak mk mkfile mako mao markdown mkd mkdn mkdown ron mask mathematica cdf ma map mt nb nbp',
+  'wl wlt matlab maxpat maxhelp maxproj mxt pat mediawiki wiki moo metal minid druby duby mir mirah mo mms',
+  'mmk monkey moon myt ncl nl nsi nsh axs axi nlogo nginxconf nim nimrod ninja nit nix nu numpy numpyw',
+  'numsc ml eliom eliomi ml4 mli mll mly objdump mm sj omgrofl opa opal opencl p scad org ox oxh oxo',
+  'oxygene oz pwn aw ctp php3 php4 php5 php6 php7 php8 phps phpt pls pck pkb pks plb plsql sql pov pan psc',
+  'parrot pasm pir pas dfm dpr lpr pp pl al cgi perl ph plx pm pod psgi t 6pl 6pm nqp p6 p6l p6m pl6 pm6',
+  'pkl pig pike pmod pogo pony ps eps ps1 psd1 psm1 pde prolog yap spin proto pub pd pb pbi purs bzl gyp',
+  'lmi pyde pyi pyp pyt pyw rpy tac wsgi xpy pytb qbs pri r rd rsx raml rdoc rbbas rbfrm rbmnu rbres rbtbar',
+  'rbuistate rhtml rmd rkt rktd rktl scrbl rl raw reb r2 r3 rebol red reds cw rs rsh robot rg rb builder',
+  'gemspec god irbrc jbuilder mspec pluginspec podspec rabl rake rbuild rbw rbx ru ruby thor watchr sas',
+  'scss smt2 smt sparql rq sqf hqf cql ddl prc tab udf viw db2 ston sage sagews sls sass scala sbt sc scaml',
+  'scm sld sps ss sci sce self sh bash bats command ksh tmux tool zsh sh-session shen sl slim smali tpl sp',
+  'sma nut stan ML fun sig sml do ado doh ihlp mata matah sthlp styl scd swift sv svh vh toml txl tcl adp',
+  'tm tcsh csh tex aux bbx bib cbx dtx ins lbx ltx mkii mkiv mkvi sty toc tea no textile thrift tu ttl twig',
+  'upc anim asset meta prefab unity uno uc ur urs vcl vhdl vhd vhf vhi vho vhs vht vhw vala vapi veo vim vb',
+  'bas frm frx vba vbhtml vbs volt vue owl webidl x10 xc xml ant ccxml clixml cproject csl csproj ct dita',
+  'ditamap ditaval config dotsettings filters fsproj fxml glade grxml iml ivy jelly jsproj kml launch',
+  'mdpolicy mxml nproj nuspec odd osm plist props ps1xml psc1 pt rdf rss scxml srdf storyboard stTheme',
+  'sublime-snippet targets tmCommand tml tmLanguage tmPreferences tmSnippet tmTheme ui urdf ux vbproj',
+  'vcxproj vssettings vxml wsdl wsf wxi wxl x3d xacro xaml xib xlf xliff xmi dist xproj xsd xul zcml',
+  'xsp-config metadata xpl xproc xquery xq xql xqm xqy xs xslt xsl xojo_code xojo_menu xojo_report',
+  'xojo_script xojo_toolbar xojo_window xtend reek rviz sublime-syntax syntax yang y yacc yy zep zimpl zmpl',
+  'zpl ec eh edn fish mu nc ooc rst rest wisp prg prw gitignore gitkeep gitmodules example avifs blp bufr',
+  'bw cur dcx dds emf fit fits flc fli ftc ftu gbr grib h5 hdf hif icb icns iim im j2c j2k jp2 jpc jpe jpf',
+  'jpx mpeg mpg msp pbm pcd pcx pfm pgm pnm ppm psd pxr qoi ras rgb rgba sgi tga vda vst wmf xpm epub mobi',
+].join(' ').split(' '));
+const LAYOUT_TYPES: Set<string> = new Set<string>(['pdf', 'doc', 'docx', 'ppt', 'pptx']);
+
+function extension(name: string): string {
+  const dot = name.lastIndexOf('.');
+  return dot > 0 ? name.slice(dot + 1).toLowerCase() : '';
+}
+
+function directory(context: common.UIAbilityContext): string {
+  return context.filesDir + '/' + DIRECTORY;
+}
+
+function attachmentPath(context: common.UIAbilityContext, item: NativeAttachment): string {
+  if (!/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(item.id)) {
+    throw new Error('附件标识无效。');
+  }
+  return directory(context) + '/' + item.id;
+}
+
+function beginsWith(data: Uint8Array, prefix: number[]): boolean {
+  return prefix.every((byte: number, index: number): boolean => data[index] === byte);
+}
+
+function sniffMime(data: Uint8Array): string {
+  if (beginsWith(data, [0xff, 0xd8, 0xff])) {
+    return 'image/jpeg';
+  }
+  if (beginsWith(data, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) {
+    return 'image/png';
+  }
+  const header = String.fromCharCode(...Array.from(data));
+  if (header.startsWith('GIF87a') || header.startsWith('GIF89a')) {
+    return 'image/gif';
+  }
+  if (header.startsWith('RIFF') && header.slice(8, 12) === 'WEBP') {
+    return 'image/webp';
+  }
+  if (header.startsWith('BM')) {
+    return 'image/bmp';
+  }
+  if (beginsWith(data, [0x49, 0x49, 0x2a, 0]) || beginsWith(data, [0x4d, 0x4d, 0, 0x2a])) {
+    return 'image/tiff';
+  }
+  if (header.slice(4, 8) === 'ftyp' && ['avif', 'avis'].includes(header.slice(8, 12))) {
+    return 'image/avif';
+  }
+  return '';
+}
+
+function safeDimensions(width: number, height: number): boolean {
+  return width > 0 && height > 0 && width <= MAX_PREVIEW_SIDE && height <= MAX_PREVIEW_SIDE &&
+    width * height <= MAX_PREVIEW_PIXELS;
+}
+
+function safeJpeg(data: Uint8Array, view: DataView): boolean {
+  let offset = 2;
+  while (offset + 3 < data.length && data[offset] === 0xff) {
+    while (offset < data.length && data[offset] === 0xff) {
+      offset++;
+    }
+    const marker = data[offset++];
+    if (marker === 0xda || marker === 0xd9 || offset + 2 > data.length) {
+      return false;
+    }
+    const length = view.getUint16(offset);
+    if (length < 2 || offset + length > data.length) {
+      return false;
+    }
+    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+      return length >= 8 && safeDimensions(view.getUint16(offset + 5), view.getUint16(offset + 3));
+    }
+    offset += length;
+  }
+  return false;
+}
+
+function safeWebP(data: Uint8Array, view: DataView): boolean {
+  if (data.length < 25) {
+    return false;
+  }
+  const type = String.fromCharCode(...Array.from(data.subarray(12, 16)));
+  if (type === 'VP8L' && data[20] === 0x2f) {
+    const size = view.getUint32(21, true);
+    return safeDimensions((size & 0x3fff) + 1, ((size >>> 14) & 0x3fff) + 1);
+  }
+  if (data.length < 30) {
+    return false;
+  }
+  if (type === 'VP8X') {
+    const width = view.getUint16(24, true) + data[26] * 65_536 + 1;
+    const height = view.getUint16(27, true) + data[29] * 65_536 + 1;
+    return safeDimensions(width, height);
+  }
+  return type === 'VP8 ' && data[23] === 0x9d && data[24] === 1 && data[25] === 0x2a &&
+    safeDimensions(view.getUint16(26, true) & 0x3fff, view.getUint16(28, true) & 0x3fff);
+}
+
+export function attachmentRasterMime(data: Uint8Array): string {
+  const mime = sniffMime(data.subarray(0, 16));
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  switch (mime) {
+    case 'image/jpeg':
+      return safeJpeg(data, view) ? mime : '';
+    case 'image/png':
+      return data.length >= 24 && view.getUint32(12) === 0x49484452 &&
+        safeDimensions(view.getUint32(16), view.getUint32(20)) ? mime : '';
+    case 'image/gif':
+      return data.length >= 10 && safeDimensions(view.getUint16(6, true), view.getUint16(8, true)) ? mime : '';
+    case 'image/webp':
+      return safeWebP(data, view) ? mime : '';
+    default:
+      return '';
+  }
+}
+
+function extensionMime(ext: string): string {
+  switch (ext) {
+    case 'apng':
+    case 'png': return 'image/png';
+    case 'jpg':
+    case 'jpeg':
+    case 'jfif':
+    case 'pjp':
+    case 'pjpeg': return 'image/jpeg';
+    case 'gif': return 'image/gif';
+    case 'webp': return 'image/webp';
+    case 'svg':
+    case 'svgz': return 'image/svg+xml';
+    case 'bmp':
+    case 'dib': return 'image/bmp';
+    case 'tif':
+    case 'tiff': return 'image/tiff';
+    case 'avif': return 'image/avif';
+    case 'ico': return 'image/x-icon';
+    case 'pdf': return 'application/pdf';
+    default:
+      try {
+        const type = uniformTypeDescriptor.getUniformDataTypeByFilenameExtension('.' + ext);
+        return uniformTypeDescriptor.getTypeDescriptor(type).mimeTypes[0] ?? BINARY_MIME;
+      } catch {
+        return BINARY_MIME;
+      }
+  }
+}
+
+export function attachmentMime(name: string): string {
+  return extensionMime(extension(name));
+}
+
+export function attachmentPurpose(name: string, isImage: boolean): string | null {
+  return isImage ? null : (LAYOUT_TYPES.has(extension(name)) ? 'rich_layout_recognition' : 'user_data');
+}
+
+function filesEndpoint(config: NativeChatConfig): string {
+  if (config.accountToken?.trim()) {
+    return ACCOUNT_ORIGIN + '/anthropic/v1/files';
+  }
+  let resolved: url.URL;
+  try {
+    resolved = url.URL.parseURL(config.baseUrl.trim());
+  } catch {
+    throw new Error('请输入有效的附件服务地址。');
+  }
+  if (resolved.protocol !== 'https:' || !resolved.hostname || resolved.username || resolved.password ||
+    resolved.hash || resolved.search) {
+    throw new Error('附件服务地址必须使用 HTTPS 且不包含凭据、查询或片段。');
+  }
+  const basePath = resolved.pathname.replace(/\/+$/, '').replace(/\/(?:anthropic\/v1(?:\/(?:messages|files))?|v1)$/i, '');
+  resolved.pathname = basePath + '/anthropic/v1/files';
+  return resolved.href;
+}
+
+function sameDestination(first: NativeChatConfig, second: NativeChatConfig): boolean {
+  const account = first.accountToken?.trim() ?? '';
+  if (account || second.accountToken?.trim()) {
+    return account === (second.accountToken?.trim() ?? '');
+  }
+  return first.protocol === second.protocol && first.baseUrl.trim() === second.baseUrl.trim() &&
+    first.apiKey.trim() === second.apiKey.trim();
+}
+
+async function writeChunk(fd: number, bytes: ArrayBuffer): Promise<void> {
+  let remaining = bytes;
+  while (remaining.byteLength > 0) {
+    const written = await fileIo.write(fd, remaining);
+    if (written <= 0) {
+      throw new Error('附件写入未完成。');
+    }
+    remaining = remaining.slice(written);
+  }
+}
+
+async function copyOriginal(source: fileIo.File, destination: string, size: number, header: ArrayBuffer): Promise<void> {
+  const target = await fileIo.open(destination,
+    fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+  try {
+    await writeChunk(target.fd, header);
+    let copied = header.byteLength;
+    while (copied < size) {
+      const chunk = new ArrayBuffer(Math.min(IO_CHUNK, size - copied));
+      const read = await fileIo.read(source.fd, chunk);
+      if (read <= 0) {
+        throw new Error('附件读取未完成。');
+      }
+      await writeChunk(target.fd, read === chunk.byteLength ? chunk : chunk.slice(0, read));
+      copied += read;
+    }
+    if (await fileIo.read(source.fd, new ArrayBuffer(1)) !== 0) {
+      throw new Error('附件内容在复制期间发生变化，请重新选择。');
+    }
+    await fileIo.fsync(target.fd);
+  } finally {
+    await fileIo.close(target);
+  }
+}
+
+function rejectCanceled(transfer: AttachmentTransfer): void {
+  if (transfer.canceled) {
+    throw new Error('附件上传已取消。');
+  }
+}
+
+async function convertImage(file: UploadFile): Promise<UploadFile> {
+  const path = file.localPath + '.' + util.generateRandomUUID(true) + '.upload';
+  let source: image.ImageSource | undefined;
+  let pixels: image.PixelMap | undefined;
+  let packer: image.ImagePacker | undefined;
+  try {
+    source = image.createImageSource(file.localPath);
+    const info = await source.getImageInfo();
+    const scale = Math.max(1, Math.max(info.size.width, info.size.height) / 4096);
+    pixels = await source.createPixelMap({
+      desiredSize: { width: Math.max(1, Math.round(info.size.width / scale)),
+        height: Math.max(1, Math.round(info.size.height / scale)) },
+    });
+    packer = image.createImagePacker();
+    const out = await fileIo.open(path, fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+    try {
+      await packer.packToFile(pixels, out.fd, { format: 'image/jpeg', quality: 92 });
+    } finally {
+      await fileIo.close(out);
+    }
+    const size = (await fileIo.stat(path)).size;
+    if (!size || size > MAX_BYTES) {
+      throw new Error('图片转换大小无效。');
+    }
+    return {
+      localPath: path, mimeType: 'image/jpeg', name: file.name.slice(0, file.name.lastIndexOf('.')) + '.jpg',
+      temporary: true,
+    };
+  } catch {
+    await fileIo.unlink(path).catch(() => {});
+    return file;
+  } finally {
+    await pixels?.release().catch(() => {});
+    await source?.release().catch(() => {});
+    await packer?.release().catch(() => {});
+  }
+}
+
+export class NativeChatAttachments {
+  private readonly transfers: Map<string, AttachmentTransfer> = new Map<string, AttachmentTransfer>();
+  private readonly jobs: AttachmentJob[] = [];
+  private active = 0;
+
+  async pick(context: common.UIAbilityContext, existingCount: number): Promise<NativeAttachment[]> {
+    if (existingCount >= MAX_COUNT) {
+      throw new Error('一次最多添加 50 个附件。');
+    }
+    const options = new picker.DocumentSelectOptions();
+    options.maxSelectNumber = MAX_COUNT - existingCount;
+    const uris = await new picker.DocumentViewPicker(context).select(options);
+    if (uris.length + existingCount > MAX_COUNT) {
+      throw new Error('一次最多添加 50 个附件。');
+    }
+    if (uris.length === 0) {
+      return [];
+    }
+    await fileIo.mkdir(directory(context), true);
+    const attachments: NativeAttachment[] = [];
+    try {
+      for (const uri of uris) {
+        attachments.push(await this.saveSelected(context, uri));
+      }
+      return attachments;
+    } catch (error) {
+      await Promise.all(attachments.map((item: NativeAttachment): Promise<void> =>
+        this.remove(context, item).catch(() => {})));
+      throw error as Error;
+    }
+  }
+
+  private async saveSelected(context: common.UIAbilityContext, uri: string): Promise<NativeAttachment> {
+    const source = await fileIo.open(uri, fileIo.OpenMode.READ_ONLY);
+    try {
+      const name = source.name;
+      const ext = extension(name);
+      if (!FILE_TYPES.has(ext)) {
+        throw new Error('不支持此附件格式：' + name);
+      }
+      const stat = await fileIo.stat(source.fd);
+      if (!stat.isFile() || stat.size < 0 || stat.size > MAX_BYTES) {
+        throw new Error('附件大小不能超过 64 MB：' + name);
+      }
+      const header = new ArrayBuffer(Math.min(16, stat.size));
+      let length = 0;
+      if (header.byteLength > 0) {
+        length = await fileIo.read(source.fd, header);
+      }
+      const sniffed = sniffMime(new Uint8Array(header, 0, length));
+      const mimeType = sniffed || extensionMime(ext);
+      const isImage = mimeType.startsWith('image/');
+      const purpose = attachmentPurpose(name, isImage);
+      if (purpose === 'user_data' && stat.size > MAX_BYTES / 2) {
+        throw new Error('普通文档不能超过 32 MB：' + name);
+      }
+      const attachment: NativeAttachment = {
+        id: util.generateRandomUUID(true), name: name, size: stat.size, isImage: isImage, mimeType: mimeType,
+        purpose: purpose, createdAt: Date.now(), serverId: null, local: true,
+      };
+      const path = attachmentPath(context, attachment);
+      try {
+        await copyOriginal(source, path, stat.size, header.slice(0, length));
+      } catch (error) {
+        await fileIo.unlink(path).catch(() => {});
+        throw error as Error;
+      }
+      return attachment;
+    } finally {
+      await fileIo.close(source);
+    }
+  }
+
+  previewUri(context: common.UIAbilityContext, item: NativeAttachment): string {
+    return item.local ? fileUri.getUriFromPath(attachmentPath(context, item)) : '';
+  }
+
+  async storeOriginal(context: common.UIAbilityContext, item: NativeAttachment, data: Uint8Array,
+    mimeType: string): Promise<NativeAttachment> {
+    if (!data.length || data.length > MAX_BYTES) {
+      throw new Error('本地附件大小无效。');
+    }
+    const stored: NativeAttachment = {
+      id: util.generateRandomUUID(true),
+      archiveId: item.archiveId ?? item.id,
+      name: item.name,
+      size: data.length,
+      isImage: item.isImage,
+      mimeType: mimeType,
+      purpose: item.purpose,
+      createdAt: item.createdAt,
+      serverId: null,
+      local: true,
+    };
+    await fileIo.mkdir(directory(context), true);
+    const path = attachmentPath(context, stored);
+    const target = await fileIo.open(path, fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+    try {
+      try {
+        await writeChunk(target.fd, data.slice().buffer as ArrayBuffer);
+        await fileIo.fsync(target.fd);
+      } finally {
+        await fileIo.close(target);
+      }
+    } catch (error) {
+      await fileIo.unlink(path).catch(() => {});
+      throw error as Error;
+    }
+    return stored;
+  }
+
+  async readOriginal(context: common.UIAbilityContext, item: NativeAttachment): Promise<Uint8Array | null> {
+    if (!item.local) {
+      return null;
+    }
+    const file = await fileIo.open(attachmentPath(context, item), fileIo.OpenMode.READ_ONLY);
+    try {
+      if (item.size > MAX_BYTES || (await fileIo.stat(file.fd)).size !== item.size) {
+        throw new Error('本地附件大小无效。');
+      }
+      const result = new Uint8Array(item.size);
+      let offset = 0;
+      while (offset < result.length) {
+        const chunk = new ArrayBuffer(Math.min(IO_CHUNK, result.length - offset));
+        const read = await fileIo.read(file.fd, chunk);
+        if (read <= 0) {
+          throw new Error('本地附件读取未完成。');
+        }
+        result.set(new Uint8Array(chunk, 0, read), offset);
+        offset += read;
+      }
+      return result;
+    } finally {
+      await fileIo.close(file);
+    }
+  }
+
+  async remove(context: common.UIAbilityContext, item: NativeAttachment): Promise<void> {
+    this.cancelUpload(item.id);
+    if (item.local) {
+      await fileIo.unlink(attachmentPath(context, item));
+    }
+  }
+
+  upload(context: common.UIAbilityContext, config: NativeChatConfig, item: NativeAttachment): Promise<string> {
+    if (!item.local) {
+      return Promise.reject(new Error('找不到附件原件。'));
+    }
+    const previous = this.transfers.get(item.id);
+    if (previous?.result && !previous.canceled && sameDestination(previous.config, config)) {
+      return previous.result;
+    }
+    this.cancelUpload(item.id);
+    const transfer: AttachmentTransfer = { config: config, canceled: false };
+    this.transfers.set(item.id, transfer);
+    const result = new Promise<string>((resolve, reject) => {
+      this.jobs.push({
+        run: async (): Promise<string> => {
+          try {
+            return await this.uploadSelected(context, config, item, transfer);
+          } finally {
+            if (this.transfers.get(item.id) === transfer) {
+              this.transfers.delete(item.id);
+            }
+          }
+        },
+        resolve: resolve,
+        reject: reject,
+      });
+      this.runUploads();
+    });
+    transfer.result = result;
+    return result;
+  }
+
+  cancelUpload(id: string): void {
+    const transfer = this.transfers.get(id);
+    if (transfer) {
+      transfer.canceled = true;
+      transfer.request?.destroy();
+      transfer.request = undefined;
+    }
+  }
+
+  private runUploads(): void {
+    while (this.active < MAX_ACTIVE_UPLOADS && this.jobs.length > 0) {
+      const job = this.jobs.shift();
+      if (!job) {
+        return;
+      }
+      this.active++;
+      void job.run().then(job.resolve, job.reject).finally(() => {
+        this.active--;
+        this.runUploads();
+      });
+    }
+  }
+
+  private async uploadSelected(context: common.UIAbilityContext, config: NativeChatConfig, item: NativeAttachment,
+    transfer: AttachmentTransfer): Promise<string> {
+    rejectCanceled(transfer);
+    const account = config.accountToken?.trim() ?? '';
+    const apiKey = config.apiKey.trim();
+    if (!account && (!apiKey || config.protocol !== 'anthropic')) {
+      throw new Error('请登录 DeepSeek 账号或配置支持 Anthropic 文件接口的服务。');
+    }
+    if (/[\r\n]/.test(account || apiKey)) {
+      throw new Error('凭据不能包含换行。');
+    }
+    const endpoint = filesEndpoint(config);
+    let file: UploadFile = {
+      localPath: attachmentPath(context, item),
+      mimeType: item.mimeType || BINARY_MIME,
+      name: item.name.replace(/[\u0000-\u001f\u007f\\/"]/g, '_'),
+      temporary: false,
+    };
+    if (item.isImage && !['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(file.mimeType)) {
+      file = await convertImage(file);
+    }
+    try {
+      rejectCanceled(transfer);
+      const fields: http.MultiFormData[] = [];
+      if (item.purpose) {
+        fields.push({ name: 'purpose', contentType: 'text/plain', data: item.purpose });
+      }
+      fields.push({ name: 'file', contentType: file.mimeType, remoteFileName: file.name, filePath: file.localPath });
+      const header: Record<string, string> = {
+        'content-type': 'multipart/form-data', 'anthropic-beta': 'files-api-2025-04-14', 'accept': 'application/json',
+      };
+      if (account) {
+        header['x-dsh-auth-token'] = account;
+      } else {
+        header['x-api-key'] = apiKey;
+      }
+      const request = http.createHttp();
+      transfer.request = request;
+      const response = await request.request(endpoint, {
+        method: http.RequestMethod.POST, header: header, multiFormDataList: fields,
+        expectDataType: http.HttpDataType.STRING, usingCache: false, maxRedirects: 0,
+        connectTimeout: 15000, readTimeout: 300000,
+      });
+      rejectCanceled(transfer);
+      if (response.responseCode < 200 || response.responseCode >= 300 || typeof response.result !== 'string') {
+        throw new Error('附件上传失败（HTTP ' + response.responseCode.toString() + '）。');
+      }
+      let payload: UploadData;
+      try {
+        payload = JSON.parse(response.result) as UploadData;
+      } catch {
+        throw new Error('附件服务返回的响应格式无效。');
+      }
+      if (typeof payload?.id !== 'string' || !payload.id) {
+        throw new Error('附件服务未返回文件 ID。');
+      }
+      return payload.id;
+    } catch (error) {
+      rejectCanceled(transfer);
+      throw error as Error;
+    } finally {
+      transfer.request?.destroy();
+      transfer.request = undefined;
+      if (file.temporary) {
+        await fileIo.unlink(file.localPath).catch(() => {});
+      }
+    }
+  }
+}

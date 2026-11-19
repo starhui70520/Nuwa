@@ -2,6 +2,7 @@ import { common } from '@kit.AbilityKit';
 import { util } from '@kit.ArkTS';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { fileIo } from '@kit.CoreFileKit';
+import { NativeAttachment } from './NativeChatAttachments';
 import {
   NativeConversation,
   NativeConversationMessage,
@@ -38,6 +39,17 @@ function isTimestamp(value: number): boolean {
   return Number.isFinite(value) && value >= 0 && value <= 8_640_000_000_000_000;
 }
 
+function validAttachment(item: NativeAttachment): boolean {
+  return !!item && typeof item.id === 'string' && !!item.id && typeof item.name === 'string' &&
+    Number.isSafeInteger(item.size) && item.size >= 0 && typeof item.isImage === 'boolean' &&
+    typeof item.mimeType === 'string' && (item.purpose === null || item.purpose === 'rich_layout_recognition' ||
+    item.purpose === 'user_data') && isTimestamp(item.createdAt) &&
+    (item.serverId === null || typeof item.serverId === 'string') && typeof item.local === 'boolean' &&
+    (item.serverBinding === undefined || typeof item.serverBinding === 'string') &&
+    (item.archiveId === undefined || (typeof item.archiveId === 'string' && !!item.archiveId)) &&
+    (!item.local || /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(item.id));
+}
+
 function validateConversation(session: NativeConversation): boolean {
   if (!session || typeof session.id !== 'string' || !session.id || typeof session.title !== 'string' ||
     !isTimestamp(session.createdAt) || !isTimestamp(session.updatedAt) ||
@@ -50,7 +62,8 @@ function validateConversation(session: NativeConversation): boolean {
     if (!isStoredMessage(message) || typeof message.id !== 'string' || !message.id || byId.has(message.id) ||
       !isTimestamp(message.createdAt) || (message.parentId !== null && !byId.has(message.parentId)) ||
       (message.status !== undefined && typeof message.status !== 'string') ||
-      (message.model !== undefined && typeof message.model !== 'string')) {
+      (message.model !== undefined && typeof message.model !== 'string') ||
+      (message.files !== undefined && (!Array.isArray(message.files) || !message.files.every(validAttachment)))) {
       return false;
     }
     byId.set(message.id, message);

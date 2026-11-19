@@ -1,15 +1,16 @@
 import { common, ConfigurationConstant } from '@kit.AbilityKit';
-import { KeyboardAvoidMode } from '@kit.ArkUI';
+import { KeyboardAvoidMode, LengthMetrics } from '@kit.ArkUI';
 import { url, util } from '@kit.ArkTS';
 import { webview } from '@kit.ArkWeb';
 import { pasteboard } from '@kit.BasicServicesKit';
-import { NativeChatClient, NativeChatConfig, NativeChatMessage } from '../native/NativeChatClient';
+import { NativeChatClient, NativeChatConfig, NativeChatFileRef, NativeChatMessage } from '../native/NativeChatClient';
 import { loadNativeAccount, saveNativeAccount } from '../native/NativeAccountStore';
 import { NativeApiCredential, verifyNativeApiCredential } from '../native/NativeApiCredential';
 import { NativeDataSettings } from '../native/NativeDataSettings';
 import { NativeDeepSeekAccount, NativeDeepSeekAccountController, NativeDeepSeekBalance } from '../native/NativeDeepSeekAccount';
 import { NativeOnboarding, NativeOnboardingView } from '../native/NativeOnboarding';
-import { NativeChatBackup, mergeChatBackup } from '../native/NativeChatBackup';
+import { NativeAttachment, NativeChatAttachments } from '../native/NativeChatAttachments';
+import { hydrateImportedAttachment, importedAttachmentPreview, NativeChatBackup, mergeChatBackup } from '../native/NativeChatBackup';
 import { NativeChatStorage } from '../native/NativeChatStorage';
 import {
   appendBranch, createConversation, createConversationMessage, deleteConversations, groupConversations,
@@ -28,6 +29,19 @@ interface NativeReply {
   message: NativeConversationMessage;
   client: NativeChatClient;
   stopped: boolean;
+  uploadingIds: string[];
+  attachmentBinding: string;
+}
+
+interface NativeDraftAttachment {
+  item: NativeAttachment;
+  state: 'uploading' | 'ready' | 'failed';
+  error: string;
+}
+
+interface NativeDraft {
+  text: string;
+  files: NativeDraftAttachment[];
 }
 
 @Entry
@@ -36,9 +50,12 @@ struct NativeChat {
   @State private history: NativeConversationState = { sessions: [], activeId: null };
   @State private settings: NativeSettings = {
     baseUrl: 'https://api.deepseek.com', model: 'deepseek-chat', apiKey: '', protocol: 'openai', authMode: 'api-key',
-    theme: 'system', chatFontSize: 16, thinking: false, search: false, ttsMuted: true,
+    theme: 'system', chatFontSize: 16, attachmentBinding: '', thinking: false, search: false, ttsMuted: true,
   };
   @State private draft: string = '';
+  @State private draftFiles: NativeDraftAttachment[] = [];
+  @State private pickingFiles: boolean = false;
+  @State private imagePreview: string = '';
   @State private loaded: boolean = false;
   @State private status: string = '';
   @State private drawerOpen: boolean = false;
@@ -62,6 +79,7 @@ struct NativeChat {
   @State private settingsVerifying: boolean = false;
   @State private settingsError: string = '';
   @State private backupBusy: boolean = false;
+  private deletingSessions: boolean = false;
   @State private renamingId: string = '';
   @State private editId: string = '';
   @State private renameText: string = '';
@@ -75,13 +93,14 @@ struct NativeChat {
 
   private readonly storage = new NativeChatStorage();
   private readonly settingsStore = new NativeSettingsController();
+  private readonly attachments = new NativeChatAttachments();
   private readonly backup = new NativeChatBackup();
   private readonly accountController = new NativeDeepSeekAccountController();
   private readonly authBrowser = new webview.WebviewController();
   private authAttempt: number = 0;
   private migrationInProgress: boolean = false;
   private readonly scroller = new Scroller();
-  private readonly drafts: Map<string, string> = new Map();
+  private readonly drafts: Map<string, NativeDraft> = new Map();
   private visible: boolean = false;
   private scrollTimer: number = -1;
   private lastStreamSave: number = 0;
@@ -125,7 +144,7 @@ struct NativeChat {
   }
 
   onPageHide(): void {
-    if (this.replies.length) {
+    if (this.replies.length && !this.deletingSessions) {
       void this.save();
     }
     this.visible = false;
@@ -137,14 +156,16 @@ struct NativeChat {
 
   aboutToDisappear(): void {
     this.onPageHide();
-    this.replies.forEach((reply: NativeReply) => { reply.stopped = true; reply.client.cancel(); });
+    this.replies.forEach((reply: NativeReply) => { this.cancelReply(reply.sessionId); });
     this.stopVoice();
     this.speaker.destroy();
     this.accountController.cancel();
   }
 
   onBackPress(): boolean {
-    if (this.authorizing) {
+    if (this.imagePreview) {
+      this.imagePreview = '';
+    } else if (this.authorizing) {
       this.cancelAuthorization();
     } else if (this.settingsVisible) {
       if (this.settingsSection === 'root') {
@@ -213,6 +234,7 @@ struct NativeChat {
       protocol: this.settings.protocol, thinking: this.settings.thinking, search: this.settings.search,
       ttsMuted: this.settings.ttsMuted, authMode: this.settings.authMode,
       theme: this.settings.theme, chatFontSize: this.settings.chatFontSize,
+      attachmentBinding: this.settings.attachmentBinding,
     };
   }
 
@@ -262,6 +284,7 @@ struct NativeChat {
     settings.model = credential.model;
     settings.protocol = credential.protocol;
     settings.authMode = 'api-key';
+    settings.attachmentBinding = util.generateRandomUUID(true);
     await this.settingsStore.save(this.host(), settings);
     this.settings = settings;
     this.onboardingView = 'home';
@@ -360,6 +383,7 @@ struct NativeChat {
       }
       const settings = this.settingsSnapshot();
       settings.authMode = 'deepseek-account';
+      settings.attachmentBinding = util.generateRandomUUID(true);
       this.account = account;
       this.settings = settings;
       this.onboardingView = 'home';
@@ -380,6 +404,7 @@ struct NativeChat {
     }
     const settings = this.settingsSnapshot();
     settings.authMode = 'deepseek-account';
+    settings.attachmentBinding = util.generateRandomUUID(true);
     try {
       await this.settingsStore.save(this.host(), settings);
       this.settings = settings;
@@ -396,6 +421,7 @@ struct NativeChat {
       this.account = null;
       this.balance = null;
       this.settings.authMode = 'api-key';
+      this.settings.attachmentBinding = util.generateRandomUUID(true);
       await this.saveSettings();
       if (!this.authenticated()) {
         this.settingsVisible = false;
@@ -439,11 +465,14 @@ struct NativeChat {
   }
 
   private activate(id: string | null): void {
+    if (this.backupBusy) {
+      return;
+    }
     if (this.history.activeId !== id) {
-      this.drafts.set(this.history.activeId ?? '', this.draft);
+      this.drafts.set(this.history.activeId ?? '', { text: this.draft, files: this.draftFiles });
       this.stopVoice();
       this.history = selectConversation(this.history, id);
-      this.draft = this.drafts.get(id ?? '') ?? '';
+      this.restoreDraft(id ?? '');
       this.editId = '';
       this.titleTap = 0;
       this.status = '';
@@ -483,29 +512,81 @@ struct NativeChat {
         message.content.toLowerCase().includes(query) || message.reasoning.toLowerCase().includes(query))) : this.history.sessions);
   }
 
-  private async deleteSessions(ids: string[]): Promise<void> {
+  private async deleteSessions(ids: string[], deleteAll: boolean = false): Promise<void> {
     if (!ids.length || this.backupBusy) {
       return;
     }
     try {
       const result = await this.getUIContext().getPromptAction().showDialog({
-        title: ids.length === 1 ? '删除对话' : `删除 ${ids.length} 个对话`, message: '删除后将无法恢复。',
+        title: deleteAll ? '删除所有对话' : ids.length === 1 ? '删除对话' : `删除 ${ids.length} 个对话`,
+        message: deleteAll ? '本地保存的附件及未发送的草稿也将被删除。' : '删除后将无法恢复。',
         buttons: [{ text: '取消', color: '#61666B' }, { text: '删除', color: '#EC1313' }],
       });
-      if (result.index !== 1) {
-        return;
+      if (result.index === 1 && !this.backupBusy) {
+        await this.removeConversations(ids, deleteAll);
       }
-      ids.forEach((id: string) => { this.cancelReply(id); this.drafts.delete(id); });
-      const active = this.history.activeId;
-      this.history = deleteConversations(this.history, ids);
-      if (active !== this.history.activeId) {
-        this.stopVoice();
-        this.draft = this.drafts.get(this.history.activeId ?? '') ?? '';
-      }
-      this.resetSelection();
-      await this.save();
     } catch {
       this.toast('删除对话失败，请重试');
+    }
+  }
+
+  private async removeConversations(ids: string[], deleteAll: boolean): Promise<void> {
+    this.backupBusy = true;
+    this.deletingSessions = true;
+    try {
+      const context = this.host();
+      const previous = this.history;
+      const active = previous.activeId;
+      const deleted = new Set<string>(ids);
+      const candidates = new Map<string, NativeAttachment>();
+      const retained = new Set<string>();
+      for (const session of previous.sessions) {
+        for (const message of session.messages) {
+          for (const file of message.files ?? []) {
+            if (deleted.has(session.id)) {
+              candidates.set(file.id, file);
+            } else {
+              retained.add(file.id);
+            }
+          }
+        }
+      }
+      const draftIds = new Set<string>(Array.from(this.drafts.keys()));
+      draftIds.add(active ?? '');
+      for (const id of draftIds) {
+        for (const file of this.draftItems(id)) {
+          if (deleteAll || deleted.has(id)) {
+            candidates.set(file.item.id, file.item);
+          } else {
+            retained.add(file.item.id);
+          }
+        }
+      }
+      for (const id of ids) {
+        this.cancelReply(id);
+      }
+      const next = deleteConversations(this.historyWithPartialReplies(), ids);
+      await this.storage.saveConversations(context, next);
+      this.history = deleteConversations(this.history, ids);
+      await this.save(context);
+      for (const id of draftIds) {
+        if (deleteAll || deleted.has(id)) {
+          this.drafts.delete(id);
+        }
+      }
+      if (active !== next.activeId || deleteAll) {
+        this.stopVoice();
+        this.restoreDraft(next.activeId ?? '');
+      }
+      this.resetSelection();
+      for (const file of candidates.values()) {
+        if (file.local && !retained.has(file.id)) {
+          await this.attachments.remove(context, file).catch(() => {});
+        }
+      }
+    } finally {
+      this.backupBusy = false;
+      this.deletingSessions = false;
     }
   }
 
@@ -517,8 +598,142 @@ struct NativeChat {
     const reply = this.reply(id);
     if (reply) {
       reply.stopped = true;
+      reply.uploadingIds.forEach((fileId: string) => { this.attachments.cancelUpload(fileId); });
       reply.client.cancel();
     }
+  }
+
+  private restoreDraft(id: string): void {
+    const draft = this.drafts.get(id);
+    this.draft = draft?.text ?? '';
+    this.draftFiles = draft?.files ?? [];
+  }
+
+  private draftItems(id: string): NativeDraftAttachment[] {
+    return (this.history.activeId ?? '') === id ? this.draftFiles : this.drafts.get(id)?.files ?? [];
+  }
+
+  private updateDraftItems(id: string, items: NativeDraftAttachment[]): void {
+    if ((this.history.activeId ?? '') === id) {
+      this.draftFiles = items;
+    } else if (this.drafts.has(id) || id === '' || this.session(id)) {
+      this.drafts.set(id, { text: this.drafts.get(id)?.text ?? '', files: items });
+    }
+  }
+
+  private requestConfig(): NativeChatConfig {
+    return {
+      baseUrl: this.settings.baseUrl.trim(), model: this.settings.model.trim(), apiKey: this.settings.apiKey.trim(),
+      protocol: this.settings.protocol, thinking: this.settings.thinking, search: this.settings.search,
+      accountToken: this.accountToken(),
+    };
+  }
+
+  private async pickFiles(): Promise<void> {
+    if (this.pickingFiles || this.backupBusy) {
+      return;
+    }
+    const config = this.requestConfig();
+    if (!config.accountToken && config.protocol !== 'anthropic') {
+      this.toast('当前服务不支持附件，请配置 Anthropic 接口');
+      return;
+    }
+    const id = this.history.activeId ?? '';
+    const context = this.host();
+    this.pickingFiles = true;
+    try {
+      const items = await this.attachments.pick(context, this.draftItems(id).length);
+      if (!this.authenticated() || (id && !this.session(id))) {
+        items.forEach((file: NativeAttachment) => { void this.attachments.remove(context, file).catch(() => {}); });
+        return;
+      }
+      const drafts = items.map<NativeDraftAttachment>((item: NativeAttachment): NativeDraftAttachment => ({
+        item, state: 'uploading', error: '',
+      }));
+      this.updateDraftItems(id, [...this.draftItems(id), ...drafts]);
+      drafts.forEach((file: NativeDraftAttachment) => { void this.uploadDraftFile(id, file.item); });
+    } catch (error) {
+      this.toast((error as Error).message || '添加附件失败');
+    } finally {
+      this.pickingFiles = false;
+    }
+  }
+
+  private async uploadDraftFile(draftId: string, item: NativeAttachment): Promise<void> {
+    const config = this.requestConfig();
+    const binding = this.settings.attachmentBinding;
+    this.replaceDraftFile(draftId, item, 'uploading', '');
+    try {
+      item.serverId = await this.attachments.upload(this.host(), config, item);
+      item.serverBinding = binding;
+      this.replaceDraftFile(draftId, item, 'ready', '');
+    } catch (error) {
+      this.replaceDraftFile(draftId, item, 'failed', (error as Error).message || '上传失败');
+    }
+  }
+
+  private replaceDraftFile(draftId: string, item: NativeAttachment, state: 'uploading' | 'ready' | 'failed', error: string): void {
+    this.updateDraftItems(draftId, this.draftItems(draftId).map((existing: NativeDraftAttachment): NativeDraftAttachment =>
+      existing.item.id === item.id ? { item, state, error } : existing));
+  }
+
+  private removeDraftFile(item: NativeAttachment): void {
+    const id = this.history.activeId ?? '';
+    this.updateDraftItems(id, this.draftItems(id).filter((file: NativeDraftAttachment): boolean => file.item.id !== item.id));
+    void this.attachments.remove(this.host(), item).catch(() => { this.toast('删除本地附件失败'); });
+  }
+
+  private canSendDraft(): boolean {
+    return (!this.draftFiles.length || !!this.accountToken() || this.settings.protocol === 'anthropic') && !this.recognitionId && !this.backupBusy && (!!this.draft.trim() || this.draftFiles.length > 0) &&
+      this.draftFiles.every((file: NativeDraftAttachment): boolean => file.state === 'ready');
+  }
+
+  private async prepareMessages(context: common.UIAbilityContext, session: NativeConversation, config: NativeChatConfig,
+    reply: NativeReply): Promise<NativeChatMessage[]> {
+    const messages: NativeChatMessage[] = [];
+    for (const message of visibleMessages(session)) {
+      const files: NativeChatFileRef[] = [];
+      if (config.accountToken || config.protocol === 'anthropic') {
+        const attachments = message.files?.slice() ?? [];
+        for (let index = 0; index < attachments.length; index++) {
+          if (reply.stopped) {
+            return [];
+          }
+          let file = attachments[index];
+          if (!file.local) {
+            const hydrated = await hydrateImportedAttachment(context, session, file);
+            if (!hydrated) {
+              continue;
+            }
+            const current = this.session(session.id);
+            if (!current || reply.stopped) {
+              await this.attachments.remove(context, hydrated).catch(() => {});
+              return [];
+            }
+            file = hydrated;
+            attachments[index] = file;
+            message.files = attachments;
+            this.history = upsertConversation(this.history, updateConversationMessage(current, message));
+          }
+          if (file.serverBinding !== reply.attachmentBinding || !file.serverId) {
+            reply.uploadingIds.push(file.id);
+            try {
+              file.serverId = await this.attachments.upload(context, config, file);
+              file.serverBinding = reply.attachmentBinding;
+            } finally {
+              reply.uploadingIds = reply.uploadingIds.filter((id: string): boolean => id !== file.id);
+            }
+          }
+          if (file.serverId) {
+            files.push({ serverId: file.serverId, isImage: file.isImage });
+          }
+        }
+      }
+      if (message.content || files.length) {
+        messages.push({ role: message.role, content: message.content, files });
+      }
+    }
+    return messages;
   }
 
   private startReply(session: NativeConversation, parentId: string | null,
@@ -526,22 +741,23 @@ struct NativeChat {
     if (!this.loaded || this.backupBusy || this.reply(session.id)) {
       return;
     }
-    const config: NativeChatConfig = {
-      baseUrl: this.settings.baseUrl.trim(), model: this.settings.model.trim(), apiKey: this.settings.apiKey.trim(),
-      protocol: this.settings.protocol, thinking: this.settings.thinking, search: this.settings.search,
-      accountToken: this.accountToken(),
-    };
+    const config = this.requestConfig();
     if (!config.accountToken && (!config.baseUrl || !config.model || !config.apiKey)) {
       this.openSettings('account');
       return;
     }
     const message = createConversationMessage('assistant', '', '', Date.now(), 'pending', config.accountToken ? 'deepseek-flash' : config.model);
     const next = appendBranch(session, parentId, prompt ? [prompt, message] : [message]);
-    const reply: NativeReply = { sessionId: next.id, message, client: new NativeChatClient(), stopped: false };
+    const reply: NativeReply = {
+      sessionId: next.id, message, client: new NativeChatClient(), stopped: false, uploadingIds: [],
+      attachmentBinding: this.settings.attachmentBinding,
+    };
     this.replies = [...this.replies, reply];
     if (clearDraft) {
-      this.drafts.delete(this.history.activeId ?? '');
+      const draftId = this.history.activeId ?? '';
+      this.drafts.delete(draftId);
       this.draft = '';
+      this.draftFiles = [];
     }
     this.history = upsertConversation(this.history, next, true);
     this.lastStreamSave = Date.now();
@@ -576,8 +792,10 @@ struct NativeChat {
     void this.save(context);
     let error = false;
     try {
-      const messages = visibleMessages(session).filter((item: NativeConversationMessage): boolean => !!item.content)
-        .map<NativeChatMessage>((item: NativeConversationMessage): NativeChatMessage => ({ role: item.role, content: item.content }));
+      const messages = await this.prepareMessages(context, session, config, reply);
+      if (reply.stopped) {
+        return;
+      }
       await reply.client.send(config, messages, (content: string, reasoning: string) => {
         if (this.history.activeId === session.id && this.visible && this.scroller.isAtEnd()) {
           this.scrollToLatest();
@@ -585,14 +803,14 @@ struct NativeChat {
         reply.message.content += content;
         reply.message.reasoning += reasoning;
         this.replies = Array.from(this.replies);
-        if (Date.now() - this.lastStreamSave > 1500) {
+        if (!this.deletingSessions && Date.now() - this.lastStreamSave > 1500) {
           this.lastStreamSave = Date.now();
           void this.save(context);
         }
       });
     } catch (cause) {
-      error = true;
-      if (this.history.activeId === session.id) {
+      error = !reply.stopped;
+      if (error && this.history.activeId === session.id) {
         this.status = (cause as Error).message || '请求失败';
       }
     } finally {
@@ -600,7 +818,9 @@ struct NativeChat {
       if (current) {
         const message = this.streamMessage(reply, error ? 'error' : reply.stopped ? 'stopped' : 'done');
         this.history = upsertConversation(this.history, updateConversationMessage(current, message));
-        void this.save(context);
+        if (!this.deletingSessions) {
+          void this.save(context);
+        }
         if (!error && !reply.stopped && !this.settings.ttsMuted && this.history.activeId === current.id && message.content) {
           this.readMessage(message);
         }
@@ -614,12 +834,14 @@ struct NativeChat {
 
   private sendDraft(): void {
     const text = this.draft.trim();
-    if (text) {
-      const session = this.session() ?? createConversation();
-      const thread = visibleMessages(session);
-      this.startReply(session, thread.length ? thread[thread.length - 1].id : null,
-        createConversationMessage('user', text, ''), true);
+    if (!this.canSendDraft()) {
+      return;
     }
+    const session = this.session() ?? createConversation();
+    const thread = visibleMessages(session);
+    const message = createConversationMessage('user', text, '');
+    message.files = this.draftFiles.map<NativeAttachment>((file: NativeDraftAttachment): NativeAttachment => file.item);
+    this.startReply(session, thread.length ? thread[thread.length - 1].id : null, message, true);
   }
 
   private retry(message: NativeConversationMessage): void {
@@ -632,9 +854,11 @@ struct NativeChat {
   private edit(message: NativeConversationMessage): void {
     const session = this.session();
     const text = this.editText.trim();
-    if (session && text && !this.reply()) {
+    if (session && (text || message.files?.length) && !this.reply()) {
       this.editId = '';
-      this.startReply(session, message.parentId, createConversationMessage('user', text, ''));
+      const edited = createConversationMessage('user', text, '');
+      edited.files = message.files;
+      this.startReply(session, message.parentId, edited);
     }
   }
 
@@ -780,7 +1004,7 @@ struct NativeChat {
       Row({ space: 5 }) {
         Image(icon).width(14).height(14).fillColor(active ? $r('app.color.native_chat_blue_text') :
           $r('app.color.native_chat_primary')).draggable(false)
-        if (this.viewportWidth >= 374 || !this.draft.trim() && this.viewportWidth >= 330) {
+        if (this.viewportWidth >= 400 || (!this.draft.trim() && !this.draftFiles.length && this.viewportWidth >= 360)) {
           Text(label).fontSize(13).fontWeight(FontWeight.Medium).fontColor(active ?
             $r('app.color.native_chat_blue_text') : $r('app.color.native_chat_primary'))
         }
@@ -798,9 +1022,87 @@ struct NativeChat {
       this.recognitionId ? $r('app.color.native_chat_blue_text') : $r('app.color.native_chat_primary'))
   }
 
+  private attachmentPreview(item: NativeAttachment): string {
+    if (!item.isImage) {
+      return '';
+    }
+    if (!item.local) {
+      const session = this.session();
+      return session ? importedAttachmentPreview(session, item) : '';
+    }
+    try {
+      return this.attachments.previewUri(this.host(), item);
+    } catch {
+      return '';
+    }
+  }
+
+  @Builder
+  private addAttachmentButton() {
+    this.iconButton($r('app.media.native_add'), '上传附件', () => { void this.pickFiles(); },
+      34, 22, $r('app.color.native_chat_primary'), Color.Transparent, !this.pickingFiles && !this.backupBusy)
+  }
+
+  @Builder
+  private attachmentTile(item: NativeAttachment, size: number) {
+    if (this.attachmentPreview(item)) {
+      Image(this.attachmentPreview(item)).width(size).height(size).objectFit(ImageFit.Cover)
+        .borderRadius(12).draggable(false).accessibilityText(item.name)
+        .onClick(() => { this.imagePreview = this.attachmentPreview(item); })
+    } else {
+      Row({ space: 8 }) {
+        Image($r('app.media.native_file')).width(20).height(20).fillColor($r('app.color.native_chat_secondary'))
+        Text(item.name).maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis }).fontSize(12)
+          .fontColor($r('app.color.native_chat_primary')).layoutWeight(1)
+      }
+      .width(148).height(size).padding({ left: 10, right: 10 }).borderRadius(12)
+      .backgroundColor($r('app.color.native_chat_field')).accessibilityText(item.name)
+    }
+  }
+
+  @Builder
+  private draftAttachmentStrip() {
+    if (this.draftFiles.length) {
+      Scroll() {
+        Row({ space: 8 }) {
+          ForEach(this.draftFiles, (file: NativeDraftAttachment) => {
+            Stack({ alignContent: Alignment.TopEnd }) {
+              this.attachmentTile(file.item, 62)
+              if (file.state === 'uploading') {
+                Row() { LoadingProgress().width(20).height(20).color(Color.White) }
+                .width('100%').height('100%').justifyContent(FlexAlign.Center)
+                .backgroundColor('#55000000').borderRadius(12).accessibilityText('正在上传')
+              } else if (file.state === 'failed') {
+                Column({ space: 2 }) {
+                  this.iconButton($r('app.media.native_retry'), '重试上传', () => {
+                    void this.uploadDraftFile(this.history.activeId ?? '', file.item);
+                  }, 24, 16, Color.White)
+                  Text('上传失败').fontSize(10).fontColor(Color.White).maxLines(1)
+                }
+                .width('100%').height('100%').justifyContent(FlexAlign.Center)
+                .backgroundColor('#88000000').border({ width: 1, color: $r('app.color.native_chat_error') }).borderRadius(12)
+                .accessibilityDescription(file.error)
+              }
+              Row() {
+                this.iconButton($r('app.media.native_close'), '移除附件', () => { this.removeDraftFile(file.item); },
+                  18, 12, Color.White, '#990F1115')
+              }
+              .margin({ top: 3, right: 3 })
+            }
+            .width(this.attachmentPreview(file.item) ? 62 : 148).height(62)
+          }, (file: NativeDraftAttachment): string => `${file.item.id}:${file.state}`)
+        }
+        .padding({ left: 12, right: 12 })
+      }
+      .scrollable(ScrollDirection.Horizontal).width('100%').height(64).scrollBar(BarState.Off)
+      .margin({ top: 10 })
+    }
+  }
+
   @Builder
   private composer() {
     Column({ space: 2 }) {
+      this.draftAttachmentStrip()
       if (this.recognitionId) {
         Row({ space: 4 }) {
           ForEach([8, 13, 18, 13, 8], (bar: number) => {
@@ -828,15 +1130,20 @@ struct NativeChat {
           void this.saveSettings();
         })
         Blank().layoutWeight(1)
-        if (this.reply()) {
-          this.iconButton($r('app.media.native_stop'), '停止生成', () => { this.stopVoice(); this.cancelReply(); },
-            34, 16, Color.White, $r('app.color.native_chat_blue'))
-        } else if (this.draft.trim()) {
-          this.voiceButton()
-          this.iconButton($r('app.media.native_send'), '发送', () => { this.sendDraft(); },
-            34, 16, Color.White, $r('app.color.native_chat_blue'), this.loaded && !this.recognitionId)
-        } else {
-          this.voiceButton()
+        Row({ space: this.compact() ? 4 : 6 }) {
+          if (this.reply()) {
+            this.addAttachmentButton()
+            this.iconButton($r('app.media.native_stop'), '停止生成', () => { this.stopVoice(); this.cancelReply(); },
+              34, 16, Color.White, $r('app.color.native_chat_blue'))
+          } else if (this.draft.trim() || this.draftFiles.length) {
+            this.voiceButton()
+            this.addAttachmentButton()
+            this.iconButton($r('app.media.native_send'), '发送', () => { this.sendDraft(); },
+              34, 16, Color.White, $r('app.color.native_chat_blue'), this.loaded && this.canSendDraft())
+          } else {
+            this.addAttachmentButton()
+            this.voiceButton()
+          }
         }
       }
       .width('100%').padding({ left: 12, right: 12, top: 8, bottom: 12 })
@@ -872,16 +1179,25 @@ struct NativeChat {
             .onChange((value: string) => { this.editText = value; })
           Row({ space: 8 }) {
             Button('取消', { buttonStyle: ButtonStyleMode.TEXTUAL }).onClick(() => { this.editId = ''; })
-            Button('发送').enabled(!!this.editText.trim()).onClick(() => { this.edit(message); })
+            Button('发送').enabled(!!this.editText.trim() || !!message.files?.length).onClick(() => { this.edit(message); })
           }
           .width('100%').justifyContent(FlexAlign.End).padding(6)
         }
         .width('100%').borderRadius(22).border({ width: 1, color: $r('app.color.native_chat_blue') })
       } else {
-        Text(message.content).fontSize(this.settings.chatFontSize).lineHeight(this.settings.chatFontSize * 1.5).fontColor($r('app.color.native_chat_primary'))
+        if (message.files?.length) {
+          Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.End, space: { main: LengthMetrics.vp(8), cross: LengthMetrics.vp(8) } }) {
+            ForEach(message.files, (file: NativeAttachment) => { this.attachmentTile(file, 68) },
+              (file: NativeAttachment): string => file.id)
+          }
+          .width('100%')
+        }
+        if (message.content) {
+          Text(message.content).fontSize(this.settings.chatFontSize).lineHeight(this.settings.chatFontSize * 1.5).fontColor($r('app.color.native_chat_primary'))
           .constraintSize({ maxWidth: Math.max(140, Math.min(this.viewportWidth - 40, 752) - 68) })
           .padding({ left: 16, right: 16, top: 10, bottom: 10 }).borderRadius(22)
-          .backgroundColor($r('app.color.native_chat_bubble')).copyOption(CopyOptions.LocalDevice)
+            .backgroundColor($r('app.color.native_chat_bubble')).copyOption(CopyOptions.LocalDevice)
+        }
         Row({ space: 4 }) {
           this.branchControls(message)
           this.iconButton($r('app.media.native_copy'), '复制', () => { void this.copy(message.content); },
@@ -1199,7 +1515,7 @@ struct NativeChat {
               onImport: () => { void this.importChatHistory(); },
               onExport: () => { void this.exportChatHistory(); },
               onDeleteAll: () => { void this.deleteSessions(this.history.sessions.map<string>(
-                (session: NativeConversation): string => session.id)); },
+                (session: NativeConversation): string => session.id), true); },
             })
           } else {
             this.settingsRoot()
@@ -1464,6 +1780,18 @@ struct NativeChat {
       if (this.authorizing) {
         this.authorizationPage()
       }
+      if (this.imagePreview) {
+        Stack({ alignContent: Alignment.TopEnd }) {
+          Image(this.imagePreview).width('100%').height('100%').objectFit(ImageFit.Contain)
+            .backgroundColor(Color.Black).onClick(() => { this.imagePreview = ''; })
+          Row() {
+            this.iconButton($r('app.media.native_close'), '关闭图片', () => { this.imagePreview = ''; },
+              42, 22, Color.White, '#660F1115')
+          }
+          .padding(12)
+        }
+        .width('100%').height('100%')
+      }
       if (this.renamingId) {
         Stack({ alignContent: Alignment.Center }) {
           Column().width('100%').height('100%').backgroundColor('#66000000').onClick(() => { this.renamingId = ''; })
@@ -1481,7 +1809,7 @@ struct NativeChat {
       PanGesture({ direction: PanDirection.Horizontal, distance: 14 })
         .onActionStart((event: GestureEvent) => { this.touchStart = event.fingerList[0]?.globalX ?? this.viewportWidth; })
         .onActionUpdate((event: GestureEvent) => {
-          if (this.authenticated() && !this.settingsVisible && !this.renamingId && !this.authorizing &&
+          if (this.authenticated() && !this.settingsVisible && !this.renamingId && !this.authorizing && !this.imagePreview &&
             (this.drawerOpen || this.touchStart < 160)) {
             this.drawerDrag = event.offsetX;
           }

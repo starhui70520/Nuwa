@@ -1,4 +1,5 @@
 import { util } from '@kit.ArkTS';
+import { NativeAttachment } from './NativeChatAttachments';
 
 export interface NativeStoredMessage {
   role: string;
@@ -13,6 +14,7 @@ export interface NativeConversationMessage extends NativeStoredMessage {
   selectedChildId?: string;
   status?: string;
   model?: string;
+  files?: NativeAttachment[];
 }
 
 export interface NativeConversation {
@@ -91,6 +93,7 @@ function copyMessage(message: NativeConversationMessage): NativeConversationMess
     selectedChildId: message.selectedChildId,
     status: message.status,
     model: message.model,
+    files: message.files,
   };
 }
 
@@ -196,6 +199,7 @@ export function updateConversationMessage(session: NativeConversation, message: 
   updated.reasoning = message.reasoning;
   updated.status = message.status;
   updated.model = message.model;
+  updated.files = message.files ?? previous.files;
   const next = copyConversation(session);
   next.updatedAt = updatedAt;
   next.messages = session.messages.slice();
