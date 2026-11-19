@@ -1,5 +1,6 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb'
-import { toSessionSummary, type Session, type SessionSummary } from './types.js'
+import { createId } from '../../utils/id.js'
+import { toSessionSummary, type Message, type Session, type SessionSummary } from './types.js'
 
 /** IndexedDB 存储结构版本；新增或调整存储、索引时递增。 */
 const DB_VERSION = 11
@@ -244,9 +245,52 @@ export const commitStaging = async (): Promise<SessionSummary[]> => {
   return summaries
 }
 
+const messageSignature = (message: Message): string => {
+  if (message.role === 'user') {
+    const files = message.files.map((file) => `${file.name}:${file.size}`).join(',')
+    return `U:${message.content}|${files}`
+  }
+  const text = message.blocks
+    .filter((block) => block.type === 'text')
+    .map((block) => block.text)
+    .join('\n')
+  return `A:${text}`
+}
+
+/** 为会话消息树中的每个节点计算从根到该节点的路径签名集合，用于精准判定双方是否各自新增内容。 */
+const buildSessionPathSignatures = (session: Session): Set<string> => {
+  const byId = new Map(session.messages.map((message) => [message.id, message]))
+  const memo = new Map<string, string>()
+  const resolve = (message: Message, depth: number): string => {
+    const cached = memo.get(message.id)
+    if (cached !== undefined) {
+      return cached
+    }
+    const parent =
+      message.parentId && depth < session.messages.length ? byId.get(message.parentId) : undefined
+    const path = `${parent ? resolve(parent, depth + 1) : ''}>${messageSignature(message)}`
+    memo.set(message.id, path)
+    return path
+  }
+  const paths = new Set<string>()
+  for (const message of session.messages) {
+    paths.add(resolve(message, 0))
+  }
+  return paths
+}
+
+const withBranchPrefix = (title: string, prefix: 'N分支·' | 'D分支·'): string => {
+  const base = title.replace(/^[ND]分支·/, '')
+  return `${prefix}${base || '未命名对话'}`
+}
+
 /**
- * 增量合并导入：将暂存中的会话与附件按 ID 合并进正式存储，保留已有本地对话不清空。
- * 返回本次导入的会话数与合并后的全部会话摘要。
+ * 增量合并导入：按会话 ID 保护合并，保留已有本地对话不清空。
+ * 同会话 ID 下：
+ * 1. DeepSeek 记录落后于或等于本地（无新增内容）：跳过，不覆盖本地；
+ * 2. DeepSeek 记录多于本地且本地无新增：直接覆盖更新为 DeepSeek 记录；
+ * 3. 本地与 DeepSeek 各自均有新增（产生分叉）：保留本地并加「N分支·」前缀，DeepSeek 记录另存新 ID 并加「D分支·」前缀。
+ * 返回本次实际写入/更新/分叉的会话数与合并后的全部会话摘要。
  */
 export const mergeStaging = async (): Promise<{
   importedCount: number
@@ -257,27 +301,89 @@ export const mergeStaging = async (): Promise<{
     ['sessions', 'sessionSummaries', 'files', 'sessionsStaging', 'filesStaging'],
     'readwrite'
   )
-  const mergeStore = async (from: 'sessionsStaging' | 'filesStaging', to: 'sessions' | 'files') => {
+  const mergeSessions = async () => {
     try {
-      const target = tx.objectStore(to)
+      const target = tx.objectStore('sessions')
+      const summaryStore = tx.objectStore('sessionSummaries')
       for (
-        let cursor = await tx.objectStore(from).openCursor();
+        let cursor = await tx.objectStore('sessionsStaging').openCursor();
         cursor;
         cursor = await cursor.continue()
       ) {
-        await target.put(cursor.value)
-        if (to === 'sessions') {
+        const incoming = cursor.value
+        const existing = await target.get(incoming.id)
+        if (!existing) {
+          await target.put(incoming)
+          await summaryStore.put(storedSummary(incoming))
           importedCount += 1
-          await tx.objectStore('sessionSummaries').put(storedSummary(cursor.value as Session))
+          continue
         }
+        const localPaths = buildSessionPathSignatures(existing)
+        const incomingPaths = buildSessionPathSignatures(incoming)
+        let localHasExtra = false
+        for (const path of localPaths) {
+          if (!incomingPaths.has(path)) {
+            localHasExtra = true
+            break
+          }
+        }
+        let incomingHasExtra = false
+        for (const path of incomingPaths) {
+          if (!localPaths.has(path)) {
+            incomingHasExtra = true
+            break
+          }
+        }
+        if (!incomingHasExtra) {
+          // 规则 1：DeepSeek 记录落后或等于本地，跳过不覆盖
+          continue
+        }
+        if (!localHasExtra) {
+          // 规则 3：DeepSeek 记录多于本地且本地无新增，直接覆盖
+          await target.put(incoming)
+          await summaryStore.put(storedSummary(incoming))
+          importedCount += 1
+          continue
+        }
+        // 规则 2：两边均有各自新增，开分支保留两条独立会话
+        const localBranched: Session = {
+          ...existing,
+          title: withBranchPrefix(existing.title, 'N分支·'),
+        }
+        const incomingBranched: Session = {
+          ...incoming,
+          id: createId(),
+          title: withBranchPrefix(incoming.title, 'D分支·'),
+        }
+        await target.put(localBranched)
+        await summaryStore.put(storedSummary(localBranched))
+        await target.put(incomingBranched)
+        await summaryStore.put(storedSummary(incomingBranched))
+        importedCount += 1
       }
-      await tx.objectStore(from).clear()
+      await tx.objectStore('sessionsStaging').clear()
     } catch (error) {
       abortTransaction(tx)
       throw error
     }
   }
-  await Promise.all([mergeStore('sessionsStaging', 'sessions'), mergeStore('filesStaging', 'files')])
+  const mergeFiles = async () => {
+    try {
+      const target = tx.objectStore('files')
+      for (
+        let cursor = await tx.objectStore('filesStaging').openCursor();
+        cursor;
+        cursor = await cursor.continue()
+      ) {
+        await target.put(cursor.value)
+      }
+      await tx.objectStore('filesStaging').clear()
+    } catch (error) {
+      abortTransaction(tx)
+      throw error
+    }
+  }
+  await Promise.all([mergeSessions(), mergeFiles()])
   const stored = (await tx.objectStore('sessionSummaries').getAll()) as StoredSessionSummary[]
   await tx.done
   return { importedCount, summaries: stored.map(toSessionSummary) }
