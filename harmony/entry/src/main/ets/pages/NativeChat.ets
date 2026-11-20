@@ -123,6 +123,16 @@ const DEEPSEEK_DOCS_URL = 'https://api-docs.deepseek.com/zh-cn/';
 const DELETE_FILE_DOCS_URL = 'https://api-docs.deepseek.com/api/delete-file';
 const HISTORY_SAVE_RETRY_DELAYS = [1000, 2500];
 
+@Component
+struct NativeAssistantMessageRow {
+  @ObjectLink row: NativeMessageRow;
+  @BuilderParam content: (message: () => NativeConversationMessage, index: number) => void;
+
+  build() {
+    this.content(() => this.row.message, this.row.index)
+  }
+}
+
 @Entry
 @Component
 struct NativeChat {
@@ -1220,15 +1230,15 @@ struct NativeChat {
       this.closeSources();
     }
     this.visibleMessageCount = this.messagePath.length;
-    this.updateMessageWindow();
+    this.updateMessageWindow(!sessionChanged);
   }
 
-  private updateMessageWindow(): void {
+  private updateMessageWindow(keepFinishedReply: boolean = true): void {
     const range = nativeMessageRange(this.messagePath.length, this.messageLimit, this.rangeFromTop);
     this.messageRange = range;
     this.earlierCount = range.start;
     this.laterCount = this.messagePath.length - range.end;
-    this.messageList.update(this.messagePath, range);
+    this.messageList.update(this.messagePath, range, keepFinishedReply);
   }
 
   private nearListEnd(): boolean {
@@ -3549,67 +3559,82 @@ struct NativeChat {
     .width('100%')
   }
 
+  private activeReplyMessage(id: string): NativeConversationMessage | undefined {
+    const message = this.reply()?.message;
+    return message?.id === id ? message : undefined;
+  }
+
+  private replyContentReady(id: string): boolean {
+    const message = this.activeReplyMessage(id);
+    return !message || !!(message.content || message.reasoning || message.thinking || message.toolTimeline?.steps.length);
+  }
+
   @Builder
-  private assistantMessage(message: NativeConversationMessage, index: number) {
+  private assistantMessage(message: () => NativeConversationMessage, index: number) {
     Column({ space: 7 }) {
-      if (this.reply()?.message.id === message.id) {
-        if (this.reply()?.message.content || this.reply()?.message.reasoning || this.reply()?.message.thinking ||
-          this.reply()?.message.toolTimeline?.steps.length) {
-          this.replyContent(() => this.reply()?.message ?? message, () => !this.reply()?.message.content)
-        } else {
-          Row({ space: 6 }) {
-            ForEach([0.45, 0.7, 1], (opacity: number) => {
-              Circle().width(6).height(6).fill($r('app.color.native_chat_caption')).opacity(opacity)
-            }, (opacity: number): string => opacity.toString())
-          }
-          .height(34).accessibilityText(this.label('正在等待回复', "Waiting for reply"))
+      if (!this.replyContentReady(message().id)) {
+        Row({ space: 6 }) {
+          ForEach([0.45, 0.7, 1], (opacity: number) => {
+            Circle().width(6).height(6).fill($r('app.color.native_chat_caption')).opacity(opacity)
+          }, (opacity: number): string => opacity.toString())
         }
+        .height(34).accessibilityText(this.label('正在等待回复', "Waiting for reply"))
+      } else if (!this.activeReplyMessage(message().id) && message().stopReason === 'refusal') {
+        NativeMarkdown({ content: this.copyableReply(message()), fontScale: this.appFontScale(),
+          locale: this.settings.locale, theme: this.settings.theme })
       } else {
-        if (message.stopReason === 'refusal') {
-          NativeMarkdown({ content: this.copyableReply(message), fontScale: this.appFontScale(),
-            locale: this.settings.locale, theme: this.settings.theme })
-        } else {
-          this.replyContent(() => message, () => false)
-          if (message.status !== 'error' && this.archivedReplyTemplate(message)) {
-            NativeMarkdown({ content: this.archivedReplyTemplate(message), fontScale: this.appFontScale(),
-              locale: this.settings.locale, theme: this.settings.theme })
-          }
-          this.sourcesSummary(message.id + ':summary', nativeSearchResults(message.sources ?? []))
-        }
-        if (message.status === 'error' && message.stopReason !== 'refusal' && this.replyNotice(message).text) {
-          this.replyErrorNotice(message)
-        }
-        Row({ space: 10 }) {
-          this.branchControls(message)
-          Row({ space: 10 }) {
-            if (this.copyableReply(message)) {
-              NativeMessageCopyButton({ text: this.copyableReply(message), locale: this.settings.locale })
-            }
-            if (this.assistantResponseText(message)) {
-              this.iconButton($r('app.media.native_speaker'),
-                this.readingId === message.id ? this.label('停止朗读', 'Stop read-aloud') : this.label('朗读', 'Read aloud'),
-                () => { this.readMessage(message); }, 28, 16,
-                this.readingId === message.id ? $r('app.color.native_chat_blue_text') : $r('app.color.native_chat_action'))
-            }
-            this.iconButton($r('app.media.native_retry'), this.label('重新生成', 'Regenerate'), () => { this.retry(message); },
-              28, 16, $r('app.color.native_chat_action'), Color.Transparent,
-              () => this.canChangeVersion() && message.stopReason !== 'refusal')
-          }
-          .opacity(this.showMessageActions(message, index) ? 1 : 0)
-          .onFocus(() => { this.messageActionsId = message.id; })
-          if (this.canContinue(message)) {
-            Blank().layoutWeight(1)
-            Button(this.label('继续生成', 'Continue'), { type: ButtonType.Capsule, buttonStyle: ButtonStyleMode.TEXTUAL })
-              .height(28).fontSize(this.appFontSize(13)).border({ width: 1, color: $r('app.color.native_chat_stroke') })
-              .enabled(this.canChangeVersion()).onClick(() => { this.continueReply(message); })
-          }
-        }
-        .width('100%').offset({ x: -6 }).padding({ top: 12, bottom: 10 })
+        this.replyContent(() => this.activeReplyMessage(message().id) ?? message(), () => {
+          const active = this.activeReplyMessage(message().id);
+          return !!active && !active.content;
+        })
+      }
+      if (!this.activeReplyMessage(message().id)) {
+        this.settledReplyControls(message(), index)
       }
     }
     .width('100%').alignItems(HorizontalAlign.Start).padding({ bottom: 8 })
-    .onHover((hovered: boolean) => { this.hoverMessage(message.id, hovered); })
-    .parallelGesture(TapGesture().onAction(() => { this.messageActionsId = message.id; }))
+    .onHover((hovered: boolean) => { this.hoverMessage(message().id, hovered); })
+    .parallelGesture(TapGesture().onAction(() => { this.messageActionsId = message().id; }))
+  }
+
+  @Builder
+  private settledReplyControls(message: NativeConversationMessage, index: number) {
+    if (message.stopReason !== 'refusal') {
+      if (message.status !== 'error' && this.archivedReplyTemplate(message)) {
+        NativeMarkdown({ content: this.archivedReplyTemplate(message), fontScale: this.appFontScale(),
+          locale: this.settings.locale, theme: this.settings.theme })
+      }
+      this.sourcesSummary(message.id + ':summary', nativeSearchResults(message.sources ?? []))
+    }
+    if (message.status === 'error' && message.stopReason !== 'refusal' && this.replyNotice(message).text) {
+      this.replyErrorNotice(message)
+    }
+    Row({ space: 10 }) {
+      this.branchControls(message)
+      Row({ space: 10 }) {
+        if (this.copyableReply(message)) {
+          NativeMessageCopyButton({ text: this.copyableReply(message), locale: this.settings.locale })
+        }
+        if (this.assistantResponseText(message)) {
+          this.iconButton($r('app.media.native_speaker'),
+            this.readingId === message.id ? this.label('停止朗读', 'Stop read-aloud') : this.label('朗读', 'Read aloud'),
+            () => { this.readMessage(message); }, 28, 16,
+            this.readingId === message.id ? $r('app.color.native_chat_blue_text') : $r('app.color.native_chat_action'))
+        }
+        this.iconButton($r('app.media.native_retry'), this.label('重新生成', 'Regenerate'), () => { this.retry(message); },
+          28, 16, $r('app.color.native_chat_action'), Color.Transparent,
+          () => this.canChangeVersion() && message.stopReason !== 'refusal')
+      }
+      .opacity(this.showMessageActions(message, index) ? 1 : 0)
+      .onFocus(() => { this.messageActionsId = message.id; })
+      if (this.canContinue(message)) {
+        Blank().layoutWeight(1)
+        Button(this.label('继续生成', 'Continue'), { type: ButtonType.Capsule, buttonStyle: ButtonStyleMode.TEXTUAL })
+          .height(28).fontSize(this.appFontSize(13)).border({ width: 1, color: $r('app.color.native_chat_stroke') })
+          .enabled(this.canChangeVersion()).onClick(() => { this.continueReply(message); })
+      }
+    }
+    .width('100%').offset({ x: -6 }).padding({ top: 12, bottom: 10 })
   }
 
   private openSettings(section: string = 'root'): void {
@@ -4983,7 +5008,12 @@ struct NativeChat {
               if (row.message.role === 'user') {
                 this.userMessage(row.message, row.index)
               } else {
-                this.assistantMessage(row.message, row.index)
+                NativeAssistantMessageRow({
+                  row,
+                  content: (message: () => NativeConversationMessage, index: number): void => {
+                    this.assistantMessage(message, index)
+                  },
+                })
               }
             }
           }, (row: NativeMessageRow): string => row.key.toString())

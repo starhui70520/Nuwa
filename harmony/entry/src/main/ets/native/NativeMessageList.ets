@@ -2,10 +2,17 @@ import { NativeConversationMessage } from './NativeConversation';
 
 export const CHAT_PAGE_SIZE = 40;
 
-export interface NativeMessageRow {
-  key: number;
-  index: number;
+@Observed
+export class NativeMessageRow {
+  readonly key: number;
+  readonly index: number;
   message: NativeConversationMessage;
+
+  constructor(key: number, index: number, message: NativeConversationMessage) {
+    this.key = key;
+    this.index = index;
+    this.message = message;
+  }
 }
 
 export interface NativeMessageRange {
@@ -39,7 +46,7 @@ export class NativeMessageList implements IDataSource {
     this.listeners = this.listeners.filter((item: DataChangeListener): boolean => item !== listener);
   }
 
-  update(path: NativeConversationMessage[], range: NativeMessageRange): void {
+  update(path: NativeConversationMessage[], range: NativeMessageRange, keepFinishedReply: boolean = true): void {
     const byId = new Map<string, NativeMessageRow>();
     for (const row of this.rows) byId.set(row.message.id, row);
     const next: NativeMessageRow[] = [];
@@ -47,8 +54,16 @@ export class NativeMessageList implements IDataSource {
     for (let index = range.start; index < range.end; index++) {
       const message = path[index];
       const prior = byId.get(message.id);
-      const row: NativeMessageRow = prior && prior.message === message && prior.index === index ? prior :
-        { key: ++this.sequence, message, index };
+      const finishedReply = prior && keepFinishedReply && prior.message.role === 'assistant' &&
+        (prior.message.status === 'pending' || prior.message.status === 'streaming') && message.role === 'assistant' &&
+        (message.status === 'done' || message.status === 'error' || message.status === 'stopped');
+      let row: NativeMessageRow;
+      if (prior && prior.index === index && (prior.message === message || finishedReply)) {
+        row = prior;
+        if (finishedReply) row.message = message;
+      } else {
+        row = new NativeMessageRow(++this.sequence, index, message);
+      }
       if (next.length === unchangedPrefix && row === this.rows[next.length]) unchangedPrefix++;
       next.push(row);
     }
