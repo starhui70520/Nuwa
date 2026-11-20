@@ -243,23 +243,23 @@ final class PlatformAuthViewController: UIViewController, WKNavigationDelegate {
             throw NSError(domain: "PlatformAuth", code: -1, userInfo: [NSLocalizedDescriptionKey: "无效响应"])
         }
         if http.statusCode == 429 {
-            await AppLogStore.shared.record(.warn, source: "platformAuth.\(method)", message: "HTTP 429 rate limited")
+            AppLogStore.shared.record(.warn, source: "platformAuth.\(method)", message: "HTTP 429 rate limited")
             throw NSError(domain: "PlatformAuth", code: 429, userInfo: [NSLocalizedDescriptionKey: "请求过于频繁，请稍后再试（HTTP 429）"])
         }
         guard (200..<300).contains(http.statusCode) else {
-            await AppLogStore.shared.record(.error, source: "platformAuth.\(method)", message: "HTTP \(http.statusCode)")
+            AppLogStore.shared.record(.error, source: "platformAuth.\(method)", message: "HTTP \(http.statusCode)")
             throw NSError(domain: "PlatformAuth", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "开放平台授权失败（HTTP \(http.statusCode)）"])
         }
         guard let envelope = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               (envelope["code"] as? Int) == 0 else {
             let msg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["msg"] as? String
-            await AppLogStore.shared.record(.error, source: "platformAuth.\(method)", message: msg ?? "envelope error")
+            AppLogStore.shared.record(.error, source: "platformAuth.\(method)", message: msg ?? "envelope error")
             throw NSError(domain: "PlatformAuth", code: -2, userInfo: [NSLocalizedDescriptionKey: msg ?? "开放平台授权失败"])
         }
         guard let bizData = envelope["data"] as? [String: Any],
               (bizData["biz_code"] as? Int) == 0 else {
             let bizMsg = (envelope["data"] as? [String: Any])?["biz_msg"] as? String
-            await AppLogStore.shared.record(.error, source: "platformAuth.\(method)", message: bizMsg ?? "biz error")
+            AppLogStore.shared.record(.error, source: "platformAuth.\(method)", message: bizMsg ?? "biz error")
             throw NSError(domain: "PlatformAuth", code: -3, userInfo: [NSLocalizedDescriptionKey: bizMsg ?? "开放平台授权校验失败"])
         }
         return bizData["biz_data"] as? [String: Any] ?? [:]
