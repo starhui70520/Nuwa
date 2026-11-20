@@ -305,8 +305,18 @@ export class NativeChatSources {
   private readonly results = new Map<string, ToolResults>();
   private readonly texts: CitationText[] = [];
   private readonly openText = new Map<number, CitationText>();
+  private readonly previousSources: NativeChatSource[];
+  private readonly previousCitations: NativeChatCitation[];
+  private readonly previousTextLength: number;
   private lastCitedBlock: number = -1;
   private view: SourcesView = { sources: [], citations: [] };
+
+  constructor(previousSources: NativeChatSource[] = [], previousCitations: NativeChatCitation[] = [],
+    previousTextLength: number = 0) {
+    this.previousSources = previousSources;
+    this.previousCitations = previousCitations;
+    this.previousTextLength = previousTextLength;
+  }
 
   apply(rawSseData: string): boolean {
     if (!rawSseData || rawSseData.length > MAX_EVENT_LENGTH) {
@@ -439,7 +449,25 @@ export class NativeChatSources {
         }
       }
     });
-    let textOffset = 0;
+    // Tool sources can reorder the full reply's numbering, including the earlier citations.
+    const previousIndexes = new Map<number, number>();
+    for (const source of this.previousSources) {
+      const seed = sourceSeed(source.url, source.title, source.publishedAt, {
+        site_name: source.siteName, snippet: source.snippet, site_icon: source.siteIcon,
+      });
+      if (!seed) continue;
+      const index = register(sources, byUrl, seed, source.searchResult);
+      if (index > 0) previousIndexes.set(source.index, index);
+    }
+    for (const source of nativeSearchResults(this.previousSources)) {
+      const existing = byUrl.get(source.url);
+      if (existing && existing.searchOrder === undefined) existing.searchOrder = nextSearchOrder++;
+    }
+    for (const citation of this.previousCitations) {
+      const index = previousIndexes.get(citation.sourceIndex);
+      if (index !== undefined) citations.push({ offset: citation.offset, sourceIndex: index });
+    }
+    let textOffset = this.previousTextLength;
     for (const text of this.texts) {
       text.seeds.forEach((seed: SourceSeed): void => {
         const index = register(sources, byUrl, seed, false);

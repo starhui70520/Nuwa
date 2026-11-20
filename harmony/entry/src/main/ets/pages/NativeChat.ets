@@ -2218,6 +2218,9 @@ struct NativeChat {
     session: NativeConversation, reply: NativeReply): Promise<NativeReplyOutcome | undefined> {
     const rejectedImages = this.historyImageRejections(reply.attachmentBinding);
     const prefixBlocks = config.prefill?.blocks ?? [];
+    const previousSources = reply.message.sources ?? [];
+    const previousCitations = reply.message.citations ?? [];
+    const previousTextLength = reply.message.content.length;
     let skippedBadImages = 0;
     let fileRetries = 0;
     while (!reply.stopped) {
@@ -2233,14 +2236,13 @@ struct NativeChat {
       }
       if (reply.stopped) return undefined;
       config.requestTitle = config.requestTitle === true && !this.session(session.id)?.title;
-      const sources = new NativeChatSources();
+      const sources = new NativeChatSources(previousSources, previousCitations, previousTextLength);
       const timeline = new NativeToolTimeline();
       const readLinks = new NativeReadLinkCollector(isOfficialNativeReadLinkRoute(config.baseUrl, !!config.accountToken) ?
         undefined : reply.attachmentBinding);
       const prefix = reply.message.content;
       const prefixTimeline = reply.message.toolTimeline;
       let hasTimeline = false;
-      const sourceOffset = reply.message.content.length;
       try {
         const outcome = await reply.client.send(config, messages, (content: string, reasoning: string,
           outcome?: NativeReplyOutcome): void => {
@@ -2271,10 +2273,7 @@ struct NativeChat {
           }
           if (sources.apply(event)) {
             reply.message.sources = sources.snapshot();
-            reply.message.citations = sources.citationSnapshot().map<NativeChatCitation>(
-              (citation: NativeChatCitation): NativeChatCitation => ({
-                offset: citation.offset + sourceOffset, sourceIndex: citation.sourceIndex,
-              }));
+            reply.message.citations = sources.citationSnapshot();
             this.paintLiveReplies();
           } else if (changed) {
             this.paintLiveReplies();
@@ -3452,8 +3451,7 @@ struct NativeChat {
 
   private withCitationMarkers(text: string, citations: NativeChatCitation[], start: number = 0): string {
     const ordered = citations.filter((citation: NativeChatCitation): boolean => citation.offset >= start)
-      .sort((left: NativeChatCitation, right: NativeChatCitation): number =>
-      left.offset - right.offset || left.sourceIndex - right.sourceIndex);
+      .sort((left: NativeChatCitation, right: NativeChatCitation): number => left.offset - right.offset);
     let result = '';
     let cursor = start;
     for (const citation of ordered) {
