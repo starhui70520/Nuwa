@@ -186,21 +186,18 @@ function count(value: number): boolean {
   return Number.isSafeInteger(value) && value >= 0;
 }
 
-function timestamp(value: string): number {
-  if (typeof value !== 'string') {
-    return invalidArchive();
-  }
+function parseArchiveTime(value: string): number | undefined {
+  if (typeof value !== 'string') return undefined;
   const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$/.exec(value);
-  if (!match) {
-    return invalidArchive();
-  }
+  if (!match) return undefined;
   const normalized = match[1] + '.' + (match[2] ?? '').padEnd(3, '0').slice(0, 3) + 'Z';
   const date = new Date(normalized);
   const time = date.getTime();
-  if (!count(time) || date.toISOString() !== normalized) {
-    return invalidArchive();
-  }
-  return time;
+  return count(time) && date.toISOString() === normalized ? time : undefined;
+}
+
+function timestamp(value: string): number {
+  return parseArchiveTime(value) ?? invalidArchive();
 }
 
 function archiveDate(time: number, previous?: string): string {
@@ -250,34 +247,43 @@ function archiveStatus(status: string | undefined, stopReason?: string): string 
   }
 }
 
-function validateFragment(fragment: ArchiveFragment, sessionId: string, imagePaths: Map<string, string>): void {
-  if (!fragment || typeof fragment.type !== 'string') {
-    invalidArchive();
+function validArchiveFile(file: ArchiveFile): boolean {
+  return !!file && typeof file.id === 'string' && !!file.id && typeof file.file_name === 'string' &&
+    count(file.file_size) && typeof file.is_image === 'boolean' &&
+    (file.export_path === null || typeof file.export_path === 'string') &&
+    parseArchiveTime(file.inserted_at) !== undefined &&
+    (file.token_usage == null || count(file.token_usage)) &&
+    (file.width == null || count(file.width)) && (file.height == null || count(file.height));
+}
+
+function readableArchiveFragment(fragment: ArchiveFragment): boolean {
+  if (!fragment || typeof fragment.type !== 'string') return false;
+  switch (fragment.type) {
+    case 'REQUEST':
+    case 'RESPONSE':
+    case 'TEMPLATE_RESPONSE':
+      return typeof fragment.content === 'string';
+    case 'THINK':
+      return typeof fragment.content === 'string' &&
+        (fragment.elapsed_secs == null || Number.isFinite(fragment.elapsed_secs));
+    case 'FILE':
+      return Array.isArray(fragment.files) && fragment.files.every(validArchiveFile);
+    default:
+      return true;
   }
-  if (fragment.type === 'REQUEST' || fragment.type === 'RESPONSE' || fragment.type === 'THINK' ||
-    fragment.type === 'TEMPLATE_RESPONSE') {
-    if (typeof fragment.content !== 'string') {
-      invalidArchive();
-    }
-  } else if (fragment.type === 'FILE') {
-    if (!Array.isArray(fragment.files)) {
-      return invalidArchive();
-    }
-    for (const file of fragment.files) {
-      if (!file || typeof file.id !== 'string' || !file.id || typeof file.file_name !== 'string' ||
-        !count(file.file_size) || typeof file.is_image !== 'boolean' ||
-        (file.export_path !== null && typeof file.export_path !== 'string')) {
-        invalidArchive();
+}
+
+function registerArchiveImages(message: ArchiveMessage, sessionId: string, imagePaths: Map<string, string>): void {
+  for (const fragment of message.fragments) {
+    if (fragment.type !== 'FILE') continue;
+    for (const file of fragment.files ?? []) {
+      if (!file.is_image || file.export_path === null) continue;
+      const path = backupPath(file.export_path);
+      if (!path.startsWith(filesPrefix(sessionId)) || path.endsWith('/') ||
+        (imagePaths.has(path) && imagePaths.get(path) !== file.id)) {
+        invalidImages();
       }
-      timestamp(file.inserted_at);
-      if (file.is_image && file.export_path) {
-        const path = backupPath(file.export_path);
-        if (!path.startsWith(filesPrefix(sessionId)) || path.endsWith('/') ||
-          (imagePaths.has(path) && imagePaths.get(path) !== file.id)) {
-          invalidImages();
-        }
-        imagePaths.set(path, file.id);
-      }
+      imagePaths.set(path, file.id);
     }
   }
 }
@@ -800,7 +806,9 @@ function nativeSession(source: ArchiveSession, archiveSize: number): PreparedSes
     left.id - right.id);
   const messages: NativeConversationMessage[] = [];
   for (const raw of ordered) {
-    raw.fragments.forEach((fragment: ArchiveFragment): void => validateFragment(fragment, source.id, imagePaths));
+    // A malformed content fragment must not hide otherwise usable messages in this session.
+    raw.fragments = raw.fragments.filter(readableArchiveFragment);
+    registerArchiveImages(raw, source.id, imagePaths);
     const id = raw.id.toString();
     const parentId = raw.parent_id === null ? null : raw.parent_id.toString();
     const parent = parentId === null ? undefined : byId.get(parentId);
