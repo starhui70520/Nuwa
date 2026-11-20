@@ -48,6 +48,7 @@ pnpm build
 cp -R dist/. ../harmony/entry/src/main/resources/rawfile/web/
 node ../harmony/scripts/stage-mermaid.mjs
 node ../harmony/scripts/stage-katex.mjs
+node ../harmony/scripts/stage-prism.mjs
 cd ../harmony
 node scripts/prepare-offline-english.mjs
 ohpm install --all

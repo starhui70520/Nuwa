@@ -64,6 +64,7 @@ jobs:
           cp -R dist/* ../harmony/entry/src/main/resources/rawfile/web/
           node ../harmony/scripts/stage-mermaid.mjs
           node ../harmony/scripts/stage-katex.mjs
+          node ../harmony/scripts/stage-prism.mjs
 
       - name: Resolve app version
         id: version

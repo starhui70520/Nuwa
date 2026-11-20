@@ -4,6 +4,7 @@ import { deviceInfo, pasteboard } from '@kit.BasicServicesKit';
 import { text } from '@kit.ArkGraphics2D';
 import { url } from '@kit.ArkTS';
 import { NativeChatSource, safeNativeSourceUrl } from './NativeChatSources';
+import { NativeHighlightedCode } from './NativeHighlightedCode';
 import { NativeLocale } from './NativeLocation';
 import { NativeMathEquation } from './NativeMathEquation';
 import {
@@ -53,11 +54,6 @@ interface InlinePart {
   formula?: string;
 }
 
-interface CodePart {
-  text: string;
-  kind: string;
-}
-
 interface NativeRenderedFormula {
   key: string;
   picture: NativeMathPicture;
@@ -96,7 +92,6 @@ export struct NativeMarkdown {
   private cachedContent: string = '\u0000';
   private cachedBlocks: MarkdownBlock[] = [];
   private inlineCache: Map<string, InlinePart[]> = new Map<string, InlinePart[]>();
-  private codeCache: Map<string, CodePart[]> = new Map<string, CodePart[]>();
   private mathMounted: boolean = false;
   private mathTimer: number = -1;
   private mathGeneration: number = 0;
@@ -680,155 +675,6 @@ export struct NativeMarkdown {
     }
   }
 
-  private pushCodePart(parts: CodePart[], text: string, kind: string): void {
-    if (!text) {
-      return;
-    }
-    const previous = parts.length > 0 ? parts[parts.length - 1] : undefined;
-    if (previous && previous.kind === kind) {
-      previous.text += text;
-    } else {
-      parts.push({ text: text, kind: kind });
-    }
-  }
-
-  private codeParts(language: string, value: string): CodePart[] {
-    const cacheKey = `${language.toLowerCase()}\n${value}`;
-    const cached = this.codeCache.get(cacheKey);
-    if (cached) {
-      return cached;
-    }
-    const aliases: Map<string, string> = new Map<string, string>([
-      ['js', 'javascript'], ['ts', 'typescript'], ['tsx', 'typescript'], ['py', 'python'],
-      ['sh', 'bash'], ['shell', 'bash'], ['zsh', 'bash'], ['yml', 'yaml'], ['rs', 'rust'],
-      ['kt', 'kotlin'], ['golang', 'go'], ['c++', 'cpp'], ['c#', 'csharp'],
-    ]);
-    const rawLanguage = language.toLowerCase();
-    const normalized = aliases.get(rawLanguage) ?? rawLanguage;
-    const supported = ['javascript', 'typescript', 'jsx', 'python', 'bash', 'json', 'java', 'kotlin',
-      'c', 'cpp', 'csharp', 'go', 'rust', 'swift', 'sql', 'yaml', 'toml', 'ini', 'ruby', 'php',
-      'css', 'scss', 'html', 'xml', 'docker', 'dockerfile', 'powershell', 'diff', 'markdown'];
-    const parts: CodePart[] = [];
-    if (supported.indexOf(normalized) < 0) {
-      parts.push({ text: value, kind: 'plain' });
-      this.codeCache.set(cacheKey, parts);
-      return parts;
-    }
-    const keywords = normalized === 'python'
-      ? 'and as assert async await break class continue def del elif else except finally for from global if import in is lambda nonlocal not or pass raise return try while with yield'
-      : normalized === 'bash'
-        ? 'case do done elif else esac fi for function if in select then time until while coproc'
-        : normalized === 'json'
-          ? 'true false null'
-          : normalized === 'sql'
-            ? 'select from where insert into values update set delete create table alter drop join left right inner outer on as group by order limit offset null true false and or not count sum'
-            : 'abstract as async await break case catch class const continue default delete do else enum export extends false finally for from function if implements import in instanceof interface let new null of package private protected public return static super switch this throw true try typeof undefined var void while with yield';
-    const keywordSet: Set<string> = new Set<string>(keywords.split(' '));
-    const constants: Set<string> = new Set<string>(['true', 'false', 'null', 'undefined', 'True', 'False', 'None', 'NaN', 'Infinity']);
-    const hashCommentLanguages = ['python', 'bash', 'yaml', 'toml', 'ini', 'ruby', 'powershell', 'docker', 'dockerfile', 'makefile'];
-    let index = 0;
-    let inBlockComment = false;
-    while (index < value.length) {
-      if (inBlockComment) {
-        const close = value.indexOf('*/', index);
-        if (close < 0) {
-          this.pushCodePart(parts, value.substring(index), 'comment');
-          index = value.length;
-        } else {
-          this.pushCodePart(parts, value.substring(index, close + 2), 'comment');
-          index = close + 2;
-          inBlockComment = false;
-        }
-        continue;
-      }
-      if (value.substring(index, index + 2) === '/*') {
-        const close = value.indexOf('*/', index + 2);
-        if (close < 0) {
-          this.pushCodePart(parts, value.substring(index), 'comment');
-          index = value.length;
-        } else {
-          this.pushCodePart(parts, value.substring(index, close + 2), 'comment');
-          index = close + 2;
-        }
-        continue;
-      }
-      const char = value.charAt(index);
-      if (value.substring(index, index + 2) === '//') {
-        let end = value.indexOf('\n', index);
-        if (end < 0) { end = value.length; }
-        this.pushCodePart(parts, value.substring(index, end), 'comment');
-        index = end;
-        continue;
-      }
-      if (char === '#' && hashCommentLanguages.indexOf(normalized) >= 0) {
-        let end = value.indexOf('\n', index);
-        if (end < 0) { end = value.length; }
-        this.pushCodePart(parts, value.substring(index, end), 'comment');
-        index = end;
-        continue;
-      }
-      if ((char === '"' || char === '\'' || char === '`') && normalized !== 'markdown') {
-        const quote = char;
-        let end = index + 1;
-        while (end < value.length) {
-          if (value.charAt(end) === '\\') {
-            end += 2;
-            continue;
-          }
-          if (value.charAt(end) === quote) {
-            end++;
-            break;
-          }
-          end++;
-        }
-        this.pushCodePart(parts, value.substring(index, end), 'string');
-        index = end;
-        continue;
-      }
-      if (/[0-9]/.test(char)) {
-        let end = index + 1;
-        while (end < value.length && /[A-Za-z0-9_.]/.test(value.charAt(end))) { end++; }
-        this.pushCodePart(parts, value.substring(index, end), 'number');
-        index = end;
-        continue;
-      }
-      const identifier = value.substring(index).match(/^[A-Za-z_$][A-Za-z0-9_$]*/);
-      if (identifier) {
-        const word = identifier[0];
-        const end = index + word.length;
-        const nextChar = value.substring(end).match(/^\s*(.)/)?.[1] ?? '';
-        const kind = constants.has(word) ? 'constant' : (keywordSet.has(word) ? 'keyword' :
-          (nextChar === '(' ? 'function' : 'plain'));
-        this.pushCodePart(parts, word, kind);
-        index = end;
-        continue;
-      }
-      this.pushCodePart(parts, char, 'plain');
-      index++;
-    }
-    if (this.codeCache.size > 64) {
-      this.codeCache.clear();
-    }
-    this.codeCache.set(cacheKey, parts);
-    return parts;
-  }
-
-  private codeColor(kind: string) {
-    if (kind === 'comment') {
-      return $r('app.color.native_chat_secondary');
-    }
-    if (kind === 'keyword' || kind === 'function') {
-      return $r('app.color.native_chat_blue_text');
-    }
-    if (kind === 'string') {
-      return '#32824A';
-    }
-    if (kind === 'number' || kind === 'constant') {
-      return '#A56700';
-    }
-    return $r('app.color.native_chat_primary');
-  }
-
   @Builder
   private displayedFormula(picture: NativeMathPicture, source: string) {
     Scroll() {
@@ -1118,18 +964,8 @@ export struct NativeMarkdown {
           NativeMermaidPreview({ source: block.text, locale: this.locale, theme: this.theme })
         }
       } else {
-        Text() {
-          ForEach(this.codeParts(block.lang || 'text', block.text), (part: CodePart) => {
-            Span(part.text).fontColor(this.codeColor(part.kind))
-          }, (part: CodePart, partIndex: number): string => partIndex + ':' + part.kind + ':' + part.text.length)
-        }
-        .fontFamily('monospace')
-        .fontSize(13 * this.fontScale)
-        .fontColor($r('app.color.native_chat_primary'))
-        .lineHeight(22 * this.fontScale)
-        .width('100%')
-        .padding(16)
-        .copyOption(CopyOptions.LocalDevice)
+        NativeHighlightedCode({ language: block.lang || 'text', source: block.text, loading: this.loading,
+          theme: this.theme, fontScale: this.fontScale })
       }
     }
     .width('100%')
