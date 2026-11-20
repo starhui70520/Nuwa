@@ -174,6 +174,80 @@ function normalizeHar(gzip) {
   return normalized
 }
 
+function verifyBridge(elf, { abi, machine, libs }) {
+  const invalid = (reason) => new Error('Invalid native bridge for ' + abi + ': ' + reason)
+  if (elf.length < 64 || !elf.subarray(0, 7).equals(Buffer.from([127, 69, 76, 70, 2, 1, 1])) ||
+      elf.readUInt16LE(18) !== machine) {
+    throw invalid('wrong ELF architecture')
+  }
+  const word = (offset) => {
+    const value = Number(elf.readBigUInt64LE(offset))
+    if (!Number.isSafeInteger(value)) throw invalid('ELF offset exceeds the safe integer range')
+    return value
+  }
+  const programOffset = word(32)
+  const programEntrySize = elf.readUInt16LE(54)
+  const programCount = elf.readUInt16LE(56)
+  if (programEntrySize < 56 || programCount === 0 || programOffset > elf.length - programEntrySize * programCount) {
+    throw invalid('invalid ELF program header table')
+  }
+
+  // Locate PT_LOAD and PT_DYNAMIC even when the section headers have been stripped.
+  const segments = []
+  for (let index = 0; index < programCount; index++) {
+    const entry = programOffset + index * programEntrySize
+    const type = elf.readUInt32LE(entry)
+    if (type !== 1 && type !== 2) continue
+    const offset = word(entry + 8)
+    const address = word(entry + 16)
+    const size = word(entry + 32)
+    if (offset > elf.length - size) throw invalid('ELF segment is outside the file')
+    segments.push({ type, offset, address, size })
+  }
+  const dynamic = segments.find(({ type }) => type === 2)
+  if (!dynamic) throw invalid('missing ELF dynamic segment')
+  let stringAddress
+  let stringSize
+  let terminated = false
+  const paths = []
+  const needed = []
+  for (let entry = dynamic.offset; entry <= dynamic.offset + dynamic.size - 16; entry += 16) {
+    const tag = elf.readBigInt64LE(entry)
+    if (tag === 0n) {
+      terminated = true
+      break
+    }
+    if (tag === 1n) needed.push(word(entry + 8)) // DT_NEEDED
+    if (tag === 5n) stringAddress = word(entry + 8) // DT_STRTAB
+    if (tag === 10n) stringSize = word(entry + 8) // DT_STRSZ
+    if (tag === 15n || tag === 29n) paths.push(word(entry + 8)) // DT_RPATH or DT_RUNPATH
+  }
+  if (!terminated || stringAddress === undefined || !stringSize) {
+    throw invalid('incomplete ELF dynamic table')
+  }
+
+  const strings = segments.find(({ type, address, size }) =>
+    type === 1 && stringAddress >= address && stringAddress - address <= size - stringSize)
+  if (!strings) throw invalid('ELF dynamic strings are outside the file')
+  const stringOffset = strings.offset + (stringAddress - strings.address)
+  const readString = (offset) => {
+    if (offset >= stringSize) throw invalid('invalid ELF dynamic string offset')
+    const start = stringOffset + offset
+    const end = elf.indexOf(0, start)
+    if (end < 0 || end >= stringOffset + stringSize) throw invalid('unterminated ELF dynamic string')
+    return elf.toString('utf8', start, end)
+  }
+  for (const offset of paths) {
+    if (readString(offset).split(':').some((path) => path !== '$ORIGIN' && path !== '${ORIGIN}')) {
+      throw invalid('ELF runtime search path is not relative to the shared library')
+    }
+  }
+  const dependencies = new Set(needed.map(readString))
+  for (const name of Object.keys(libs)) {
+    if (!dependencies.has(name)) throw invalid('missing ELF dependency ' + name)
+  }
+}
+
 function verifyHar(archive) {
   const manifest = JSON.parse(tarMember(archive, 'package/oh-package.json5'))
   if (manifest.name !== 'sherpa_onnx' || manifest.version !== version) {
@@ -185,10 +259,7 @@ function verifyHar(archive) {
     for (const [name, sha] of Object.entries(input.libs)) {
       if (sha256(tarMember(archive, directory + name)) !== sha) throw new Error('Unexpected packaged ' + input.abi + '/' + name)
     }
-    const bridge = tarMember(archive, directory + 'libsherpa_onnx.so')
-    if (!bridge.subarray(0, 5).equals(Buffer.from([127, 69, 76, 70, 2])) || bridge.readUInt16LE(18) !== input.machine) {
-      throw new Error('Wrong native bridge architecture for ' + input.abi)
-    }
+    verifyBridge(tarMember(archive, directory + 'libsherpa_onnx.so'), input)
   }
 }
 
@@ -226,11 +297,19 @@ async function buildHar(cli, archiveOutput, inputs) {
     const cmake = await readFile(cmakeFile, 'utf8')
     const dependency = 'FetchContent_Declare(node_addon_api'
     if (!cmake.includes(dependency)) throw new Error('Unexpected Sherpa HAR CMake source')
-    await writeFile(cmakeFile, cmake.replace(dependency, [
+    const pinnedCmake = cmake.replace(dependency, [
       'set(FETCHCONTENT_FULLY_DISCONNECTED ON)',
       'set(FETCHCONTENT_SOURCE_DIR_NODE_ADDON_API "${CMAKE_CURRENT_LIST_DIR}/../../../../../napi")',
       dependency,
-    ].join('\n')))
+    ].join('\n'))
+    await writeFile(cmakeFile, pinnedCmake + [
+      '',
+      'set_target_properties(sherpa_onnx PROPERTIES',
+      '  BUILD_WITH_INSTALL_RPATH TRUE',
+      '  INSTALL_RPATH "$ORIGIN"',
+      ')',
+      '',
+    ].join('\n'))
     const rootPackage = join(project, 'oh-package.json5')
     const manifest = JSON.parse(await readFile(rootPackage, 'utf8'))
     delete manifest.devDependencies

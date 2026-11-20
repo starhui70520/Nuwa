@@ -160,7 +160,7 @@ jobs:
       - name: Set up HarmonyOS CLI tools
         uses: ErBWs/setup-ohos@4dbb63025116eb6165ceac58a4bf47cbdc5ac721 # v2
         with:
-          version: 6.1.1.280
+          version: 26.0.0.821
           cache: true
 
       - name: Build release APP pack

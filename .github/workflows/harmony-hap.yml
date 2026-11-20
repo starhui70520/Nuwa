@@ -44,8 +44,9 @@ jobs:
           sudo apt-get install -y libgl1-mesa-dev jq
 
       - name: Setup HarmonyOS CLI Tools
-        uses: ErBWs/setup-ohos@v2
+        uses: ErBWs/setup-ohos@4dbb63025116eb6165ceac58a4bf47cbdc5ac721 # v2
         with:
+          version: 26.0.0.821
           cache: true
 
       - name: Set up Node.js
