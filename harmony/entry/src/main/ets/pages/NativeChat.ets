@@ -136,6 +136,7 @@ const MIGRATION_USED_KEY = 'one_click_used';
 const DEEPSEEK_DOCS_URL = 'https://api-docs.deepseek.com/zh-cn/';
 const DELETE_FILE_DOCS_URL = 'https://api-docs.deepseek.com/api/delete-file';
 const HISTORY_SAVE_RETRY_DELAYS = [1000, 2500];
+const STREAM_CHECKPOINT_MS = 1500;
 
 @Component
 struct NativeAssistantMessageRow {
@@ -363,7 +364,7 @@ struct NativeChat {
   private readonly drafts: Map<string, NativeDraft> = new Map();
   private visible: boolean = false;
   private scrollTimer: number = -1;
-  private lastStreamSave: number = 0;
+  private streamCheckpointTimer: number = -1;
   private rejectedImageBinding: string = '';
   private rejectedHistoryImages: Set<string> = new Set();
   private streamFrame: number = -1;
@@ -491,6 +492,7 @@ struct NativeChat {
     this.sidebarDateTimer = -1;
     this.cancelHistorySaveRetry();
     if ((this.replies.length || this.hasPendingHistorySave()) && !this.backupBusy && !this.migrationInProgress) {
+      this.cancelStreamCheckpoint();
       void this.save();
     }
     if (this.draftSaveTimer >= 0) {
@@ -724,6 +726,21 @@ struct NativeChat {
       this.replies = Array.from(this.replies);
       if (this.reply() && this.followLatest && this.laterCount === 0) this.scrollToLatest();
     }, 16);
+  }
+
+  private scheduleStreamCheckpoint(context: common.UIAbilityContext): void {
+    if (this.deletingSessions || this.streamCheckpointTimer >= 0) return;
+    this.streamCheckpointTimer = setTimeout(() => {
+      this.streamCheckpointTimer = -1;
+      if (this.replies.length) void this.save(context, true);
+    }, STREAM_CHECKPOINT_MS);
+  }
+
+  private cancelStreamCheckpoint(): void {
+    if (this.streamCheckpointTimer >= 0) {
+      clearTimeout(this.streamCheckpointTimer);
+      this.streamCheckpointTimer = -1;
+    }
   }
 
   private acknowledgeSentDrafts(snapshot: NativeConversationState): void {
@@ -2235,7 +2252,6 @@ struct NativeChat {
       this.draftDirty = true;
     }
     this.history = upsertConversation(this.history, next, true);
-    this.lastStreamSave = Date.now();
     this.status = '';
     this.compactToolsOpen = false;
     if (!this.wide()) {
@@ -2273,7 +2289,8 @@ struct NativeChat {
       const session = state.sessions.find((item: NativeConversation): boolean => item.id === reply.sessionId);
       const pending = session?.messages.find((message: NativeConversationMessage): boolean => message.id === reply.message.id);
       if (session && pending?.status === 'pending' &&
-        (reply.message.content || reply.message.reasoning || reply.message.latestReminder)) {
+        (reply.message.content || reply.message.reasoning || reply.message.latestReminder || reply.message.stopReason ||
+          reply.message.toolTimeline?.steps.length || reply.message.sources?.length || reply.message.readLinks?.length)) {
         state = upsertConversation(state, updateConversationMessage(session, this.streamMessage(reply, 'streaming')));
       }
     }
@@ -2351,18 +2368,23 @@ struct NativeChat {
         const outcome = await reply.client.send(config, messages, (content: string, reasoning: string,
           outcome?: NativeReplyOutcome): void => {
           if (reply.message.stopReason === 'refusal') return;
+          if (outcome?.stopReason === 'refusal') {
+            this.applyReplyOutcome(reply, outcome, prefixBlocks);
+            this.paintLiveReplies();
+            void this.save(context, true);
+            return;
+          }
           reply.message.content += content;
           reply.message.reasoning += reasoning;
           if (outcome) this.applyReplyOutcome(reply, outcome, prefixBlocks);
           this.paintLiveReplies();
-          if (!this.deletingSessions && Date.now() - this.lastStreamSave > 1500) {
-            this.lastStreamSave = Date.now();
-            void this.save(context, true);
-          }
+          this.scheduleStreamCheckpoint(context);
         }, (event: string, outcome: NativeReplyOutcome): void => {
+          if (reply.message.stopReason === 'refusal') return;
           this.applyReplyOutcome(reply, outcome, prefixBlocks);
-          if (reply.message.stopReason === 'refusal') {
+          if (outcome.stopReason === 'refusal') {
             this.paintLiveReplies();
+            void this.save(context, true);
             return;
           }
           const readLink = readLinks.apply(event, reply.message.content.length);
@@ -2375,12 +2397,14 @@ struct NativeChat {
             hasTimeline = true;
             reply.message.toolTimeline = this.mergeReplyTimeline(prefix, prefixTimeline, timeline.snapshot());
           }
-          if (sources.apply(event)) {
+          const changedSources = sources.apply(event);
+          if (changedSources) {
             reply.message.sources = sources.snapshot();
             reply.message.citations = sources.citationSnapshot();
+          }
+          if (changed || changedSources || readLink) {
             this.paintLiveReplies();
-          } else if (changed) {
-            this.paintLiveReplies();
+            this.scheduleStreamCheckpoint(context);
           }
         }, (title: string): void => { this.applyReplyTitle(context, config, reply, title); });
         this.applyReplyOutcome(reply, outcome, prefixBlocks);
@@ -2532,6 +2556,7 @@ struct NativeChat {
         }
       }
       this.replies = this.replies.filter((item: NativeReply): boolean => item.sessionId !== reply.sessionId);
+      if (!this.replies.length) this.cancelStreamCheckpoint();
       this.queueBalanceRefresh(reply.attachmentBinding);
     }
   }
@@ -2598,7 +2623,6 @@ struct NativeChat {
     this.status = '';
     this.replies = [...this.replies, reply];
     this.history = upsertConversation(this.history, next);
-    this.lastStreamSave = Date.now();
     this.jumpToNewestMessages();
     reply.completion = this.receive(this.host(), config, next, reply);
   }
