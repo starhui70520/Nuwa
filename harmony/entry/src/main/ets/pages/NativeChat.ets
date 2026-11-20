@@ -151,6 +151,7 @@ const DELETE_FILE_DOCS_URL = 'https://api-docs.deepseek.com/api/delete-file';
 const HISTORY_SAVE_RETRY_DELAYS = [1000, 2500];
 const STREAM_CHECKPOINT_MS = 1500;
 const USER_BUBBLE_HORIZONTAL_PADDING = 16;
+const DRAFT_IMAGE_SIZE = 64;
 const SIDEBAR_MENU_WIDTH = 124;
 const SIDEBAR_MENU_TRIGGER_SIZE = 32;
 const SIDEBAR_MENU_EDGE_INSET = 16;
@@ -3265,13 +3266,15 @@ struct NativeChat {
   }
 
   @Builder
-  private attachmentThumbnail(item: NativeAttachment, size: number, preview: string) {
+  private attachmentThumbnail(item: NativeAttachment, size: number, preview: string, openable: boolean = true) {
     Stack() {
       NativeAvifImage({ uri: preview, originalPath: this.attachmentAvifPath(item, preview),
         fit: ImageFit.Cover, active: this.visible && !this.imagePreview })
     }
       .width(size).height(size).borderRadius(12).clip(true).accessibilityText(item.name)
-      .onClick(() => { void this.openAttachment(item); })
+      .accessibilityLevel(openable ? 'auto' : 'no-hide-descendants')
+      .hitTestBehavior(openable ? HitTestMode.Default : HitTestMode.None)
+      .onClick(() => { if (openable) void this.openAttachment(item); })
   }
 
   @Builder
@@ -3332,39 +3335,52 @@ struct NativeChat {
   }
 
   @Builder
+  private draftImageFailureReason(error: string) {
+    if (error && error !== this.label('上传失败', 'Upload failed')) {
+      Text(error).fontSize(this.appFontSize(11)).lineHeight(this.appFontSize(14)).fontWeight(FontWeight.Medium)
+        .fontColor(Color.White).textAlign(TextAlign.Center).maxLines(2)
+        .textOverflow({ overflow: TextOverflow.Ellipsis }).accessibilityLevel('no')
+    }
+  }
+
+  @Builder
   private draftImageCard(file: NativeDraftAttachment, preview: string) {
     Stack() {
-      this.attachmentThumbnail(file.item, 62, preview)
+      this.attachmentThumbnail(file.item, DRAFT_IMAGE_SIZE, preview, file.state === 'ready')
       if (file.state === 'uploading') {
         Row() { LoadingProgress().width(20).height(20).color(Color.White) }
         .width('100%').height('100%').justifyContent(FlexAlign.Center)
-        .backgroundColor('#55000000').borderRadius(12).accessibilityText(this.label('正在上传', 'Uploading'))
-      } else if (file.state === 'failed') {
-        Column({ space: 2 }) {
-          if (file.retryable) {
-            this.iconButton($r('app.media.native_retry'), this.label('重试上传', 'Retry upload'), () => {
-              void this.uploadDraftFile(this.history.activeId ?? '', file.item);
-            }, 24, 16, Color.White)
-          }
-          if (!file.retryable || file.error !== this.label('上传失败', 'Upload failed')) {
-            Text(file.error).fontSize(this.appFontSize(10)).fontColor(Color.White).textAlign(TextAlign.Center).maxLines(2)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .backgroundColor('#4D000000').accessibilityText(this.label('正在上传', 'Uploading'))
+      } else if (file.state === 'failed' && file.retryable) {
+        Button({ type: ButtonType.Normal, buttonStyle: ButtonStyleMode.TEXTUAL }) {
+          Column({ space: 2 }) {
+            Image($r('app.media.native_retry')).width(18).height(18).colorFilter(nativeIconTint(Color.White))
+              .accessibilityLevel('no')
+            this.draftImageFailureReason(file.error)
           }
         }
-        .width('100%').height('100%').padding(3)
-        .justifyContent(file.retryable ? FlexAlign.Center : FlexAlign.End)
-        .backgroundColor('#88000000').border({ width: 1, color: $r('app.color.native_chat_error') }).borderRadius(12)
+        .width('100%').height('100%').padding({ left: 3, right: 3 }).backgroundColor('#7A000000')
+        .accessibilityText(this.label('重试上传', 'Retry upload'))
         .accessibilityDescription(file.error)
+        .onClick(() => { void this.uploadDraftFile(this.history.activeId ?? '', file.item); })
+      } else if (file.state === 'failed') {
+        Column() {
+          this.draftImageFailureReason(file.error)
+        }
+        .width('100%').height('100%').padding({ left: 3, right: 3, bottom: 7 })
+        .justifyContent(FlexAlign.End).backgroundColor('#3D000000').accessibilityText(file.error)
       }
     }
-    .width(62).height(62)
+    .width(DRAFT_IMAGE_SIZE).height(DRAFT_IMAGE_SIZE)
+    .border({ width: 1, color: file.state === 'failed' ? $r('app.color.native_chat_error') :
+      $r('app.color.native_attachment_border') }).borderRadius(16).clip(true)
   }
 
   @Builder
   private draftAttachmentStrip() {
     if (this.draftFiles.length) {
       Scroll() {
-        Row({ space: 8 }) {
+        Row({ space: 10 }) {
           ForEach(this.draftFiles, (file: NativeDraftAttachment) => {
             Stack({ alignContent: Alignment.TopEnd }) {
               if (this.attachmentPreview(file.item)) {
@@ -3386,16 +3402,16 @@ struct NativeChat {
                   18, 12, Color.White,
                   file.state === 'failed' && !file.retryable ? $r('app.color.native_chat_error') : '#990F1115')
               }
-              .margin({ top: 3, right: 3 })
+              .margin({ top: 4, right: 4 })
             }
-            .width(this.attachmentPreview(file.item) ? 62 : NATIVE_DOCUMENT_CARD_WIDTH)
-            .height(this.attachmentPreview(file.item) ? 62 : NATIVE_DOCUMENT_CARD_HEIGHT)
+            .width(this.attachmentPreview(file.item) ? DRAFT_IMAGE_SIZE : NATIVE_DOCUMENT_CARD_WIDTH)
+            .height(this.attachmentPreview(file.item) ? DRAFT_IMAGE_SIZE : NATIVE_DOCUMENT_CARD_HEIGHT)
           }, (file: NativeDraftAttachment): string => `${file.item.id}:${file.state}`)
         }
         .padding({ left: 12, right: 12 })
       }
-      .scrollable(ScrollDirection.Horizontal).width('100%').height(64).scrollBar(BarState.Off)
-      .margin({ top: 10 })
+      .scrollable(ScrollDirection.Horizontal).width('100%').height(64).scrollBar(BarState.Off).align(Alignment.Start)
+      .margin({ top: 12 })
     }
   }
 
