@@ -152,6 +152,8 @@ struct NativeChat {
   @State private selectedIds: string[] = [];
   @State private selecting: boolean = false;
   @State private settingsVisible: boolean = false;
+  private readonly settingsScroll = new Scroller();
+  private settingsDragStartedAt: number = 0;
   @State private migrationPromptVisible: boolean = false;
   @State private migrationChoiceVisible: boolean = false;
   @State private voiceInputPhase: 'idle' | 'starting' | 'recording' | 'transcribing' = 'idle';
@@ -408,12 +410,8 @@ struct NativeChat {
     } else if (this.migrationPromptVisible) {
       if (!this.backupBusy) this.dismissMigrationPrompt();
     } else if (this.settingsVisible) {
-      if (this.settingsSection === 'root') {
-        this.settingsVisible = false;
-      } else {
-        if (this.settingsSection === 'account') this.finishCredentialSettings();
-        this.settingsSection = 'root';
-      }
+      if (this.settingsSection === 'root') this.closeSettings();
+      else this.returnToSettings();
     } else if (this.renamingId) {
       this.cancelSidebarRename(this.renamingId);
     } else if (this.selecting) {
@@ -3246,6 +3244,56 @@ struct NativeChat {
     this.settingsVisible = true;
   }
 
+  private returnToSettings(): void {
+    if (this.signingOut || this.deletingSessions) return;
+    if (this.settingsSection === 'account') this.finishCredentialSettings();
+    this.settingsSection = 'root';
+  }
+
+  private closeSettings(): void {
+    if (this.signingOut || this.deletingSessions) return;
+    if (this.settingsSection === 'account') this.finishCredentialSettings();
+    this.settingsVisible = false;
+  }
+
+  private startSettingsDrag(fromHeader: boolean): void {
+    this.settingsDragStartedAt = !this.wide() && this.settingsVisible &&
+      (fromHeader || this.settingsScroll.currentOffset().yOffset <= 1) ? Date.now() : 0;
+  }
+
+  private finishSettingsDrag(event: GestureEvent): void {
+    const startedAt = this.settingsDragStartedAt;
+    this.settingsDragStartedAt = 0;
+    if (startedAt && this.settingsVisible &&
+      (event.offsetY > 96 || event.offsetY / Math.max(1, Date.now() - startedAt) > 0.45)) {
+      this.closeSettings();
+    }
+  }
+
+  private settingsSheetOptions(): SheetOptions {
+    const wide = this.wide();
+    return {
+      preferType: wide ? SheetType.CENTER : SheetType.BOTTOM,
+      width: wide ? 480 : undefined,
+      height: wide ? Math.min(660, Math.max(320, this.viewportHeight - 32)) :
+        Math.max(1, this.viewportHeight - (this.compact() ? 0 : 48)),
+      blurStyle: BlurStyle.Thick,
+      backgroundColor: $r('app.color.native_chat_sidebar'),
+      dragBar: false,
+      showClose: false,
+      title: (): void => { this.settingsHeader(); },
+      onWillDismiss: (action: DismissSheetAction): void => {
+        if (this.signingOut || this.deletingSessions) return;
+        if (action.reason === DismissReason.PRESS_BACK && this.settingsSection !== 'root') {
+          this.returnToSettings();
+          return;
+        }
+        if (this.settingsSection === 'account') this.finishCredentialSettings();
+        action.dismiss();
+      },
+    };
+  }
+
   private offerMigrationPrompt(): void {
     if (!this.settings.migrationPromptHandled) {
       this.settingsVisible = false;
@@ -3938,59 +3986,81 @@ struct NativeChat {
   }
 
   @Builder
-  private settingsPage() {
+  private settingsHeader() {
     Column() {
+      if (!this.wide()) {
+        Row().width(38).height(4).borderRadius(2).margin({ top: 8 }).backgroundColor('#5980808A')
+      }
       Row() {
         if (this.settingsSection === 'root') {
-          Blank().width(38)
+          Blank().width(this.compact() ? 30 : 36)
         } else {
-          this.iconButton($r('app.media.native_chevron_left'), this.label('返回', "Back"), () => {
-            if (this.settingsSection === 'account') this.finishCredentialSettings();
-            this.settingsSection = 'root';
-          }, 38, 18)
+          this.iconButton($r('app.media.native_chevron_left'), this.label('返回', "Back"),
+            () => { this.returnToSettings(); }, this.compact() ? 30 : 36, 18,
+            $r('app.color.native_chat_primary'), $r('app.color.native_chat_surface'))
         }
-        Text(this.settingsTitle()).layoutWeight(1).textAlign(TextAlign.Center).fontSize(17).fontWeight(FontWeight.Medium)
+        Text(this.settingsTitle()).layoutWeight(1).textAlign(TextAlign.Center)
+          .fontSize(this.compact() ? 12 : 17).lineHeight(this.compact() ? 20 : 24).fontWeight(600)
           .fontColor($r('app.color.native_chat_primary'))
-        Button('×', { buttonStyle: ButtonStyleMode.TEXTUAL }).width(38).height(36).padding(0).fontSize(23)
-          .fontColor($r('app.color.native_chat_secondary')).accessibilityText(this.label('关闭', "Close"))
-          .onClick(() => {
-            if (this.settingsSection === 'account') this.finishCredentialSettings();
-            this.settingsVisible = false;
-          })
+        this.iconButton($r('app.media.native_close'), this.label('关闭', "Close"),
+          () => { this.closeSettings(); }, this.compact() ? 30 : 36, 16,
+          $r('app.color.native_chat_primary'), $r('app.color.native_chat_surface'))
       }
-      .width('100%').height(50).padding({ left: 12, right: 12 })
-      Scroll() {
-        Column({ space: 10 }) {
-          if (this.settingsSection === 'account') {
-            this.accountSettings()
-          } else if (this.settingsSection === 'data') {
-            NativeDataSettings({
-              busy: this.backupBusy, sessionCount: this.history.sessions.length, locale: this.settings.locale,
-              historyImportProgress: this.historyImportProgress, historyImportResult: this.historyImportResult,
-              historyImportFailed: this.historyImportFailed,
-              onMigration: () => { this.chooseHistoryMigration(); },
-              onShareImport: () => { this.openShareImport(); },
-              onImport: () => { void this.importChatHistory(); },
-              onExport: () => { void this.exportChatHistory(); },
-              onDeleteAll: () => { void this.deleteSessions(this.history.sessions.map<string>(
-                (session: NativeConversation): string => session.id), true); },
-            })
-          } else if (this.settingsSection === 'notes') {
-            this.releaseNotesPage()
-          } else if (this.settingsSection === 'feedback') {
-            NativeFeedbackReport({
-              locale: this.settings.locale, appVersion: this.appVersion, apiProtocol: this.settings.protocol,
-              authMode: this.settings.authMode, viewportWidth: this.viewportWidth, viewportHeight: this.viewportHeight,
-            })
-          } else {
-            this.settingsRoot()
-          }
-        }
-        .width('100%').padding({ left: 16, right: 16, top: 12, bottom: 28 }).alignItems(HorizontalAlign.Start)
-      }
-      .width('100%').layoutWeight(1).scrollBar(BarState.Off)
+      .width('100%').padding({
+        left: this.compact() ? 10 : 16, right: this.compact() ? 10 : 16,
+        top: this.wide() ? 16 : 8, bottom: this.compact() ? 6 : 10,
+      })
     }
-    .width('100%').height('100%').backgroundColor($r('app.color.native_chat_sidebar')).enabled(!this.signingOut)
+    .width('100%').enabled(!this.signingOut)
+    .parallelGesture(
+      PanGesture({ direction: PanDirection.Down, distance: 3 })
+        .onActionStart(() => { this.startSettingsDrag(true); })
+        .onActionEnd((event: GestureEvent) => { this.finishSettingsDrag(event); })
+    )
+  }
+
+  @Builder
+  private settingsPage() {
+    Scroll(this.settingsScroll) {
+      Column({ space: 10 }) {
+        if (this.settingsSection === 'account') {
+          this.accountSettings()
+        } else if (this.settingsSection === 'data') {
+          NativeDataSettings({
+            busy: this.backupBusy, sessionCount: this.history.sessions.length, locale: this.settings.locale,
+            historyImportProgress: this.historyImportProgress, historyImportResult: this.historyImportResult,
+            historyImportFailed: this.historyImportFailed,
+            onMigration: () => { this.chooseHistoryMigration(); },
+            onShareImport: () => { this.openShareImport(); },
+            onImport: () => { void this.importChatHistory(); },
+            onExport: () => { void this.exportChatHistory(); },
+            onDeleteAll: () => { void this.deleteSessions(this.history.sessions.map<string>(
+              (session: NativeConversation): string => session.id), true); },
+          })
+        } else if (this.settingsSection === 'notes') {
+          this.releaseNotesPage()
+        } else if (this.settingsSection === 'feedback') {
+          NativeFeedbackReport({
+            locale: this.settings.locale, appVersion: this.appVersion, apiProtocol: this.settings.protocol,
+            authMode: this.settings.authMode, viewportWidth: this.viewportWidth, viewportHeight: this.viewportHeight,
+          })
+        } else {
+          this.settingsRoot()
+        }
+      }
+      .width('100%').padding({
+        left: this.compact() ? 10 : 16, right: this.compact() ? 10 : 16,
+        top: 4, bottom: this.compact() ? 16 : 24,
+      }).alignItems(HorizontalAlign.Start)
+    }
+    .width('100%').height('100%').scrollBar(BarState.Off)
+    .nestedScroll({ scrollForward: NestedScrollMode.SELF_FIRST, scrollBackward: NestedScrollMode.SELF_FIRST })
+    .enabled(!this.signingOut)
+    .parallelGesture(
+      PanGesture({ direction: PanDirection.Down, distance: 5 })
+        .onActionStart(() => { this.startSettingsDrag(false); })
+        .onActionEnd((event: GestureEvent) => { this.finishSettingsDrag(event); })
+    )
   }
 
   @Builder
@@ -4402,8 +4472,7 @@ struct NativeChat {
       }
     }
     .width('100%').height('100%').backgroundColor($r('app.color.native_chat_bg'))
-    .bindSheet($$this.settingsVisible, this.settingsPage(),
-      { height: SheetSize.LARGE, blurStyle: BlurStyle.Thick, showClose: false })
+    .bindSheet($$this.settingsVisible, this.settingsPage(), this.settingsSheetOptions())
   }
 
   @Builder

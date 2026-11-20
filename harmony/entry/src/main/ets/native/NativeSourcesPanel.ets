@@ -70,7 +70,7 @@ export struct NativeSourcesPanel {
       }
       .width('100%').alignItems(VerticalAlign.Center)
     }
-    .width('100%').padding(12).borderRadius(14)
+    .width('100%').padding(12).borderRadius(12)
     .backgroundColor($r('app.color.native_chat_surface'))
     .onClick(() => { void this.openSource(source); })
   }
@@ -86,7 +86,7 @@ export struct NativeSourcesPanel {
           .accessibilityText(this.text('关闭', 'Close')).onClick(() => { this.onClose(); })
       }
       .width('100%').padding({ left: 2 })
-      List({ space: 8 }) {
+      List({ space: 6 }) {
         ForEach(this.sources, (source: NativeChatSource) => {
           ListItem() { this.card(source) }
         }, (source: NativeChatSource): string =>
@@ -97,6 +97,6 @@ export struct NativeSourcesPanel {
       .scrollBar(BarState.Auto)
     }
     .width('100%').height('100%')
-    .padding({ left: 16, right: 16, top: 12, bottom: 16 })
+    .padding({ left: 8, right: 8, top: 12, bottom: 16 })
   }
 }
