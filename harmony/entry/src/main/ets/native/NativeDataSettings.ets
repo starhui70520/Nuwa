@@ -50,12 +50,14 @@ export struct NativeDataSettings {
           .fontSize(14 * this.fontScale)
           .lineHeight(22 * this.fontScale)
           .fontColor($r('app.color.native_chat_primary'))
-        Text(description())
-          .fontSize(12 * this.fontScale)
-          .lineHeight(18 * this.fontScale)
-          .fontColor(error() ? $r('app.color.native_chat_error') : $r('app.color.native_chat_secondary'))
-          .maxLines(error() ? 8 : 3)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        if (description()) {
+          Text(description())
+            .fontSize(12 * this.fontScale)
+            .lineHeight(18 * this.fontScale)
+            .fontColor(error() ? $r('app.color.native_chat_error') : $r('app.color.native_chat_secondary'))
+            .maxLines(error() ? 8 : 3)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
       }
       .layoutWeight(1)
       .alignItems(HorizontalAlign.Start)
@@ -117,11 +119,10 @@ export struct NativeDataSettings {
       Column({ space: 0 }) {
         this.settingRow(
           () => this.text('删除所有对话', 'Delete all chats'),
-          () => this.text('删除后，所有对话都将被清空且无法找回。本地保存的附件及未发送的草稿也将被删除。',
-            'All chats will be cleared permanently. Locally saved attachments and unsent drafts will also be deleted.'),
-          () => this.busy ? this.text('处理中…', 'Working…') : this.text('删除', 'Delete'),
+          () => '',
+          () => this.text('删除', 'Delete'),
           'danger',
-          () => !this.busy && this.sessionCount > 0,
+          () => !this.busy,
           this.onDeleteAll,
         )
       }

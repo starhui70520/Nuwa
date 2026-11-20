@@ -76,6 +76,7 @@ import {
   NativeUpdateCheck, NativeUpdatePreferences, NativeUpdateSchedule, UPDATE_POLL_MS, UPDATE_RESUME_MS,
 } from '../native/NativeUpdates';
 import { NativeUpdateDialog, NativeUpdateDialogModel } from '../native/NativeUpdateDialog';
+import { NativeDeleteDialog, NativeDeleteDialogModel, NativeDeleteMode } from '../native/NativeDeleteDialog';
 import { importNativeShareLink } from '../native/NativeShareImport';
 import { openNuwaPrivacyPolicy } from '../native/PrivacyPolicy';
 import { HarmonySpeechRecognition } from '../speech/HarmonySpeechRecognition';
@@ -197,6 +198,25 @@ struct NativeChat {
   @State private shareInput: string = '';
   @State private shareImportError: string = '';
   private deletingSessions: boolean = false;
+  private deletingSessionIds = new Set<string>();
+  private deleteSessionIds: string[] = [];
+  @State private deleteNotice: NativeDeleteDialogModel | null = null;
+  private readonly deleteNoticeController = new CustomDialogController({
+    builder: NativeDeleteDialog({
+      model: this.$deleteNotice,
+      onCancel: () => { if (!this.deleteNotice?.busy) this.closeDeleteNotice(); },
+      onConfirm: () => { void this.confirmDeleteSessions(); },
+    }),
+    customStyle: true,
+    alignment: DialogAlignment.Center,
+    maskColor: '#5C000000',
+    autoCancel: true,
+    onWillDismiss: (action: DismissDialogAction): void => {
+      if (this.deleteNotice?.busy) return;
+      this.closeDeleteNotice(false);
+      action.dismiss();
+    },
+  });
   @State private renamingId: string = '';
   @State private editId: string = '';
   @State private renameText: string = '';
@@ -397,6 +417,7 @@ struct NativeChat {
 
   aboutToDisappear(): void {
     this.onPageHide();
+    this.closeDeleteNotice();
     this.closeUpdateNotice(false);
     this.balanceRefreshEnabled = false;
     this.resetBalance();
@@ -413,7 +434,9 @@ struct NativeChat {
 
   onBackPress(): boolean {
     if (this.signingOut) return true;
-    if (this.updateNotice) {
+    if (this.deleteNotice) {
+      if (!this.deleteNotice.busy) this.closeDeleteNotice();
+    } else if (this.updateNotice) {
       this.closeUpdateNotice(true);
     } else if (this.imagePreview) {
       this.imagePreview = '';
@@ -509,6 +532,7 @@ struct NativeChat {
   }
 
   private async save(context: common.UIAbilityContext = this.host(), checkpoint: boolean = false): Promise<void> {
+    if (this.deletingSessions) return;
     const sequence = ++this.historySaveSequence;
     let full = !checkpoint || this.hasPendingHistorySave();
     try {
@@ -518,6 +542,7 @@ struct NativeChat {
         try {
           await this.storage.saveConversations(context, snapshot, dirty);
         } catch {
+          if (this.deletingSessions) return;
           full = true;
           snapshot = this.historyWithPartialReplies();
           await this.storage.saveConversations(context, snapshot);
@@ -1258,34 +1283,90 @@ struct NativeChat {
     }
   }
 
-  private async deleteSessions(ids: string[], deleteAll: boolean = false): Promise<void> {
-    if (!ids.length || this.backupBusy) {
-      return;
-    }
+  private deleteSessions(ids: string[], mode: NativeDeleteMode): void {
+    if (this.backupBusy || this.signingOut || this.deleteNotice || this.updateNotice) return;
+    const targets = ids.filter((id: string): boolean => !!this.session(id));
+    if (mode !== 'all' && targets.length === 0) return;
+    this.deleteSessionIds = targets;
+    this.refreshDeleteNotice(mode, targets.length, false);
+    this.deleteNoticeController.open();
+  }
+
+  private refreshDeleteNotice(mode: NativeDeleteMode, count: number, busy: boolean): void {
+    const compact = this.compact();
+    this.deleteNotice = {
+      mode, count, busy,
+      locale: this.settings.locale,
+      fontScale: this.appFontScale(),
+      compact,
+      width: Math.max(1, Math.min(380, this.viewportWidth - (compact ? 16 : 32))),
+      maxHeight: Math.max(1, this.viewportHeight - (compact ? 16 : 24)),
+    };
+  }
+
+  private closeDeleteNotice(close: boolean = true): void {
+    if (!this.deleteNotice) return;
+    this.deleteNotice = null;
+    this.deleteSessionIds = [];
+    if (close) this.deleteNoticeController.close();
+  }
+
+  private async confirmDeleteSessions(): Promise<void> {
+    const notice = this.deleteNotice;
+    if (!notice || notice.busy || this.backupBusy || this.signingOut) return;
+    const deleteAll = notice.mode === 'all';
+    const ids = deleteAll ? this.history.sessions.map((session: NativeConversation): string => session.id) :
+      this.deleteSessionIds.slice();
+    this.backupBusy = true;
+    this.refreshDeleteNotice(notice.mode, notice.count, true);
+    let failed = false;
     try {
-      const result = await this.getUIContext().getPromptAction().showDialog({
-        title: deleteAll ? this.label('删除所有对话', 'Delete all chats') : ids.length === 1 ?
-          this.label('删除对话', 'Delete chat') : this.label(`删除 ${ids.length} 个对话`, `Delete ${ids.length} chats`),
-        message: deleteAll ? this.label('本地保存的附件及未发送的草稿也将被删除。', 'Local attachments and unsent drafts will also be deleted.') :
-          this.label('删除后将无法恢复。', 'Deleted chats can’t be recovered.'),
-        buttons: [{ text: this.label('取消', "Cancel"), color: '#61666B' }, { text: this.label('删除', "Delete"), color: '#EC1313' }],
-      });
-      if (result.index === 1 && !this.backupBusy) {
+      if (notice.mode === 'batch') {
+        for (const id of ids) {
+          try {
+            await this.removeConversations([id], false);
+          } catch {
+            failed = true;
+          }
+        }
+      } else {
         await this.removeConversations(ids, deleteAll);
       }
     } catch {
-      this.toast(this.label('删除对话失败，请重试', "Unable to delete chats. Please try again."));
+      failed = true;
+    } finally {
+      this.backupBusy = false;
+      if (notice.mode === 'batch' || !failed) {
+        this.resetSelection();
+        this.closeDeleteNotice();
+      } else if (this.deleteNotice) {
+        this.refreshDeleteNotice(notice.mode, notice.count, false);
+      }
+    }
+    if (failed) {
+      this.toast(deleteAll ? this.label('删除失败，请重试', 'Failed to delete chats. Please try again.') :
+        this.label('删除对话失败，请重试', 'Unable to delete this chat. Please try again.'));
+    } else if (deleteAll) {
+      this.toast(this.label('删除成功', 'Successfully deleted.'));
     }
   }
 
   private async removeConversations(ids: string[], deleteAll: boolean): Promise<void> {
-    this.backupBusy = true;
+    const context = this.host();
+    const deleted = new Set<string>(ids);
     this.deletingSessions = true;
+    this.deletingSessionIds = deleted;
     try {
-      const context = this.host();
+      if (deleted.size === 0) {
+        if (deleteAll) await this.clearAllDrafts(context);
+        return;
+      }
+      const stopped = this.replies.filter((reply: NativeReply): boolean => deleted.has(reply.sessionId));
+      for (const id of deleted) this.cancelReply(id);
+      await Promise.all(stopped.map((reply: NativeReply): Promise<void> => reply.completion ?? Promise.resolve()));
+
       const previous = this.history;
       const active = previous.activeId;
-      const deleted = new Set<string>(ids);
       const candidates = new Map<string, NativeAttachment>();
       const retained = new Set<string>();
       for (const session of previous.sessions) {
@@ -1303,15 +1384,12 @@ struct NativeChat {
       draftIds.add(active ?? '');
       for (const id of draftIds) {
         for (const file of this.draftItems(id)) {
-          if (deleteAll || deleted.has(id)) {
+          if (deleted.has(id)) {
             candidates.set(file.item.id, file.item);
           } else {
             retained.add(file.item.id);
           }
         }
-      }
-      for (const id of ids) {
-        this.cancelReply(id);
       }
       const next = deleteConversations(this.historyWithPartialReplies(), ids);
       await this.storage.saveConversations(context, next);
@@ -1319,28 +1397,47 @@ struct NativeChat {
       this.draftHistoryWrites.forEach((sessionId: string, replyId: string): void => {
         if (deleted.has(sessionId)) this.draftHistoryWrites.delete(replyId);
       });
-      for (const id of draftIds) {
-        if (deleteAll || deleted.has(id)) {
-          this.drafts.delete(id);
-        }
-      }
-      if (active !== next.activeId || deleteAll) {
+      for (const id of deleted) this.drafts.delete(id);
+      if (active !== next.activeId) {
         this.stopVoice();
         this.restoreDraft(next.activeId ?? '');
       }
-      this.resetSelection();
       for (const file of candidates.values()) {
         if (file.local && !retained.has(file.id)) {
           this.removedDraftFiles.set(file.id, file);
         }
       }
       this.draftDirty = true;
-      await this.save(context);
-      await this.persistDrafts();
+      if (deleteAll) await this.clearAllDrafts(context);
     } finally {
-      this.backupBusy = false;
       this.deletingSessions = false;
+      this.deletingSessionIds.clear();
+      // Persist stopped replies after a failed delete, or concurrent changes in retained chats.
+      if (ids.length > 0) await this.save(context);
+      if (!deleteAll) await this.persistDrafts();
     }
+  }
+
+  private async clearAllDrafts(context: common.UIAbilityContext): Promise<void> {
+    this.rememberCurrentDraft();
+    const originals = new Map<string, NativeAttachment>(this.removedDraftFiles);
+    this.drafts.forEach((draft: NativeDraft): void => {
+      for (const file of draft.files) {
+        if (file.item.local) originals.set(file.item.id, file.item);
+      }
+    });
+    await this.draftStorage.save(context, []);
+    this.draftStorageReady = true;
+    this.draftHistoryWrites.clear();
+    this.drafts.clear();
+    this.stopVoice();
+    this.restoreDraft('');
+    this.draftDirty = false;
+    if (this.draftSaveTimer >= 0) {
+      clearTimeout(this.draftSaveTimer);
+      this.draftSaveTimer = -1;
+    }
+    await this.removeDraftOriginals(context, Array.from(originals.values()));
   }
 
   private allPinned(): boolean {
@@ -1368,6 +1465,7 @@ struct NativeChat {
     if (reply) {
       reply.stopped = true;
       this.cancelReplyUploads(reply);
+      reply.stopPreparing?.();
       reply.client.cancel();
       reply.resumeRetry?.();
     }
@@ -1457,7 +1555,8 @@ struct NativeChat {
   }
 
   private async persistDrafts(): Promise<void> {
-    if (!this.draftStorageReady || this.draftSaving || !this.draftDirty || this.draftHistoryWrites.size > 0) return;
+    if (this.deletingSessions || !this.draftStorageReady || this.draftSaving || !this.draftDirty ||
+      this.draftHistoryWrites.size > 0) return;
     this.rememberCurrentDraft();
     const rows: NativeStoredDraft[] = [];
     this.drafts.forEach((draft: NativeDraft, id: string): void => {
@@ -1474,16 +1573,20 @@ struct NativeChat {
     try {
       await this.draftStorage.save(context, rows);
       saved = true;
-      for (const item of removed) {
-        this.removedDraftFiles.delete(item.id);
-        await this.attachments.remove(context, item).catch(() => {});
-      }
+      await this.removeDraftOriginals(context, removed);
     } catch {
       this.draftDirty = true;
       this.toast(this.label('草稿保存失败，请重试', 'Unable to save drafts. Please try again.'));
     } finally {
       this.draftSaving = false;
       if (saved && this.draftDirty) void this.persistDrafts();
+    }
+  }
+
+  private async removeDraftOriginals(context: common.UIAbilityContext, files: NativeAttachment[]): Promise<void> {
+    for (const item of files) {
+      this.removedDraftFiles.delete(item.id);
+      await this.attachments.remove(context, item).catch(() => {});
     }
   }
 
@@ -1810,7 +1913,7 @@ struct NativeChat {
 
   private updatePreparedAttachment(sessionId: string, originalId: string, file: NativeAttachment): boolean {
     const current = this.session(sessionId);
-    if (!current || this.deletingSessions) return false;
+    if (!current || this.deletingSessionIds.has(sessionId)) return false;
     const next = replaceConversationAttachment(current, originalId, file);
     if (next === current) return false;
     this.history = upsertConversation(this.history, next);
@@ -2042,7 +2145,7 @@ struct NativeChat {
 
   private applyReplyTitle(context: common.UIAbilityContext, config: NativeChatConfig, reply: NativeReply,
     title: string): void {
-    if (!config.requestTitle || reply.stopped || this.deletingSessions || !title.trim()) return;
+    if (!config.requestTitle || reply.stopped || this.deletingSessionIds.has(reply.sessionId) || !title.trim()) return;
     const session = this.session(reply.sessionId);
     if (!session || session.title) return;
     config.requestTitle = false;
@@ -3624,7 +3727,7 @@ struct NativeChat {
   }
 
   private async resumeUpdateChecks(force: boolean = false): Promise<void> {
-    if (this.pendingUpdate && this.visible && !this.updateNotice && !this.checkingUpdate &&
+    if (this.pendingUpdate && this.visible && !this.updateNotice && !this.deleteNotice && !this.checkingUpdate &&
       !this.authorizing && !this.backupBusy && !this.signingOut &&
       !isUpdateSnoozed(this.pendingUpdate, this.updatePreferences, Date.now())) {
       this.presentUpdate(this.pendingUpdate);
@@ -3685,8 +3788,9 @@ struct NativeChat {
         }
         return;
       }
-      if (this.updateNotice || !silent || (prompt && this.visible && !this.authorizing && !this.backupBusy && !this.signingOut &&
-        !isUpdateSnoozed(update, this.updatePreferences, Date.now()))) {
+      if (!this.deleteNotice && (this.updateNotice || !silent ||
+        (prompt && this.visible && !this.authorizing && !this.backupBusy && !this.signingOut &&
+          !isUpdateSnoozed(update, this.updatePreferences, Date.now())))) {
         this.presentUpdate(update);
       }
     } catch {
@@ -4132,8 +4236,7 @@ struct NativeChat {
             onShareImport: () => { this.openShareImport(); },
             onImport: () => { void this.importChatHistory(); },
             onExport: () => { void this.exportChatHistory(); },
-            onDeleteAll: () => { void this.deleteSessions(this.history.sessions.map<string>(
-              (session: NativeConversation): string => session.id), true); },
+            onDeleteAll: () => { this.deleteSessions([], 'all'); },
           })
         } else if (this.settingsSection === 'notes') {
           this.releaseNotesPage()
@@ -4278,7 +4381,7 @@ struct NativeChat {
       MenuItem({ content: this.label('多选', "Select") }).onClick(() => { this.beginSidebarSelection(session.id); })
       MenuItem({ content: this.label('重命名', "Rename") }).onClick(() => { this.beginSidebarRename(session); })
       MenuItem({ content: this.label('删除', "Delete") }).contentFontColor($r('app.color.native_chat_error'))
-        .onClick(() => { void this.deleteSessions([session.id]); })
+        .onClick(() => { this.deleteSessions([session.id], 'single'); })
     }
     .font({ size: this.appFontSize(14) })
   }
@@ -4441,7 +4544,8 @@ struct NativeChat {
             })
           Button(this.label('删除', "Delete"), { buttonStyle: ButtonStyleMode.TEXTUAL })
             .fontSize(this.appFontSize(14)).fontColor($r('app.color.native_chat_error'))
-            .enabled(this.selectedIds.length > 0).layoutWeight(1).onClick(() => { void this.deleteSessions(this.selectedIds); })
+            .enabled(this.selectedIds.length > 0).layoutWeight(1)
+            .onClick(() => { this.deleteSessions(this.selectedIds, 'batch'); })
         }
         .height(52).width('100%')
       } else {
@@ -4773,6 +4877,9 @@ struct NativeChat {
       this.viewportWidth = width;
       this.viewportHeight = height;
       if (resized && this.updateNotice) this.presentUpdate(this.updateNotice.update);
+      if (resized && this.deleteNotice) {
+        this.refreshDeleteNotice(this.deleteNotice.mode, this.deleteNotice.count, this.deleteNotice.busy);
+      }
       if (this.wide() && (this.drawerOpen || this.drawerDrag !== 0)) {
         this.drawerOpen = false;
         this.drawerDrag = 0;
