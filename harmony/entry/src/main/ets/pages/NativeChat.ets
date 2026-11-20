@@ -154,6 +154,8 @@ const HISTORY_SAVE_RETRY_DELAYS = [1000, 2500];
 const STREAM_CHECKPOINT_MS = 1500;
 const USER_BUBBLE_HORIZONTAL_PADDING = 16;
 const DRAFT_IMAGE_SIZE = 64;
+const CHAT_STICKY_THRESHOLD = 40;
+const CHAT_PAGE_THRESHOLD = 260;
 const SIDEBAR_MENU_WIDTH = 124;
 const SIDEBAR_MENU_TRIGGER_SIZE = 32;
 const SIDEBAR_MENU_EDGE_INSET = 16;
@@ -1365,7 +1367,13 @@ struct NativeChat {
     const index = this.messageList.totalCount() - 1 + Number(this.earlierCount > 0);
     if (index < 0 || this.listViewportHeight <= 0) return index < 0;
     const frame = this.scroller.getItemRect(index);
-    return frame.height > 0 && frame.y + frame.height - this.listViewportHeight < 40;
+    return frame.height > 0 && frame.y + frame.height - this.listViewportHeight < CHAT_STICKY_THRESHOLD;
+  }
+
+  private nearListStart(): boolean {
+    const pager = this.scroller.getItemRect(0);
+    const offset = pager.height > 0 ? -pager.y : this.scroller.currentOffset()?.yOffset;
+    return offset !== undefined && offset < CHAT_PAGE_THRESHOLD;
   }
 
   private restoreListPosition(index: number, top: number): void {
@@ -1406,9 +1414,11 @@ struct NativeChat {
     if (now - this.titleTap <= 400) {
       this.titleTap = 0;
       this.followLatest = false;
-      this.rangeFromTop = true;
-      this.messageLimit = CHAT_PAGE_SIZE;
-      this.updateMessageWindow();
+      if (this.earlierCount > 0) {
+        this.rangeFromTop = true;
+        this.messageLimit = CHAT_PAGE_SIZE;
+        this.updateMessageWindow();
+      }
       this.restoreListPosition(0, 0);
     } else {
       this.titleTap = now;
@@ -1417,14 +1427,17 @@ struct NativeChat {
 
   private observeMessageScroll(offset: number, state: ScrollState): void {
     if (offset !== 0) this.dismissComposerTooltip();
-    if (this.nearListEnd()) this.followLatest = true;
-    if (state === ScrollState.Idle) return;
+    const nearEnd = this.nearListEnd();
+    if (nearEnd) this.followLatest = true;
+    if (state === ScrollState.Idle || this.anchorTimer >= 0) return;
     if (offset < 0) {
-      this.followLatest = false;
-      if (this.earlierCount > 0 && this.firstVisibleRow <= 2) this.loadMoreMessages(true);
+      if (!nearEnd) this.followLatest = false;
+      if (!this.followLatest && this.earlierCount > 0 && this.nearListStart()) this.loadMoreMessages(true);
     } else if (offset > 0 && this.laterCount > 0) {
       const footer = this.scroller.getItemRect(this.messageList.totalCount());
-      if (footer.height > 0 && footer.y < this.listViewportHeight + 240) this.loadMoreMessages(false);
+      if (footer.height > 0 && footer.y + footer.height - this.listViewportHeight < CHAT_PAGE_THRESHOLD) {
+        this.loadMoreMessages(false);
+      }
     }
   }
 
@@ -5527,7 +5540,7 @@ struct NativeChat {
         .width('100%').constraintSize({ maxWidth: this.viewportWidth >= 1024 ? 792 : 680 })
         .layoutWeight(1).scrollBar(BarState.Auto)
         .cachedCount(4).onScrollIndex((start: number) => { this.firstVisibleRow = start; })
-        .onScroll((offset: number, state: ScrollState) => { this.observeMessageScroll(offset, state); })
+        .onDidScroll((offset: number, state: ScrollState) => { this.observeMessageScroll(offset, state); })
         .onAreaChange((_old: Area, area: Area) => {
           const height = Number(area.height);
           if (height !== this.listViewportHeight) {

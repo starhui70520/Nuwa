@@ -80,12 +80,10 @@ export class NativeMessageList implements IDataSource {
     const previousCount = this.rows.length;
     if (unchangedPrefix === previousCount && previousCount === next.length) return;
     this.rows = next;
-    if (unchangedPrefix === previousCount && next.length > previousCount) {
-      const append: DataOperation = { type: DataOperationType.ADD, index: previousCount, count: next.length - previousCount };
-      this.listeners.forEach((listener: DataChangeListener): void => listener.onDatasetChange([append]));
-    } else {
-      // Keep keys for the rows that remain current when a branch changes or older messages are prepended.
-      this.listeners.forEach((listener: DataChangeListener): void => listener.onDataReloaded());
-    }
+    // LazyForEach requires one notification API for both appends and reloads.
+    const operation: DataOperation = unchangedPrefix === previousCount && next.length > previousCount ?
+      { type: DataOperationType.ADD, index: previousCount, count: next.length - previousCount } :
+      { type: DataOperationType.RELOAD };
+    this.listeners.forEach((listener: DataChangeListener): void => listener.onDatasetChange([operation]));
   }
 }
