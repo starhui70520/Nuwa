@@ -32,7 +32,6 @@ const USER = 'user.json';
 const VERSION = 3;
 const MAX_INLINE_IMAGE_BYTES = 16 * 1024 * 1024;
 const MAX_PREVIEW_BYTES = 1024 * 1024;
-const MAX_FILE_PREVIEW_BYTES = 16 * 1024 * 1024;
 const MAX_EMBEDDED_ARCHIVE_BYTES = 16 * 1024 * 1024;
 const ARCHIVE_TEXT_READ_CHUNK = 256 * 1024;
 const MAX_PORTABLE_SOURCES = 256;
@@ -701,7 +700,8 @@ export function importedAttachmentPreview(session: NativeConversation, item: Nat
     return '';
   }
   try {
-    if (context && image.blobId && image.size !== undefined && image.size <= MAX_FILE_PREVIEW_BYTES &&
+    // File-backed images have already passed the raster and dimension checks during import.
+    if (context && image.blobId && image.size !== undefined && image.size > 0 &&
       ['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(image.mimeType ?? '')) {
       return fileUri.getUriFromPath(backupImagePath(context, image.blobId));
     }

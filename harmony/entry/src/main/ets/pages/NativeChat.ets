@@ -93,6 +93,7 @@ interface NativeReply {
   stopped: boolean;
   uploadingIds: string[];
   attachmentBinding: string;
+  uploadQuotaShown?: boolean;
   stopPreparing?: () => void;
   resumeRetry?: () => void;
   completion?: Promise<void>;
@@ -2033,6 +2034,12 @@ struct NativeChat {
       if (reply.stopped) return {};
       const detail = (cause as Error)?.message || '';
       const error = cause instanceof NativeAttachmentUploadError ? cause : undefined;
+      if (error?.quota && !reply.uploadQuotaShown && this.visible && !this.signingOut &&
+        this.history.activeId === session.id && this.session(session.id) && !this.deletingSessionIds.has(session.id) &&
+        this.reply(session.id)?.client === reply.client && this.settings.attachmentBinding === reply.attachmentBinding) {
+        reply.uploadQuotaShown = true;
+        this.showUploadQuota(error.quota);
+      }
       return { failure: { id: file.id, detail: detail.slice(0, 512), retryable: error?.retryable ?? true,
         status: error?.status } };
     }
@@ -2967,7 +2974,7 @@ struct NativeChat {
   @Builder
   private attachmentTile(item: NativeAttachment, size: number, preview: string) {
     if (preview) {
-      Image(preview).width(size).height(size).objectFit(ImageFit.Cover)
+      Image(preview).width(size).height(size).objectFit(ImageFit.Cover).autoResize(true)
         .borderRadius(12).draggable(false).accessibilityText(item.name)
         .onClick(() => { void this.openAttachment(item); })
     } else {
@@ -5021,7 +5028,7 @@ struct NativeChat {
       }
       if (this.imagePreview) {
         Stack({ alignContent: Alignment.TopEnd }) {
-          Image(this.imagePreview).width('100%').height('100%').objectFit(ImageFit.Contain)
+          Image(this.imagePreview).width('100%').height('100%').objectFit(ImageFit.Contain).autoResize(true)
             .backgroundColor(Color.Black).onClick(() => { this.imagePreview = ''; })
           Row() {
             this.iconButton($r('app.media.native_close'), this.label('关闭图片', "Close image"), () => { this.imagePreview = ''; },

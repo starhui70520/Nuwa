@@ -21,6 +21,7 @@ export struct NativeSourcesPanel {
   @Prop fontScale: number = 1;
   @Prop sources: NativeChatSource[] = [];
   @Prop title: string = '参考资料';
+  @State private failedSiteIcons: string[] = [];
   onClose: () => void = () => {};
 
   private text(chinese: string, english: string): string {
@@ -41,35 +42,60 @@ export struct NativeSourcesPanel {
   }
 
   @Builder
+  private siteIcon(source: NativeChatSource) {
+    Row() {
+      if (source.siteIcon && !this.failedSiteIcons.includes(source.siteIcon)) {
+        Image(source.siteIcon).width(18).height(18).objectFit(ImageFit.Cover).autoResize(true)
+          .borderRadius(9)
+          .onError((): void => {
+            if (!this.failedSiteIcons.includes(source.siteIcon ?? '')) {
+              this.failedSiteIcons = this.failedSiteIcons.concat([source.siteIcon ?? '']);
+            }
+          })
+      } else {
+        Image($r('app.media.native_web_search')).width(12).height(12)
+          .colorFilter(nativeIconTint($r('app.color.native_chat_caption')))
+      }
+    }
+    .width(18).height(18).borderRadius(9).backgroundColor($r('app.color.native_chat_citation_bg'))
+    .clip(true)
+  }
+
+  @Builder
   private card(source: NativeChatSource) {
     Button({ type: ButtonType.Normal }) {
-      Row({ space: 12 }) {
-        Text(source.index.toString()).fontSize(11 * this.fontScale).fontWeight(FontWeight.Medium)
-          .fontColor($r('app.color.native_chat_blue_text')).textAlign(TextAlign.Center)
-          .width(24).height(24).backgroundColor($r('app.color.native_chat_field')).borderRadius(8)
-          .alignSelf(ItemAlign.Start)
-        Column({ space: 5 }) {
-          Row({ space: 7 }) {
-            Text(source.siteName).fontSize(13 * this.fontScale).fontColor($r('app.color.native_chat_secondary'))
+      Column({ space: 6 }) {
+        Row({ space: 6 }) {
+          this.siteIcon(source)
+          if (source.siteName) {
+            Text(source.siteName).fontSize(13 * this.fontScale).lineHeight(17 * this.fontScale)
+              .fontWeight(FontWeight.Medium).fontColor($r('app.color.native_chat_caption'))
               .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).constraintSize({ maxWidth: '65%' })
-            if (source.publishedAt) {
-              Text(sourceDate(source.publishedAt)).fontSize(13 * this.fontScale).fontColor($r('app.color.native_chat_caption'))
-                .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-            }
           }
-          Text(source.title).fontSize(14 * this.fontScale).fontWeight(FontWeight.Medium)
-            .fontColor($r('app.color.native_chat_primary')).maxLines(2)
+          if (source.siteName && source.publishedAt) {
+            Divider().vertical(true).strokeWidth(1).color($r('app.color.native_chat_stroke'))
+              .width(1).height(12).margin({ left: 3, right: 3 })
+          }
+          if (source.publishedAt) {
+            Text(sourceDate(source.publishedAt)).fontSize(13 * this.fontScale).lineHeight(17 * this.fontScale)
+              .fontWeight(FontWeight.Regular).fontColor($r('app.color.native_chat_caption'))
+              .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
+        }
+        .width('100%').alignItems(VerticalAlign.Center)
+        Column({ space: 6 }) {
+          Text(source.title).fontSize(14 * this.fontScale).lineHeight(22 * this.fontScale)
+            .fontWeight(FontWeight.Medium).fontColor($r('app.color.native_chat_primary')).maxLines(2)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
           if (source.snippet) {
-            Text(source.snippet).fontSize(13 * this.fontScale).fontColor($r('app.color.native_chat_secondary')).maxLines(3)
+            Text(source.snippet).fontSize(13 * this.fontScale).lineHeight(20 * this.fontScale)
+              .fontColor($r('app.color.native_chat_caption')).maxLines(2)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
           }
         }
-        .layoutWeight(1).alignItems(HorizontalAlign.Start)
-        Image($r('app.media.native_chevron_right')).width(14).height(14)
-          .colorFilter(nativeIconTint($r('app.color.native_chat_caption')))
+        .width('100%').alignItems(HorizontalAlign.Start)
       }
-      .width('100%').alignItems(VerticalAlign.Center)
+      .width('100%').alignItems(HorizontalAlign.Start)
     }
     .width('100%').padding(12).borderRadius(12)
     .backgroundColor($r('app.color.native_chat_surface'))
