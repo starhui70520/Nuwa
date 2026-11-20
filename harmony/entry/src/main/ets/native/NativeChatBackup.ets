@@ -69,6 +69,7 @@ interface ArchiveFragment {
   site_name?: string | null;
   published_at?: string | null;
   pattern?: string;
+  nuwa_harmony_responses_before?: number;
 }
 
 interface ArchiveSearchResult {
@@ -346,10 +347,7 @@ function importedReadLinks(message: ArchiveMessage, textLength: number): NativeR
 }
 
 function importedPrefillBlocks(message: ArchiveMessage, refused: boolean): NativePrefillBlock[] | undefined {
-  if (refused || message.fragments.some((fragment: ArchiveFragment): boolean =>
-    fragment.type === 'TEMPLATE_RESPONSE')) {
-    return undefined;
-  }
+  if (refused) return undefined;
   const blocks: NativePrefillBlock[] = [];
   for (const fragment of message.fragments) {
     if (fragment.type === 'RESPONSE' && typeof fragment.content === 'string') {
@@ -606,6 +604,19 @@ function archivePayloadDigest(origin: ArchiveOrigin): string {
   return base64.encodeToStringSync(digest.digestSync().data);
 }
 
+function retainedArchiveFragments(fragments: ArchiveFragment[]): ArchiveFragment[] {
+  const retained: ArchiveFragment[] = [];
+  let responses = 0;
+  for (const fragment of fragments) {
+    if (fragment.type === 'RESPONSE') responses++;
+    else if (fragment.type === 'FILE') retained.push(fragment);
+    else if (fragment.type === 'TEMPLATE_RESPONSE') {
+      retained.push({ type: 'TEMPLATE_RESPONSE', content: fragment.content, nuwa_harmony_responses_before: responses });
+    }
+  }
+  return retained;
+}
+
 async function retainArchiveOrigin(prepared: PreparedSession, context: common.UIAbilityContext,
   staged: string[]): Promise<string> {
   const origin = prepared.origin;
@@ -629,8 +640,7 @@ async function retainArchiveOrigin(prepared: PreparedSession, context: common.UI
         id: message.id, parent_id: message.parent_id, role: message.role, status: message.status,
         thinking_enabled: message.thinking_enabled, search_enabled: message.search_enabled,
         accumulated_token_usage: message.accumulated_token_usage, inserted_at: message.inserted_at,
-        fragments: message.fragments.filter((fragment: ArchiveFragment): boolean =>
-          fragment.type === 'FILE' || fragment.type === 'TEMPLATE_RESPONSE'),
+        fragments: retainedArchiveFragments(message.fragments),
       };
     }),
   };
@@ -1256,8 +1266,47 @@ function pathHash(seed: string, text: string): string {
   return (first >>> 0).toString(16).padStart(8, '0') + (second >>> 0).toString(16).padStart(8, '0');
 }
 
+function compactArchiveTextBlocks(archived: ArchiveMessage, responses: string[]): string[] {
+  const blocks: string[] = [];
+  let index = 0;
+  for (const fragment of archived.fragments) {
+    if (fragment.type !== 'TEMPLATE_RESPONSE') continue;
+    // Older compact records keep templates but do not have their positions.
+    const before = Math.min(fragment.nuwa_harmony_responses_before ?? responses.length, responses.length);
+    while (index < before) blocks.push(responses[index++]);
+    blocks.push(fragment.content ?? '');
+  }
+  while (index < responses.length) blocks.push(responses[index++]);
+  return blocks;
+}
+
+function assistantArchiveSignature(row: NativeConversationMessage, compact: boolean, archived?: ArchiveMessage): string {
+  const responses = row.prefillBlocks?.filter((block: NativePrefillBlock): boolean =>
+    block.type === 'text').map((block: NativePrefillBlock): string => block.text);
+  if (archived) {
+    if (row.content === '' && (row.stopReason === 'refusal' || archived.status === 'CONTENT_FILTER')) {
+      return archived.fragments.filter((fragment: ArchiveFragment): boolean => fragment.type === 'TEMPLATE_RESPONSE')
+        .map((fragment: ArchiveFragment): string => fragment.content ?? '').join('\n');
+    }
+    if (compact && responses && responses.join('') === row.content) {
+      return compactArchiveTextBlocks(archived, responses).join('\n');
+    }
+    if (!compact && textFragments(archived, 'RESPONSE') === row.content) {
+      return archived.fragments.filter((fragment: ArchiveFragment): boolean =>
+        fragment.type === 'RESPONSE' || fragment.type === 'TEMPLATE_RESPONSE')
+        .map((fragment: ArchiveFragment): string => fragment.content ?? '').join('\n');
+    }
+  }
+  // Legacy snapshots retain one flat block when the original boundaries are unavailable.
+  return responses?.join('\n') ?? row.content;
+}
+
 function messagePaths(session: NativeConversation): Set<string> {
   const source = original(session);
+  const archivedMessages = new Map<string, ArchiveMessage>();
+  for (const message of source?.session.messages ?? []) {
+    archivedMessages.set(message.id.toString(), message);
+  }
   const signatures = new Map<string, string>();
   if (source) {
     for (const row of source.session.messages) {
@@ -1282,7 +1331,8 @@ function messagePaths(session: NativeConversation): Set<string> {
     const seed = row.parentId === null ? '' : (parents.get(row.parentId) ?? '');
     const files = row.files?.map((item: NativeAttachment): string => item.name + ':' + item.size.toString()).join(',') ??
       signatures.get(row.id) ?? '';
-    const key = row.role === 'user' ? 'U:' + row.content + '|' + files : 'A:' + row.content;
+    const key = row.role === 'user' ? 'U:' + row.content + '|' + files :
+      'A:' + assistantArchiveSignature(row, !!source?.source, archivedMessages.get(row.id));
     const digest = pathHash(seed, key);
     parents.set(row.id, digest);
     paths.add(digest);

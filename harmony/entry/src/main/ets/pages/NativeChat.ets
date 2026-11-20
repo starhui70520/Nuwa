@@ -116,6 +116,13 @@ interface NativeDraft {
   files: NativeDraftAttachment[];
 }
 
+interface NativeSidebarScrollPosition {
+  query: string;
+  offset: number;
+  sessionId: string;
+  rowIndex: number;
+}
+
 const EMPTY_TIMELINE: NativeToolTimelineView = { steps: [], answer: '', answerOffset: 0 };
 const MIGRATION_PREFERENCES = 'nuwa_native_migration';
 const MIGRATION_USED_KEY = 'one_click_used';
@@ -318,8 +325,11 @@ struct NativeChat {
   private migrationUsed: boolean = false;
   private coldMigrationChecked: boolean = false;
   private readonly scroller = new Scroller();
-  private readonly sidebarScroller = new Scroller();
+  private readonly sidebarScroller = new ListScroller();
   private readonly sidebarSearch = new NativeSidebarSearch();
+  private sidebarDrawerReady: boolean = false;
+  private sidebarDrawerFirst?: VisibleListContentInfo;
+  private sidebarDrawerPosition?: NativeSidebarScrollPosition;
   private sidebarSessions?: NativeConversation[];
   private sidebarGroups: NativeConversationGroup[] = [];
   private filteredSidebarGroups: NativeConversationGroup[] = [];
@@ -1333,7 +1343,8 @@ struct NativeChat {
       this.titleTap = 0;
       this.status = '';
       this.scrollToLatest();
-      void this.save();
+      // Switching chats only changes the index. Ongoing replies still need checkpoints.
+      void this.save(this.host(), true);
     }
     this.setDrawer(false);
     if (id && this.session(id)?.unreadable) void this.retryConversation(id);
@@ -1345,6 +1356,7 @@ struct NativeChat {
       this.refreshSidebarHistory();
       void this.refreshBalance();
     } else if (!this.wide()) {
+      this.rememberSidebarDrawerPosition();
       this.finishSidebarRename(this.renamingId, this.renameText);
       this.resetSelection();
       this.resetSidebarWindow();
@@ -1353,6 +1365,39 @@ struct NativeChat {
       this.drawerOpen = open;
       this.drawerDrag = 0;
     });
+  }
+
+  private rememberSidebarDrawerPosition(): void {
+    if (!this.sidebarDrawerReady || !this.drawerOpen || this.drawerProgress() <= 0 || this.wide()) return;
+    const offset = this.sidebarScroller.currentOffset()?.yOffset;
+    if (offset === undefined || !Number.isFinite(offset)) return;
+    const first = this.sidebarDrawerFirst;
+    let index = first ? visibleSidebarRowIndex(this.sidebarSections, first.index, first.itemIndexInGroup) : -1;
+    if (index >= 0 && !this.sidebarRows[index]?.session) index++;
+    this.sidebarDrawerPosition = {
+      query: this.sidebarQuery, offset: Math.max(0, offset),
+      sessionId: this.sidebarRows[index]?.session?.id ?? '', rowIndex: index,
+    };
+  }
+
+  private restoreSidebarDrawerPosition(): void {
+    const saved = this.sidebarDrawerPosition;
+    if (!saved || saved.query !== this.sidebarQuery || saved.offset <= 0 || !this.sidebarRows.length) return;
+    const index = saved.sessionId ? this.sidebarRows.findIndex((row: NativeSidebarRow): boolean =>
+      row.session?.id === saved.sessionId) : -1;
+    if (index >= 0 && index !== saved.rowIndex) {
+      const group = this.sidebarSections.findIndex((section: NativeSidebarSection): boolean =>
+        section.key === this.sidebarRows[index].groupKey);
+      if (group >= 0) {
+        this.sidebarScroller.scrollToItemInGroup(group, index - this.sidebarSections[group].headerIndex - 1, false);
+        return;
+      }
+    }
+    if (index < 0 && saved.rowIndex >= this.sidebarRows.length) {
+      this.sidebarScroller.scrollEdge(Edge.Bottom);
+    } else {
+      this.sidebarScroller.scrollTo({ xOffset: 0, yOffset: saved.offset, animation: false });
+    }
   }
 
   private resetSelection(): void {
@@ -1367,6 +1412,7 @@ struct NativeChat {
 
   private refreshSidebarHistory(): void {
     this.sidebarSessions = this.history.sessions;
+    if (!this.sidebarSessions.length) this.sidebarDrawerPosition = undefined;
     this.sidebarGroups = groupConversations(this.history.sessions);
     this.refreshSidebarResults();
     this.scheduleSidebarSearch();
@@ -1390,6 +1436,8 @@ struct NativeChat {
     const query = normalizeSidebarQuery(value);
     if (query === this.sidebarQuery) return;
     this.sidebarQuery = query;
+    this.sidebarDrawerPosition = undefined;
+    this.sidebarDrawerFirst = undefined;
     this.sidebarMatches = new Set<string>();
     this.sidebarLimit = SIDEBAR_HISTORY_PAGE_SIZE;
     this.refreshSidebarResults();
@@ -4869,7 +4917,23 @@ struct NativeChat {
       }
       .layoutWeight(1).width('100%').padding({ top: 8 }).scrollBar(BarState.Off)
       .sticky(StickyStyle.Header)
-      .onScrollVisibleContentChange((_first: VisibleListContentInfo, last: VisibleListContentInfo) => {
+      .onAreaChange((_old: Area, area: Area) => {
+        if (!desktop && !this.sidebarDrawerReady && Number(area.height) > 0) {
+          this.sidebarDrawerReady = true;
+          this.restoreSidebarDrawerPosition();
+        }
+      })
+      .onDisAppear(() => {
+        if (!desktop) {
+          this.sidebarDrawerReady = false;
+          this.sidebarDrawerFirst = undefined;
+        }
+      })
+      .onScroll((offset: number) => {
+        if (!desktop && offset !== 0) this.rememberSidebarDrawerPosition();
+      })
+      .onScrollVisibleContentChange((first: VisibleListContentInfo, last: VisibleListContentInfo) => {
+        if (!desktop) this.sidebarDrawerFirst = first;
         this.maybeLoadSidebarPage(visibleSidebarRowIndex(this.sidebarSections, last.index, last.itemIndexInGroup));
       })
       if (this.selecting) {
