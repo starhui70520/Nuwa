@@ -247,17 +247,17 @@ struct ChatComposerView: View {
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            HStack(spacing: 4) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 12.5, weight: .semibold))
-                Text(title)
-                    .font(.system(size: 13, weight: .medium))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-            }
-            .foregroundStyle(selected ? Color.nuwaBrandText : Color.nuwaLabelPrimary)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 6.5)
+                    HStack(spacing: 5) {
+                        Image(systemName: systemImage)
+                            .font(.system(size: 13.5, weight: .semibold))
+                        Text(title)
+                            .font(NuwaFont.pill)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
+                    }
+                    .foregroundStyle(selected ? Color.nuwaBrandText : Color.nuwaLabelPrimary)
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 6.5)
             .nuwaPillSurface(selected: selected)
             .frame(minHeight: 34)
             .contentShape(Rectangle())

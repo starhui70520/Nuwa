@@ -28,7 +28,7 @@ struct ReplyProcessView: View {
                             .rotationEffect(.degrees(expanded ? 90 : 0))
                             .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: expanded)
                     }
-                    .font(.system(size: fontSize))
+                    .font(.system(size: max(14, fontSize - 1), weight: .medium))
                     .frame(minHeight: 34)
                     .contentShape(Rectangle())
                 }
@@ -76,14 +76,14 @@ struct ReplyProcessView: View {
             HStack(alignment: .top, spacing: 6) {
                 Circle().fill(active ? Color.nuwaBrandText : .nuwaLabelTertiary)
                     .frame(width: 5, height: 5).frame(width: 16, height: 21)
-                MarkdownMessageView(text: text, fontSize: max(12, fontSize - 2), isStreaming: active, onCopyCode: onCopyCode)
+                MarkdownMessageView(text: text, fontSize: max(13.5, fontSize - 1.5), isStreaming: active, onCopyCode: onCopyCode)
                     .equatable()
             }
             .padding(.vertical, 4)
         case .search(let search):
-            SearchStepRow(search: search, stopped: reply.stopped, locale: locale, showResults: showResults)
+            SearchStepRow(search: search, stopped: reply.stopped, fontSize: max(13.5, fontSize - 1.5), locale: locale, showResults: showResults)
         case .pages(let action, let pages):
-            PageStepRow(action: action, pages: pages, locale: locale, showResults: showResults)
+            PageStepRow(action: action, pages: pages, fontSize: max(13.5, fontSize - 1.5), locale: locale, showResults: showResults)
         }
     }
 }
@@ -115,6 +115,7 @@ private struct ActivityText: View {
 private struct SearchStepRow: View {
     let search: ReplyPresentation.Search
     let stopped: Bool
+    let fontSize: Double
     let locale: AppLocale
     let showResults: ([WebSearchResultItem]) -> Void
 
@@ -145,7 +146,7 @@ private struct SearchStepRow: View {
                 .buttonStyle(.plain)
             }
         }
-        .font(.subheadline)
+        .font(.system(size: fontSize))
         .foregroundStyle(Color.nuwaLabelSecondary)
         .frame(minHeight: 34)
     }
@@ -185,6 +186,7 @@ private struct ActiveSearchQuery: View {
 private struct PageStepRow: View {
     let action: ReplyPresentation.PageAction
     let pages: [ReplyPresentation.Page]
+    let fontSize: Double
     let locale: AppLocale
     let showResults: ([WebSearchResultItem]) -> Void
 
@@ -226,7 +228,7 @@ private struct PageStepRow: View {
                 }
             }
         }
-        .font(.subheadline)
+        .font(.system(size: fontSize))
         .foregroundStyle(Color.nuwaLabelSecondary)
         .padding(.vertical, 5)
     }

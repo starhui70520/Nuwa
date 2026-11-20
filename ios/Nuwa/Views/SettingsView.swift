@@ -678,10 +678,10 @@ struct SettingsView: View {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("自动备份到 iCloud")
-                        .font(.system(size: 15, weight: .medium))
+                        .font(NuwaFont.rowTitleMedium)
                         .foregroundStyle(Color.nuwaLabelPrimary)
                     Text("开启后每次进入应用自动将最新 ZIP 快照写入 iCloud Drive")
-                        .font(.system(size: 12))
+                        .font(NuwaFont.caption)
                         .foregroundStyle(Color.nuwaLabelTertiary)
                 }
                 Spacer(minLength: 8)
@@ -725,7 +725,7 @@ struct SettingsView: View {
             VStack(spacing: 0) {
                 HStack {
                     Text("国家 / 地区")
-                        .font(.system(size: 15))
+                        .font(NuwaFont.rowTitle)
                         .foregroundStyle(Color.nuwaLabelPrimary)
                     Spacer()
                     Picker("国家/地区", selection: Binding(
@@ -755,7 +755,7 @@ struct SettingsView: View {
                     rowDivider
                     HStack {
                         Text("省份 / 直辖市")
-                            .font(.system(size: 15))
+                            .font(NuwaFont.rowTitle)
                             .foregroundStyle(Color.nuwaLabelPrimary)
                         Spacer()
                         Picker("省份", selection: Binding(
@@ -780,7 +780,7 @@ struct SettingsView: View {
                         rowDivider
                         HStack {
                             Text("城市")
-                                .font(.system(size: 15))
+                                .font(NuwaFont.rowTitle)
                                 .foregroundStyle(Color.nuwaLabelPrimary)
                             Spacer()
                             Picker("城市", selection: Binding(
@@ -803,7 +803,7 @@ struct SettingsView: View {
             }
         }
         Text("位置信息仅在联网搜索与本地上下文提醒时随本轮请求发送，用于提供更准确的本地天气与资讯。")
-            .font(.system(size: 12))
+            .font(NuwaFont.caption)
             .foregroundStyle(Color.nuwaLabelTertiary)
             .padding(.horizontal, 12)
             .padding(.top, 8)
@@ -866,7 +866,7 @@ struct SettingsView: View {
 
     private func groupTitle(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 13))
+            .font(NuwaFont.sectionHeader)
             .foregroundStyle(Color.nuwaLabelTertiary)
             .padding(.horizontal, 12)
             .padding(.top, 14)
@@ -900,12 +900,12 @@ struct SettingsView: View {
                     .foregroundStyle(Color.nuwaLabelSecondary)
                     .frame(width: 22)
                 Text(label)
-                    .font(.system(size: 15))
+                    .font(NuwaFont.rowTitle)
                     .foregroundStyle(Color.nuwaLabelPrimary)
                 Spacer(minLength: 8)
                 if let value {
                     Text(value)
-                        .font(.system(size: 14, weight: valueAccent ? .medium : .regular))
+                        .font(valueAccent ? NuwaFont.controlMedium : NuwaFont.control)
                         .foregroundStyle(valueDanger ? .red : (valueAccent ? Color.nuwaBrandText : Color.nuwaLabelTertiary))
                         .lineLimit(1)
                 }
@@ -914,7 +914,7 @@ struct SettingsView: View {
                     .foregroundStyle(Color.nuwaLabelTertiary.opacity(0.7))
             }
             .padding(.horizontal, 16)
-            .frame(minHeight: 50)
+            .frame(minHeight: 52)
             .contentShape(Rectangle())
         }
         .buttonStyle(NuwaTactileButtonStyle(pressedScale: 0.99))
@@ -927,14 +927,14 @@ struct SettingsView: View {
                 .foregroundStyle(Color.nuwaLabelSecondary)
                 .frame(width: 22)
             Text(label)
-                .font(.system(size: 15))
+                .font(NuwaFont.rowTitle)
                 .foregroundStyle(Color.nuwaLabelPrimary)
             Spacer()
             control()
                 .tint(Color.nuwaLabelSecondary)
         }
         .padding(.horizontal, 16)
-        .frame(minHeight: 50)
+        .frame(minHeight: 52)
     }
 
     private func actionCell(
@@ -948,16 +948,16 @@ struct SettingsView: View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
-                    .font(.system(size: 15, weight: .medium))
+                    .font(NuwaFont.rowTitleMedium)
                     .foregroundStyle(Color.nuwaLabelPrimary)
                 Text(subtitle)
-                    .font(.system(size: 12))
+                    .font(NuwaFont.caption)
                     .foregroundStyle(Color.nuwaLabelTertiary)
             }
             Spacer(minLength: 8)
             Button(action: action) {
                 Text(buttonTitle)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(NuwaFont.pill)
                     .foregroundStyle(primary ? .white : (destructive ? .red : Color.nuwaLabelPrimary))
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)

@@ -22,24 +22,32 @@ extension Color {
     })
 
     static let nuwaChatBackground = Color(UIColor { trait in
-        trait.userInterfaceStyle == .dark ? UIColor(white: 17 / 255, alpha: 1) : .white
+        trait.userInterfaceStyle == .dark
+            ? UIColor(red: 23 / 255, green: 23 / 255, blue: 26 / 255, alpha: 1)     // slightly elevated card surface over obsidian sidebar
+            : .white
     })
 
     static let nuwaSidebarFill = Color(UIColor { trait in
         trait.userInterfaceStyle == .dark
-            ? UIColor(red: 27 / 255, green: 27 / 255, blue: 28 / 255, alpha: 1)     // --dsw-static-neutral-bluish-900
-            : UIColor(red: 249 / 255, green: 250 / 255, blue: 251 / 255, alpha: 1)  // --dsw-static-neutral-bluish-50
+            ? UIColor(red: 15 / 255, green: 15 / 255, blue: 17 / 255, alpha: 1)     // deep obsidian matching Android 0.1.31 dark drawer
+            : UIColor(red: 248 / 255, green: 249 / 255, blue: 251 / 255, alpha: 1)  // --dsw-static-neutral-bluish-50
     })
 
     static let nuwaSidebarActive = Color(UIColor { trait in
         trait.userInterfaceStyle == .dark
-            ? UIColor(red: 53 / 255, green: 54 / 255, blue: 56 / 255, alpha: 1)     // --dsw-static-neutral-bluish-800
+            ? UIColor(red: 40 / 255, green: 49 / 255, blue: 68 / 255, alpha: 1)     // --dsw-static-blue-900 active navy pill
             : UIColor(red: 228 / 255, green: 237 / 255, blue: 253 / 255, alpha: 1)  // --dsw-static-blue-100
+    })
+
+    static let nuwaSidebarSearchFill = Color(UIColor { trait in
+        trait.userInterfaceStyle == .dark
+            ? UIColor(white: 1.0, alpha: 0.08)
+            : UIColor.white
     })
 
     static let nuwaDrawerCardFill = Color(UIColor { trait in
         trait.userInterfaceStyle == .dark
-            ? UIColor(red: 39 / 255, green: 40 / 255, blue: 43 / 255, alpha: 1)
+            ? UIColor(red: 36 / 255, green: 37 / 255, blue: 40 / 255, alpha: 1)
             : UIColor(red: 255 / 255, green: 255 / 255, blue: 255 / 255, alpha: 1)
     })
 
@@ -108,6 +116,23 @@ extension Color {
             ? UIColor(red: 43 / 255, green: 45 / 255, blue: 53 / 255, alpha: 1)
             : UIColor(red: 234 / 255, green: 239 / 255, blue: 246 / 255, alpha: 1)
     })
+}
+
+/// Unified global typography scale matching Nuwa Android 0.1.31 mobile proportions and iOS readability.
+enum NuwaFont {
+    static let navTitle = Font.system(size: 17, weight: .semibold)
+    static let body = Font.system(size: 16, weight: .regular)
+    static let bodyMedium = Font.system(size: 16, weight: .medium)
+    static let rowTitle = Font.system(size: 16, weight: .regular)
+    static let rowTitleMedium = Font.system(size: 16, weight: .medium)
+    static let control = Font.system(size: 15, weight: .regular)
+    static let controlMedium = Font.system(size: 15, weight: .medium)
+    static let pill = Font.system(size: 14, weight: .medium)
+    static let sublabel = Font.system(size: 14, weight: .regular)
+    static let sectionHeader = Font.system(size: 13, weight: .medium)
+    static let caption = Font.system(size: 13, weight: .regular)
+    static let captionMedium = Font.system(size: 13, weight: .medium)
+    static let badge = Font.system(size: 12, weight: .medium)
 }
 
 /// Crisp, zero-latency tactile press button style that never conflicts with Liquid Glass or ScrollViews.

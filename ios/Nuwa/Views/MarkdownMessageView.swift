@@ -61,27 +61,139 @@ private enum MarkdownParseCache {
         return cache
     }()
 
-    static func parse(_ rawInput: String, isStreaming: Bool) -> [MarkdownBlock] {
-        if isStreaming { return parseBlocks(cleanCitationTags(rawInput), cacheInline: false) }
-        let key = rawInput as NSString
+    static func parse(_ rawInput: String, isStreaming: Bool, darkMode: Bool) -> [MarkdownBlock] {
+        if isStreaming { return parseBlocks(cleanCitationTags(rawInput), cacheInline: false, darkMode: darkMode) }
+        let key = "\(darkMode ? "D" : "L"):\(rawInput)" as NSString
         if let hit = cache.object(forKey: key) {
             return hit.blocks
         }
         let cleaned = cleanCitationTags(rawInput)
-        let parsed = parseBlocks(cleaned, cacheInline: true)
+        let parsed = parseBlocks(cleaned, cacheInline: true, darkMode: darkMode)
         cache.setObject(CachedMarkdownBlocks(parsed), forKey: key, cost: key.length * 4)
         return parsed
     }
 
-    static func inlineAttributed(_ raw: String, cacheable: Bool = true) -> AttributedString {
-        let key = raw as NSString
+    static func inlineAttributed(_ raw: String, cacheable: Bool = true, darkMode: Bool = false) -> AttributedString {
+        let key = "\(darkMode ? "D" : "L"):\(raw)" as NSString
         if let cached = inlineCache.object(forKey: key) { return cached.value }
-        let parsed = (try? AttributedString(markdown: raw, options: inlineOptions)) ?? AttributedString(raw)
-        let styled = styleInlineCodeRuns(parsed)
+
+        let styled: AttributedString
+        if raw.contains("\\(") || raw.contains("$") {
+            styled = parseInlineWithLatex(raw, darkMode: darkMode)
+        } else {
+            let parsed = (try? AttributedString(markdown: raw, options: inlineOptions)) ?? AttributedString(raw)
+            styled = styleInlineCodeRuns(parsed)
+        }
+
         if cacheable {
             inlineCache.setObject(CachedInlineMarkdown(styled), forKey: key, cost: key.length * 4)
         }
         return styled
+    }
+
+    /// Splits inline `$...$` and `\(...\)` math spans out of Markdown text (never touching backtick code spans
+    /// or plain currency like `$100`), rendering math via `LatexParser.inlineAttributed` and normal text via Markdown.
+    private static func parseInlineWithLatex(_ raw: String, darkMode: Bool) -> AttributedString {
+        let chars = Array(raw)
+        var result = AttributedString()
+        var mdBuf = ""
+        var i = 0
+        var inCodeTicks = 0
+
+        func flushMarkdown() {
+            guard !mdBuf.isEmpty else { return }
+            let parsed = (try? AttributedString(markdown: mdBuf, options: inlineOptions)) ?? AttributedString(mdBuf)
+            result.append(styleInlineCodeRuns(parsed))
+            mdBuf.removeAll(keepingCapacity: true)
+        }
+
+        while i < chars.count {
+            let c = chars[i]
+
+            // Preserve inline code spans verbatim so `$var` or `\(` inside backticks is untouched
+            if c == "`" {
+                var ticks = 0
+                while i + ticks < chars.count && chars[i + ticks] == "`" { ticks += 1 }
+                if inCodeTicks == 0 {
+                    inCodeTicks = ticks
+                } else if inCodeTicks == ticks {
+                    inCodeTicks = 0
+                }
+                for _ in 0..<ticks { mdBuf.append("`") }
+                i += ticks
+                continue
+            }
+
+            if inCodeTicks > 0 {
+                mdBuf.append(c)
+                i += 1
+                continue
+            }
+
+            // Inline \( ... \)
+            if c == "\\" && i + 1 < chars.count && chars[i + 1] == "(" {
+                if let closeIdx = findClosingParenMath(in: chars, from: i + 2) {
+                    let formula = String(chars[(i + 2)..<closeIdx])
+                    flushMarkdown()
+                    result.append(LatexParser.inlineAttributed(from: formula, darkMode: darkMode))
+                    i = closeIdx + 2
+                    continue
+                }
+            }
+
+            // Inline $ ... $ (skip escaped \$ and currency like "$100" without closing "$")
+            if c == "$" && (i == 0 || chars[i - 1] != "\\") && !(i + 1 < chars.count && chars[i + 1] == "$") {
+                if let closeIdx = findClosingDollarMath(in: chars, from: i + 1) {
+                    let formula = String(chars[(i + 1)..<closeIdx])
+                    flushMarkdown()
+                    result.append(LatexParser.inlineAttributed(from: formula, darkMode: darkMode))
+                    i = closeIdx + 1
+                    continue
+                }
+            }
+
+            mdBuf.append(c)
+            i += 1
+        }
+
+        flushMarkdown()
+        return result
+    }
+
+    private static func findClosingParenMath(in chars: [Character], from start: Int) -> Int? {
+        var j = start
+        while j + 1 < chars.count {
+            if chars[j] == "\\" && chars[j + 1] == ")" {
+                return j > start ? j : nil
+            }
+            j += 1
+        }
+        return nil
+    }
+
+    private static func findClosingDollarMath(in chars: [Character], from start: Int) -> Int? {
+        guard start < chars.count, chars[start] != " " && chars[start] != "\t" && chars[start] != "\n" else {
+            return nil
+        }
+        var j = start
+        while j < chars.count {
+            if chars[j] == "\n" { return nil }
+            if chars[j] == "\\" {
+                j += 2
+                continue
+            }
+            if chars[j] == "$" {
+                if j > start && chars[j - 1] != " " && chars[j - 1] != "\t" {
+                    // Reject pure digit currency pairs like "$10 and $20"
+                    let inner = String(chars[start..<j])
+                    let looksLikeCurrency = inner.first?.isNumber == true && inner.contains(" ") && !inner.contains("\\") && !inner.contains("^") && !inner.contains("_") && !inner.contains("=")
+                    return looksLikeCurrency ? nil : j
+                }
+                return nil
+            }
+            j += 1
+        }
+        return nil
     }
 
     /// Styles inline `code` runs as distinct rounded-feeling highlight pills (matching theme.css inline-code bubble).
@@ -165,7 +277,20 @@ private enum MarkdownParseCache {
         return trimmed.dropFirst(run.count).trimmingCharacters(in: .whitespaces).isEmpty
     }
 
-    private static func parseBlocks(_ input: String, cacheInline: Bool) -> [MarkdownBlock] {
+    private static let blockLatexEnvs = [
+        "array", "aligned", "align", "align*", "gathered", "gather", "gather*",
+        "cases", "dcases", "matrix", "pmatrix", "bmatrix", "Bmatrix", "vmatrix", "Vmatrix", "tabular"
+    ]
+
+    private static func matchOpeningBareEnv(_ trimmed: String) -> String? {
+        guard trimmed.hasPrefix("\\begin{") else { return nil }
+        let after = trimmed.dropFirst(7)
+        guard let closeBrace = after.firstIndex(of: "}") else { return nil }
+        let env = String(after[..<closeBrace])
+        return blockLatexEnvs.contains(env) ? env : nil
+    }
+
+    private static func parseBlocks(_ input: String, cacheInline: Bool, darkMode: Bool) -> [MarkdownBlock] {
         var result: [MarkdownBlock] = []
         let normalized = input
             .replacingOccurrences(of: "\r\n", with: "\n")
@@ -178,7 +303,7 @@ private enum MarkdownParseCache {
         func flushParagraph() {
             let joined = paraBuf.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
             if !joined.isEmpty {
-                result.append(.paragraph(id: nextId, attributed: inlineAttributed(joined, cacheable: cacheInline)))
+                result.append(.paragraph(id: nextId, attributed: inlineAttributed(joined, cacheable: cacheInline, darkMode: darkMode)))
                 nextId += 1
             }
             paraBuf.removeAll(keepingCapacity: true)
@@ -242,30 +367,79 @@ private enum MarkdownParseCache {
                 }
             }
 
-            // 3. Display math block $$...$$ or \[...\]
-            if trimmed == "$$" || trimmed == "\\[" {
-                flushParagraph()
-                let closer = trimmed == "$$" ? "$$" : "\\]"
-                var mathLines: [String] = []
-                idx += 1
-                while idx < lines.count {
-                    if lines[idx].trimmingCharacters(in: .whitespaces) == closer {
+            // 3. LaTeX / KaTeX block: $$...$$, \[...\], multi-line or standalone \(...\), or bare \begin{array}...\end{array}
+            if trimmed.hasPrefix("$$") || trimmed.hasPrefix("\\[") || trimmed.hasPrefix("\\(") {
+                let opener = String(trimmed.prefix(2))
+                let closer: String = opener == "$$" ? "$$" : (opener == "\\[" ? "\\]" : "\\)")
+                let afterOpen = String(trimmed.dropFirst(2))
+
+                // Case A: Single-line standalone math block (e.g. $$...$$, \[...\], or standalone \(...\))
+                if afterOpen.hasSuffix(closer) && afterOpen.count >= closer.count {
+                    let inner = String(afterOpen.dropLast(closer.count)).trimmingCharacters(in: .whitespaces)
+                    if !inner.isEmpty {
+                        flushParagraph()
+                        result.append(.math(id: nextId, formula: inner))
+                        nextId += 1
                         idx += 1
-                        break
+                        continue
                     }
-                    mathLines.append(lines[idx])
+                }
+
+                // Case B: Multi-line math block (e.g. \(\begin{array}{c} ... \end{array}\), $$ ... $$, \[ ... \])
+                // Only treat `\(` as a block if it does NOT close on the same line (otherwise paragraph handles inline math + prose).
+                let closesMidLine = afterOpen.contains(closer)
+                if !closesMidLine {
+                    flushParagraph()
+                    var mathLines: [String] = []
+                    if !afterOpen.trimmingCharacters(in: .whitespaces).isEmpty {
+                        mathLines.append(afterOpen)
+                    }
                     idx += 1
+                    while idx < lines.count {
+                        let curLine = lines[idx]
+                        let curTrimmed = curLine.trimmingCharacters(in: .whitespaces)
+                        if curTrimmed == closer {
+                            idx += 1
+                            break
+                        }
+                        if curTrimmed.hasSuffix(closer) {
+                            let withoutCloser = String(curTrimmed.dropLast(closer.count))
+                            if !withoutCloser.isEmpty {
+                                mathLines.append(withoutCloser)
+                            }
+                            idx += 1
+                            break
+                        }
+                        mathLines.append(curLine)
+                        idx += 1
+                    }
+                    let formula = mathLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !formula.isEmpty {
+                        result.append(.math(id: nextId, formula: formula))
+                        nextId += 1
+                    }
+                    continue
+                }
+            }
+
+            // 3b. Bare LaTeX environment without outer delimiters (e.g. \begin{array}{c} ... \end{array})
+            if let envName = matchOpeningBareEnv(trimmed) {
+                flushParagraph()
+                let endToken = "\\end{\(envName)}"
+                var mathLines: [String] = [line]
+                idx += 1
+                if !trimmed.contains(endToken) {
+                    while idx < lines.count {
+                        let curLine = lines[idx]
+                        mathLines.append(curLine)
+                        idx += 1
+                        if curLine.contains(endToken) {
+                            break
+                        }
+                    }
                 }
                 result.append(.math(id: nextId, formula: mathLines.joined(separator: "\n")))
                 nextId += 1
-                continue
-            }
-            if trimmed.hasPrefix("$$") && trimmed.hasSuffix("$$") && trimmed.count > 4 {
-                flushParagraph()
-                let inner = String(trimmed.dropFirst(2).dropLast(2)).trimmingCharacters(in: .whitespaces)
-                result.append(.math(id: nextId, formula: inner))
-                nextId += 1
-                idx += 1
                 continue
             }
 
@@ -306,7 +480,7 @@ private enum MarkdownParseCache {
                 if (1...4).contains(level), trimmed.dropFirst(level).hasPrefix(" ") {
                     flushParagraph()
                     let content = String(trimmed.dropFirst(level + 1)).trimmingCharacters(in: .whitespaces)
-                    result.append(.heading(id: nextId, level: level, attributed: inlineAttributed(content, cacheable: cacheInline)))
+                    result.append(.heading(id: nextId, level: level, attributed: inlineAttributed(content, cacheable: cacheInline, darkMode: darkMode)))
                     nextId += 1
                     idx += 1
                     continue
@@ -328,7 +502,7 @@ private enum MarkdownParseCache {
                         break
                     }
                 }
-                result.append(.blockquote(id: nextId, attributed: inlineAttributed(quoteLines.joined(separator: "\n"), cacheable: cacheInline)))
+                result.append(.blockquote(id: nextId, attributed: inlineAttributed(quoteLines.joined(separator: "\n"), cacheable: cacheInline, darkMode: darkMode)))
                 nextId += 1
                 continue
             }
@@ -336,7 +510,7 @@ private enum MarkdownParseCache {
             if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("• ") {
                 flushParagraph()
                 let content = String(trimmed.dropFirst(2))
-                result.append(.listItem(id: nextId, marker: "•", attributed: inlineAttributed(content, cacheable: cacheInline)))
+                result.append(.listItem(id: nextId, marker: "•", attributed: inlineAttributed(content, cacheable: cacheInline, darkMode: darkMode)))
                 nextId += 1
                 idx += 1
                 continue
@@ -351,7 +525,7 @@ private enum MarkdownParseCache {
                 let marker = String(trimmed[...dotIdx])
                 let afterSpace = trimmed.index(dotIdx, offsetBy: 2)
                 let content = String(trimmed[afterSpace...])
-                result.append(.listItem(id: nextId, marker: marker, attributed: inlineAttributed(content, cacheable: cacheInline)))
+                result.append(.listItem(id: nextId, marker: marker, attributed: inlineAttributed(content, cacheable: cacheInline, darkMode: darkMode)))
                 nextId += 1
                 idx += 1
                 continue
@@ -444,6 +618,7 @@ struct MarkdownMessageView: View, Equatable {
     let onCopyCode: (String) -> Void
 
     @Environment(\.openURL) private var openURL
+    @Environment(\.colorScheme) private var colorScheme
 
     static func == (lhs: MarkdownMessageView, rhs: MarkdownMessageView) -> Bool {
         lhs.text == rhs.text && lhs.fontSize == rhs.fontSize && lhs.citations == rhs.citations
@@ -459,7 +634,8 @@ struct MarkdownMessageView: View, Equatable {
     }
 
     var body: some View {
-        let blocks = MarkdownParseCache.parse(text, isStreaming: isStreaming)
+        let darkMode = colorScheme == .dark
+        let blocks = MarkdownParseCache.parse(text, isStreaming: isStreaming, darkMode: darkMode)
         VStack(alignment: .leading, spacing: 8) {
             ForEach(blocks) { block in
                 switch block {
@@ -508,26 +684,13 @@ struct MarkdownMessageView: View, Equatable {
                     .padding(.vertical, 4)
 
                 case .code(_, let language, let code):
-                    CodeBlockView(language: language, code: code, isStreaming: isStreaming, onCopy: onCopyCode)
+                    CodeBlockView(language: language, code: code, fontSize: max(13, fontSize - 2.5), isStreaming: isStreaming, onCopy: onCopyCode)
 
                 case .math(_, let formula):
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        Text(formula)
-                            .font(.system(size: max(13, fontSize - 1), design: .serif).italic())
-                            .foregroundStyle(Color.nuwaLabelPrimary)
-                            .textSelection(.enabled)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 10)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .background(Color.nuwaCodeBlockFill, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .strokeBorder(Color.nuwaControlBorder, lineWidth: 0.75)
-                    )
+                    LatexRendererView(formula: formula, baseFontSize: fontSize, isStreaming: isStreaming)
 
                 case .table(_, let headers, let rows):
-                    MarkdownTableView(headers: headers, rows: rows, fontSize: max(13, fontSize - 1))
+                    MarkdownTableView(headers: headers, rows: rows, fontSize: max(14, fontSize - 1), darkMode: darkMode)
 
                 case .divider:
                     Divider()
@@ -586,13 +749,14 @@ private struct MarkdownTableView: View {
     let headers: [String]
     let rows: [[String]]
     let fontSize: Double
+    let darkMode: Bool
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
                 GridRow {
                     ForEach(Array(headers.enumerated()), id: \.offset) { _, h in
-                        Text(MarkdownParseCache.inlineAttributed(h))
+                        Text(MarkdownParseCache.inlineAttributed(h, darkMode: darkMode))
                             .font(.system(size: fontSize, weight: .semibold))
                             .foregroundStyle(Color.nuwaLabelPrimary)
                             .padding(.horizontal, 10)
@@ -607,7 +771,7 @@ private struct MarkdownTableView: View {
                     GridRow {
                         ForEach(0..<max(headers.count, row.count), id: \.self) { cIdx in
                             let val = cIdx < row.count ? row[cIdx] : ""
-                            Text(MarkdownParseCache.inlineAttributed(val))
+                            Text(MarkdownParseCache.inlineAttributed(val, darkMode: darkMode))
                                 .font(.system(size: fontSize))
                                 .foregroundStyle(Color.nuwaLabelPrimary)
                                 .padding(.horizontal, 10)
@@ -630,6 +794,7 @@ private struct MarkdownTableView: View {
 private struct CodeBlockView: View {
     let language: String
     let code: String
+    let fontSize: Double
     let isStreaming: Bool
     let onCopy: (String) -> Void
 
@@ -644,7 +809,7 @@ private struct CodeBlockView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text(language.isEmpty ? "code" : language.lowercased())
-                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .font(.system(size: 12.5, weight: .medium, design: .monospaced))
                     .foregroundStyle(Color.nuwaLabelSecondary)
                 Spacer()
                 Button {
@@ -657,9 +822,9 @@ private struct CodeBlockView: View {
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                            .font(.system(size: 11, weight: .medium))
+                            .font(.system(size: 11.5, weight: .medium))
                         Text(copied ? "已复制" : "复制")
-                            .font(.system(size: 12, weight: .medium))
+                            .font(.system(size: 12.5, weight: .medium))
                     }
                     .foregroundStyle(copied ? .green : Color.nuwaLabelSecondary)
                     .padding(.horizontal, 6)
@@ -678,10 +843,10 @@ private struct CodeBlockView: View {
 
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(highlighted)
-                    .font(.system(size: 13, design: .monospaced))
+                    .font(.system(size: fontSize, design: .monospaced))
                     .foregroundStyle(Color.nuwaLabelPrimary)
                     .lineSpacing(3.5)
-                    .textSelection(.enabled)
+                    .modifier(ConditionalTextSelection(enabled: !isStreaming))
                     .fixedSize(horizontal: true, vertical: true)
                     .padding(12)
                     .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)

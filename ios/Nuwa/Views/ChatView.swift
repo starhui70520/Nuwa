@@ -64,6 +64,7 @@ struct ChatView: View {
                         compactOpen: $drawerOpen,
                         gestureEnabled: !settings.showMigrationPrompt && !showSettings &&
                             editingMessageId == nil && previewImage == nil,
+                        hapticEnabled: UIDevice.current.userInterfaceIdiom == .phone && settings.hapticFeedbackEnabled,
                         dismissKeyboard: dismissKeyboard
                     ) {
                         SessionDrawerView(
@@ -339,7 +340,7 @@ struct ChatView: View {
                         .tint(.white)
                         .controlSize(.small)
                     Text("正在导入并合并历史对话，请稍候...")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(NuwaFont.pill)
                         .foregroundStyle(.white)
                 }
                 .frame(maxWidth: .infinity)
@@ -400,7 +401,7 @@ struct ChatView: View {
 
     private func toastPill(_ toast: String) -> some View {
         Text(toast)
-            .font(.system(size: 13, weight: .medium))
+            .font(NuwaFont.pill)
             .foregroundStyle(Color.nuwaLabelPrimary)
             .padding(.horizontal, 16)
             .padding(.vertical, 9)
@@ -909,38 +910,48 @@ private struct ChatDrawerLayout<Sidebar: View, Surface: View>: View {
     let wideOpen: Bool
     @Binding var compactOpen: Bool
     let gestureEnabled: Bool
+    let hapticEnabled: Bool
     let dismissKeyboard: () -> Void
     @ViewBuilder let sidebar: Sidebar
     @ViewBuilder let surface: Surface
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
     @GestureState private var legacyTracking = false
     @State private var legacyRejectedDrag = false
     @State private var dragOffset: CGFloat?
 
+    private static let drawerImpact = UIImpactFeedbackGenerator(style: .light)
+
     private var spring: Animation? {
-        reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.90)
+        reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.88)
     }
 
     var body: some View {
-        if #available(iOS 18.0, *) {
-            layers.gesture(
-                ChatDrawerPan(
-                    enabled: !wide && gestureEnabled,
-                    canBegin: { canBeginDrag(at: $0, moving: $1) },
-                    onChange: updateDrag,
-                    onEnd: finishDrag,
-                    onCancel: cancelDrag
+        Group {
+            if #available(iOS 18.0, *) {
+                layers.gesture(
+                    ChatDrawerPan(
+                        enabled: !wide && gestureEnabled,
+                        canBegin: { canBeginDrag(at: $0, moving: $1) },
+                        onChange: updateDrag,
+                        onEnd: finishDrag,
+                        onCancel: cancelDrag
+                    )
                 )
-            )
-        } else {
-            layers
-                .simultaneousGesture(legacyPan, including: wide || !gestureEnabled ? .none : .all)
-                .onChange(of: legacyTracking) { _, active in
-                    guard !active else { return }
-                    legacyRejectedDrag = false
-                    cancelDrag()
-                }
+            } else {
+                layers
+                    .simultaneousGesture(legacyPan, including: wide || !gestureEnabled ? .none : .all)
+                    .onChange(of: legacyTracking) { _, active in
+                        guard !active else { return }
+                        legacyRejectedDrag = false
+                        cancelDrag()
+                    }
+            }
+        }
+        .onChange(of: compactOpen) { _, _ in
+            guard !wide, hapticEnabled else { return }
+            Self.drawerImpact.impactOccurred(intensity: 0.85)
         }
     }
 
@@ -949,21 +960,46 @@ private struct ChatDrawerLayout<Sidebar: View, Surface: View>: View {
         let inset = wide && open ? drawerWidth : 0
         let surfaceWidth = max(0, size.width - inset)
         let offset = wide ? inset : dragOffset ?? (compactOpen ? drawerWidth : 0)
+        let progress: CGFloat = wide ? 0 : (drawerWidth > 0 ? min(1, max(0, offset / drawerWidth)) : 0)
+        let cardScale: CGFloat = wide ? 1 : (1 - 0.045 * progress)
+        let cardClip = DrawerCardClipShape(progress: progress)
+        let anim = wide || dragOffset != nil ? nil : spring
 
         return ZStack(alignment: .leading) {
             if !wide || open {
                 sidebar
                     .frame(width: drawerWidth)
+                    .offset(x: wide ? 0 : (progress - 1) * 24)
+                    .opacity(wide ? 1 : (0.35 + 0.65 * progress))
                     .allowsHitTesting(open)
                     .accessibilityHidden(!open)
+                    .animation(anim, value: compactOpen)
             }
 
             surface
                 .frame(width: surfaceWidth, height: size.height)
                 .background(Color.nuwaChatBackground.ignoresSafeArea(.container, edges: .vertical))
+                .clipShape(cardClip)
+                .overlay {
+                    cardClip
+                        .stroke(
+                            colorScheme == .dark
+                                ? Color.white.opacity(0.08 * progress)
+                                : Color.black.opacity(0.06 * progress),
+                            lineWidth: progress > 0.01 ? 0.75 : 0
+                        )
+                        .allowsHitTesting(false)
+                }
+                .shadow(
+                    color: Color.black.opacity((colorScheme == .dark ? 0.45 : 0.10) * progress),
+                    radius: 24 * progress,
+                    x: -8 * progress,
+                    y: 0
+                )
+                .scaleEffect(cardScale, anchor: .leading)
                 .geometryGroup()
                 .position(x: offset + surfaceWidth / 2, y: size.height / 2)
-                .animation(wide || dragOffset != nil ? nil : spring, value: compactOpen)
+                .animation(anim, value: compactOpen)
         }
         .frame(width: size.width, height: size.height)
         .onChange(of: wide) { _, _ in dragOffset = nil }
@@ -980,6 +1016,9 @@ private struct ChatDrawerLayout<Sidebar: View, Surface: View>: View {
     }
 
     private func updateDrag(_ translation: CGFloat) {
+        if dragOffset == nil && hapticEnabled {
+            Self.drawerImpact.prepare()
+        }
         let start = compactOpen ? drawerWidth : 0
         var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
@@ -1158,7 +1197,7 @@ private struct ChatHeaderView: View {
             if hasMessages {
                 let displayTitle = sessionTitle.isEmpty ? L10n.t("untitledChat", locale: settings.locale) : sessionTitle
                 Text(displayTitle)
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(NuwaFont.navTitle)
                     .foregroundStyle(Color.nuwaLabelPrimary)
                     .lineLimit(1)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1326,5 +1365,28 @@ private struct MessageReadAloudButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(NuwaTactileButtonStyle())
+    }
+}
+
+/// Smoothly interpolates from full-bleed unclipped surface (`progress == 0`, preserving Dynamic Island & Home Bar
+/// scroll blur bleed) into a crisp 28pt rounded floating card (`progress == 1`, matching Android 0.1.31 pushed drawer).
+private struct DrawerCardClipShape: Shape {
+    var progress: CGFloat
+
+    var animatableData: CGFloat {
+        get { progress }
+        set { progress = newValue }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        let p = min(1, max(0, progress))
+        let bleed = (1 - p) * 120
+        let cardRect = CGRect(
+            x: rect.minX,
+            y: rect.minY - bleed,
+            width: rect.width,
+            height: rect.height + bleed * 2
+        )
+        return RoundedRectangle(cornerRadius: 28 * p, style: .continuous).path(in: cardRect)
     }
 }

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 private struct SessionGroup: Identifiable {
     let id: String
@@ -22,6 +23,7 @@ struct SessionDrawerView: View {
     let onClose: () -> Void
     let onOpenSettings: () -> Void
 
+    @Environment(\.openURL) private var openURL
     @State private var searchText = ""
     @State private var searchResult: (query: String, ids: Set<UUID>)?
     @State private var selectMode = false
@@ -30,6 +32,9 @@ struct SessionDrawerView: View {
     @State private var deletingSession: SessionSummaryItem?
     @State private var renamingSession: SessionSummaryItem?
     @State private var renameDraft = ""
+
+    private static let selectImpact = UIImpactFeedbackGenerator(style: .light)
+    private let topUpURL = URL(string: "https://platform.deepseek.com/top_up")!
 
     private var loc: AppLocale { settings.locale }
 
@@ -92,59 +97,66 @@ struct SessionDrawerView: View {
         return validSelectedIds.allSatisfy { byId[$0]?.isPinned == true }
     }
 
+    private func triggerLightHaptic() {
+        guard UIDevice.current.userInterfaceIdiom == .phone && settings.hapticFeedbackEnabled else { return }
+        Self.selectImpact.impactOccurred(intensity: 0.75)
+    }
+
     var body: some View {
         let groups = groupedSessions
         let searchInput = SearchInput(query: isOpen ? query : "", summaries: isOpen && !query.isEmpty ? listStore.summaries : [])
         VStack(spacing: 0) {
-            // Top Header: Select Mode header OR Search bar (clean uniform background, zero edge-tint artifact)
+            // Top Header: Multi-Select Header OR 44pt Search Pill (1:1 Android 0.1.31 mobile sider)
             if selectMode {
-                HStack {
+                HStack(spacing: 12) {
                     Text(loc == .enUS ? "\(validSelectedIds.count) selected" : "已选择 \(validSelectedIds.count) 个对话")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(NuwaFont.navTitle)
                         .foregroundStyle(Color.nuwaLabelPrimary)
                     Spacer()
                     Button {
                         exitSelectMode()
                     } label: {
                         Image(systemName: "xmark")
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(.system(size: 14, weight: .semibold))
                             .foregroundStyle(Color.nuwaLabelPrimary)
-                            .frame(width: 32, height: 32)
-                            .background(Color.nuwaControlFill, in: Circle())
+                            .frame(width: 36, height: 36)
+                            .background(Color.nuwaSidebarSearchFill, in: Circle())
+                            .overlay(Circle().strokeBorder(Color.nuwaControlBorder, lineWidth: 0.75))
                             .contentShape(Circle())
                     }
                     .buttonStyle(NuwaTactileButtonStyle())
                     .accessibilityLabel("退出多选")
                 }
-                .padding(.horizontal, 14)
-                .padding(.top, 12)
-                .padding(.bottom, 10)
+                .frame(minHeight: 44)
+                .padding(.horizontal, 16)
+                .padding(.top, 10)
+                .padding(.bottom, 12)
             } else {
-                HStack(spacing: 8) {
+                HStack(spacing: 10) {
                     Image(systemName: "magnifyingglass")
-                        .font(.system(size: 14, weight: .medium))
+                        .font(.system(size: 15.5, weight: .regular))
                         .foregroundStyle(Color.nuwaLabelTertiary)
                     TextField(L10n.t("searchPlaceholder", locale: loc), text: $searchText)
-                        .font(.system(size: 14))
+                        .font(NuwaFont.control)
                         .foregroundStyle(Color.nuwaLabelPrimary)
                     if !searchText.isEmpty {
                         Button {
                             searchText = ""
                         } label: {
                             Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 14))
+                                .font(.system(size: 15))
                                 .foregroundStyle(Color.nuwaLabelTertiary)
                         }
                         .buttonStyle(.plain)
                     }
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 9)
-                .background(Color.nuwaDrawerCardFill, in: Capsule())
-                .overlay(Capsule().strokeBorder(Color.nuwaControlBorder, lineWidth: 0.75))
                 .padding(.horizontal, 14)
-                .padding(.top, 12)
-                .padding(.bottom, 10)
+                .frame(height: 44)
+                .background(Color.nuwaSidebarSearchFill, in: Capsule())
+                .overlay(Capsule().strokeBorder(Color.nuwaControlBorder, lineWidth: 0.85))
+                .padding(.horizontal, 16)
+                .padding(.top, 10)
+                .padding(.bottom, 12)
             }
 
             // Session list / Empty state
@@ -152,10 +164,10 @@ struct SessionDrawerView: View {
                 VStack(spacing: 10) {
                     Spacer()
                     Text(L10n.t("emptyTitle", locale: loc))
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(NuwaFont.bodyMedium)
                         .foregroundStyle(Color.nuwaLabelPrimary)
                     Text(L10n.t("emptySubtitle", locale: loc))
-                        .font(.system(size: 13))
+                        .font(NuwaFont.sublabel)
                         .foregroundStyle(Color.nuwaLabelTertiary)
                         .multilineTextAlignment(.center)
                     Button {
@@ -163,17 +175,18 @@ struct SessionDrawerView: View {
                         onClose()
                     } label: {
                         Text(L10n.t("newChat", locale: loc))
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(Color.nuwaLabelPrimary)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 8)
-                            .nuwaPillSurface()
+                            .font(NuwaFont.pill)
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 20)
+                            .frame(height: 40)
+                            .background(Color.nuwaBrand, in: Capsule())
                             .contentShape(Capsule())
                     }
                     .buttonStyle(NuwaTactileButtonStyle())
-                    .padding(.top, 4)
+                    .padding(.top, 6)
                     Spacer()
                 }
+                .padding(.horizontal, 20)
                 .frame(maxWidth: .infinity)
             } else if groups.isEmpty {
                 VStack {
@@ -182,7 +195,7 @@ struct SessionDrawerView: View {
                         ProgressView().controlSize(.small)
                     } else {
                         Text(L10n.t("emptySearch", locale: loc))
-                            .font(.system(size: 13))
+                            .font(NuwaFont.sublabel)
                             .foregroundStyle(Color.nuwaLabelTertiary)
                     }
                     Spacer()
@@ -190,28 +203,43 @@ struct SessionDrawerView: View {
                 .frame(maxWidth: .infinity)
             } else {
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 3) {
-                        ForEach(groups) { group in
-                            Section {
-                                ForEach(group.sessions) { session in
-                                    sessionRow(session)
-                                }
-                            } header: {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        ForEach(Array(groups.enumerated()), id: \.element.id) { groupIdx, group in
+                            HStack(alignment: .center) {
                                 Text(group.title)
-                                    .font(.system(size: 12, weight: .medium))
+                                    .font(NuwaFont.sectionHeader)
                                     .foregroundStyle(Color.nuwaLabelTertiary)
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 6)
+                                Spacer()
+                                if groupIdx == 0 && !selectMode {
+                                    Button {
+                                        triggerLightHaptic()
+                                        enterSelectMode(initialId: nil)
+                                    } label: {
+                                        MultiSelectGlyph()
+                                            .foregroundStyle(Color.nuwaLabelTertiary)
+                                            .frame(width: 32, height: 28)
+                                            .contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(NuwaTactileButtonStyle(pressedScale: 0.92))
+                                    .accessibilityLabel(L10n.t("multiSelect", locale: loc))
+                                }
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.top, groupIdx == 0 ? 4 : 20)
+                            .padding(.bottom, 6)
+
+                            ForEach(group.sessions) { session in
+                                sessionRow(session)
                             }
                         }
                     }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 12)
                 }
                 .nuwaNoScrollEdgeEffect()
             }
 
-            // Bottom bar: Batch select bar OR Direct Settings Card (100% responsive full-width hit target!)
+            // Bottom bar: Clean flat multi-select bar OR Borderless Android 0.1.31 profile row
             if selectMode {
                 HStack(spacing: 0) {
                     Button {
@@ -220,9 +248,9 @@ struct SessionDrawerView: View {
                     } label: {
                         HStack(spacing: 6) {
                             Image(systemName: allSelectedPinned ? "pin.slash" : "pin")
-                                .font(.system(size: 14, weight: .medium))
+                                .font(.system(size: 15, weight: .medium))
                             Text(L10n.t(allSelectedPinned ? "unpin" : "pin", locale: loc))
-                                .font(.system(size: 14, weight: .medium))
+                                .font(NuwaFont.controlMedium)
                         }
                         .foregroundStyle(validSelectedIds.isEmpty ? Color.nuwaLabelTertiary : Color.nuwaLabelPrimary)
                         .frame(maxWidth: .infinity, minHeight: 44)
@@ -232,17 +260,17 @@ struct SessionDrawerView: View {
                     .disabled(validSelectedIds.isEmpty)
 
                     Rectangle()
-                        .fill(Color.primary.opacity(0.1))
-                        .frame(width: 0.75, height: 22)
+                        .fill(Color.nuwaControlBorder)
+                        .frame(width: 0.75, height: 18)
 
                     Button {
                         showBatchDeleteConfirm = true
                     } label: {
                         HStack(spacing: 6) {
                             Image(systemName: "trash")
-                                .font(.system(size: 14, weight: .medium))
+                                .font(.system(size: 15, weight: .medium))
                             Text(L10n.t("delete", locale: loc))
-                                .font(.system(size: 14, weight: .medium))
+                                .font(NuwaFont.controlMedium)
                         }
                         .foregroundStyle(validSelectedIds.isEmpty ? Color.nuwaLabelTertiary : .red)
                         .frame(maxWidth: .infinity, minHeight: 44)
@@ -251,56 +279,60 @@ struct SessionDrawerView: View {
                     .buttonStyle(NuwaTactileButtonStyle())
                     .disabled(validSelectedIds.isEmpty)
                 }
-                .background(Color.nuwaDrawerCardFill, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .strokeBorder(Color.nuwaControlBorder, lineWidth: 0.75)
-                )
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
+                .padding(.horizontal, 14)
+                .padding(.top, 8)
+                .padding(.bottom, 12)
             } else {
-                Button {
-                    onOpenSettings()
-                } label: {
-                    HStack(spacing: 10) {
-                        Image("NuwaLogo")
-                            .resizable()
-                            .scaledToFill()
-                            .frame(width: 34, height: 34)
-                            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                HStack(spacing: 12) {
+                    Button {
+                        onOpenSettings()
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image("NuwaLogo")
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: 34, height: 34)
+                                .clipShape(Circle())
 
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(settings.profileDisplayName)
-                                .font(.system(size: 14, weight: .medium))
-                                .foregroundStyle(Color.nuwaLabelPrimary)
-                                .lineLimit(1)
-                            if let balance = settings.deepSeekBalanceText {
-                                Text(balance)
-                                    .font(.system(size: 12, weight: .medium))
-                                    .foregroundStyle(settings.isBalanceLow ? .red : Color.nuwaBrandText)
+                            HStack(spacing: 8) {
+                                Text(settings.profileDisplayName)
+                                    .font(.system(size: 15.5, weight: .medium))
+                                    .foregroundStyle(Color.nuwaLabelPrimary)
                                     .lineLimit(1)
+
+                                if let balance = settings.deepSeekBalanceText {
+                                    Text(balance)
+                                        .font(NuwaFont.badge.monospacedDigit())
+                                        .foregroundStyle(settings.isBalanceLow ? .red : Color.nuwaBrandText)
+                                        .padding(.horizontal, 7)
+                                        .padding(.vertical, 2)
+                                        .background(
+                                            (settings.isBalanceLow ? Color.red : Color.nuwaBrand).opacity(0.14),
+                                            in: Capsule()
+                                        )
+                                        .lineLimit(1)
+                                        .onTapGesture {
+                                            openURL(topUpURL)
+                                        }
+                                }
                             }
+
+                            Spacer(minLength: 6)
+
+                            Image(systemName: "ellipsis")
+                                .font(.system(size: 16, weight: .medium))
+                                .foregroundStyle(Color.nuwaLabelTertiary)
                         }
-
-                        Spacer(minLength: 8)
-
-                        Image(systemName: "ellipsis")
-                            .font(.system(size: 15, weight: .medium))
-                            .foregroundStyle(Color.nuwaLabelSecondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity, minHeight: 50, alignment: .leading)
+                        .contentShape(Rectangle())
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 10)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.nuwaDrawerCardFill, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .strokeBorder(Color.nuwaControlBorder, lineWidth: 0.75)
-                    )
-                    .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .buttonStyle(NuwaTactileButtonStyle(pressedScale: 0.98))
                 }
-                .buttonStyle(NuwaTactileButtonStyle(pressedScale: 0.97))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
+                .padding(.horizontal, 14)
+                .padding(.top, 6)
+                .padding(.bottom, 10)
             }
         }
         .task(id: searchInput) {
@@ -367,27 +399,39 @@ struct SessionDrawerView: View {
         HStack(spacing: 10) {
             if selectMode {
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 18))
+                    .font(.system(size: 20))
                     .foregroundStyle(isSelected ? Color.nuwaBrand : Color.nuwaLabelTertiary)
             } else if session.isPinned {
                 Image(systemName: "pin.fill")
-                    .font(.system(size: 11))
+                    .font(.system(size: 12))
                     .foregroundStyle(Color.nuwaBrandText)
             }
 
             Text(session.title.isEmpty ? L10n.t("untitledChat", locale: loc) : session.title)
-                .font(.system(size: 14, weight: isActive ? .medium : .regular))
-                .foregroundStyle(Color.nuwaLabelPrimary)
+                .font(isActive ? NuwaFont.rowTitleMedium : NuwaFont.rowTitle)
+                .foregroundStyle(isActive ? Color.nuwaBrandText : Color.nuwaLabelPrimary)
                 .lineLimit(1)
 
             Spacer(minLength: 4)
+
+            if isActive && !selectMode {
+                Menu {
+                    sessionMenuItems(for: session)
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(Color.nuwaBrandText.opacity(0.85))
+                        .frame(width: 30, height: 30)
+                        .contentShape(Rectangle())
+                }
+            }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.leading, 14)
+        .padding(.trailing, isActive && !selectMode ? 8 : 14)
+        .frame(maxWidth: .infinity, minHeight: 46, alignment: .leading)
         .background(
-            isActive ? Color.nuwaSidebarActive : (selectMode && isSelected ? Color.nuwaSidebarActive.opacity(0.6) : Color.clear),
-            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+            isActive ? Color.nuwaSidebarActive : (selectMode && isSelected ? Color.nuwaSidebarActive.opacity(0.65) : Color.clear),
+            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
         )
         .contentShape(Rectangle())
         .onTapGesture {
@@ -400,40 +444,46 @@ struct SessionDrawerView: View {
         }
         .onLongPressGesture(minimumDuration: 0.45) {
             if !selectMode {
+                triggerLightHaptic()
                 enterSelectMode(initialId: session.id)
             }
         }
         .contextMenu {
             if !selectMode {
-                Button {
-                    enterSelectMode(initialId: session.id)
-                } label: {
-                    Label(L10n.t("multiSelect", locale: loc), systemImage: "checkmark.circle")
-                }
-                Button {
-                    onTogglePin(session.id)
-                } label: {
-                    Label(L10n.t(session.isPinned ? "unpin" : "pin", locale: loc), systemImage: session.isPinned ? "pin.slash" : "pin")
-                }
-                Button {
-                    renameDraft = session.title
-                    renamingSession = session
-                } label: {
-                    Label(L10n.t("rename", locale: loc), systemImage: "pencil")
-                }
-                Button(role: .destructive) {
-                    deletingSession = session
-                } label: {
-                    Label(L10n.t("delete", locale: loc), systemImage: "trash")
-                }
+                sessionMenuItems(for: session)
             }
         }
     }
 
-    private func enterSelectMode(initialId: UUID) {
+    @ViewBuilder
+    private func sessionMenuItems(for session: SessionSummaryItem) -> some View {
+        Button {
+            onTogglePin(session.id)
+        } label: {
+            Label(L10n.t(session.isPinned ? "unpin" : "pin", locale: loc), systemImage: session.isPinned ? "pin.slash" : "pin")
+        }
+        Button {
+            enterSelectMode(initialId: session.id)
+        } label: {
+            Label(L10n.t("multiSelect", locale: loc), systemImage: "checkmark.circle")
+        }
+        Button {
+            renameDraft = session.title
+            renamingSession = session
+        } label: {
+            Label(L10n.t("rename", locale: loc), systemImage: "pencil")
+        }
+        Button(role: .destructive) {
+            deletingSession = session
+        } label: {
+            Label(L10n.t("delete", locale: loc), systemImage: "trash")
+        }
+    }
+
+    private func enterSelectMode(initialId: UUID?) {
         withAnimation(.easeInOut(duration: 0.16)) {
             selectMode = true
-            selectedIds = [initialId]
+            selectedIds = initialId.map { [$0] } ?? []
         }
     }
 
@@ -449,6 +499,22 @@ struct SessionDrawerView: View {
             selectedIds.remove(id)
         } else {
             selectedIds.insert(id)
+        }
+    }
+}
+
+/// Crisp two-row multi-select bullet glyph matching the Android 0.1.31 sidebar header icon.
+private struct MultiSelectGlyph: View {
+    var body: some View {
+        VStack(spacing: 4.5) {
+            HStack(spacing: 3.5) {
+                Circle().strokeBorder(lineWidth: 1.4).frame(width: 6, height: 6)
+                Capsule().frame(width: 8, height: 1.5)
+            }
+            HStack(spacing: 3.5) {
+                Circle().strokeBorder(lineWidth: 1.4).frame(width: 6, height: 6)
+                Capsule().frame(width: 8, height: 1.5)
+            }
         }
     }
 }
