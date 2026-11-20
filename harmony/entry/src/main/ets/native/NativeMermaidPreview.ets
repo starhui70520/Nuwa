@@ -7,13 +7,21 @@ const DIAGRAM_ROOT = 'resource://rawfile/mermaid/';
 const DIAGRAM_PAGE = DIAGRAM_ROOT + 'index.html';
 const MAX_DIAGRAM_SOURCE_LENGTH = 50000;
 const RENDER_TIMEOUT_MS = 8000;
+const STREAM_RENDER_INTERVAL_MS = 100;
 
 type PreviewPhase = 'loading' | 'ready' | 'empty' | 'failed';
+
+interface PreviewRequest {
+  source: string;
+  theme: NativeTheme;
+  loading: boolean;
+}
 
 @Component
 export struct NativeMermaidPreview {
   @Prop @Watch('startPreview') source: string = '';
   @Prop @Watch('startPreview') theme: NativeTheme = 'system';
+  @Prop @Watch('startPreview') loading: boolean = false;
   @Prop locale: NativeLocale = 'zh-CN';
 
   @State private phase: PreviewPhase = 'loading';
@@ -24,6 +32,9 @@ export struct NativeMermaidPreview {
   private generation: number = 0;
   private deadline: number = -1;
   private pollTimer: number = -1;
+  private submitTimer: number = -1;
+  private submitted?: PreviewRequest;
+  private drawing: boolean = false;
   private viewportWidth: number = 0;
 
   aboutToAppear(): void {
@@ -35,60 +46,123 @@ export struct NativeMermaidPreview {
     this.active = false;
     this.pageReady = false;
     this.generation++;
-    this.clearTimers();
+    this.drawing = false;
+    this.submitted = undefined;
+    this.clearRenderTimers();
+    this.clearSubmitTimer();
   }
 
-  private clearTimers(): void {
+  private clearRenderTimers(): void {
     if (this.deadline >= 0) clearTimeout(this.deadline);
     if (this.pollTimer >= 0) clearTimeout(this.pollTimer);
     this.deadline = -1;
     this.pollTimer = -1;
   }
 
+  private clearSubmitTimer(): void {
+    if (this.submitTimer >= 0) clearTimeout(this.submitTimer);
+    this.submitTimer = -1;
+  }
+
   private resolvePreview(phase: PreviewPhase): void {
-    this.clearTimers();
-    if (phase !== 'ready') {
+    this.clearRenderTimers();
+    this.drawing = false;
+    if (phase === 'empty' || phase === 'failed') {
       // A failed preview can be remounted from the code switch.
       this.pageReady = false;
+    }
+    if (phase !== 'ready') {
       this.previewHeight = 1;
     }
     this.phase = phase;
+    if (this.loading && this.submitted?.loading && phase !== 'failed') {
+      this.scheduleSubmit(STREAM_RENDER_INTERVAL_MS);
+    }
   }
 
   private startPreview(): void {
-    this.clearTimers();
-    const generation = ++this.generation;
     if (!this.active) return;
-    if (!this.source.trim()) {
+    const submitted = this.submitted;
+    const continuing = this.loading && submitted?.loading === true && submitted.theme === this.theme;
+    // Text arriving during a draw belongs to the next snapshot. A final input or theme change supersedes it.
+    if (continuing && this.drawing) return;
+    if (!continuing) this.clearSubmitTimer();
+    this.scheduleSubmit(0);
+  }
+
+  private scheduleSubmit(delay: number): void {
+    if (this.submitTimer >= 0) return;
+    this.submitTimer = setTimeout((): void => {
+      this.submitTimer = -1;
+      this.drawLatest();
+    }, delay);
+  }
+
+  private drawLatest(): void {
+    if (!this.active) return;
+    const request: PreviewRequest = { source: this.source, theme: this.theme, loading: this.loading };
+    const submitted = this.submitted;
+    if (submitted && request.source === submitted.source && request.theme === submitted.theme &&
+      request.loading === submitted.loading) return;
+    if (!request.loading && !request.source.trim()) {
+      this.submitted = request;
+      this.generation++;
       this.resolvePreview('empty');
       return;
     }
-    if (this.source.length > MAX_DIAGRAM_SOURCE_LENGTH) {
-      this.resolvePreview('failed');
-      return;
-    }
-    if (this.phase !== 'ready') this.phase = 'loading';
-    this.deadline = setTimeout(() => {
-      if (this.generation === generation) {
+    if (request.source.length > MAX_DIAGRAM_SOURCE_LENGTH) {
+      if (!request.loading) {
+        this.submitted = request;
         this.generation++;
         this.resolvePreview('failed');
       }
+      return;
+    }
+    if (this.phase !== 'ready') this.phase = 'loading';
+    if (!this.pageReady) {
+      if (this.deadline < 0) {
+        this.deadline = setTimeout((): void => {
+          if (this.active && !this.pageReady) this.resolvePreview('failed');
+        }, RENDER_TIMEOUT_MS);
+      }
+      return;
+    }
+
+    this.clearRenderTimers();
+    this.submitted = request;
+    this.drawing = true;
+    const generation = ++this.generation;
+    this.deadline = setTimeout(() => {
+      if (this.isCurrent(generation)) {
+        this.generation++;
+        this.failDraw();
+      }
     }, RENDER_TIMEOUT_MS);
-    if (this.pageReady) void this.submit(generation);
+    void this.submit(generation, request);
   }
 
-  private async submit(generation: number): Promise<void> {
+  private isCurrent(generation: number): boolean {
+    const submitted = this.submitted;
+    return this.active && this.generation === generation && !!submitted && submitted.theme === this.theme &&
+      submitted.loading === this.loading && (this.loading || submitted.source === this.source);
+  }
+
+  private failDraw(): void {
+    this.resolvePreview(this.loading ? (this.phase === 'ready' ? 'ready' : 'loading') : 'failed');
+  }
+
+  private async submit(generation: number, request: PreviewRequest): Promise<void> {
     try {
-      const bytes = new util.TextEncoder().encodeInto(this.source);
+      const bytes = new util.TextEncoder().encodeInto(request.source);
       const encoded = new util.Base64Helper().encodeToStringSync(bytes);
       const call = 'window.NuwaMermaid ? window.NuwaMermaid.draw(' +
-        JSON.stringify(encoded) + ',' + JSON.stringify(this.theme) + ') : -2';
+        JSON.stringify(encoded) + ',' + JSON.stringify(request.theme) + ',' + request.loading.toString() + ') : -2';
       const response = Number(await this.controller.runJavaScript(call));
-      if (!this.active || this.generation !== generation) return;
+      if (!this.isCurrent(generation)) return;
       if (response === 0) void this.poll(generation, true);
-      else this.resolvePreview('failed');
+      else this.failDraw();
     } catch {
-      if (this.active && this.generation === generation) this.resolvePreview('failed');
+      if (this.isCurrent(generation)) this.failDraw();
     }
   }
 
@@ -96,17 +170,17 @@ export struct NativeMermaidPreview {
     try {
       const result = Number(await this.controller.runJavaScript(
         'window.NuwaMermaid ? window.NuwaMermaid.status() : -2'));
-      if (!this.active || this.generation !== generation) return;
+      if (!this.isCurrent(generation)) return;
       if (Number.isFinite(result) && result > 0) {
         this.previewHeight = Math.max(40, Math.min(result + 2, 580));
         if (waiting) this.resolvePreview('ready');
       } else if (waiting && result === -1) {
         this.pollTimer = setTimeout(() => { void this.poll(generation, true); }, 75);
       } else if (waiting) {
-        this.resolvePreview(result === -3 ? 'empty' : 'failed');
+        this.resolvePreview(result === -4 ? 'loading' : result === -3 ? 'empty' : 'failed');
       }
     } catch {
-      if (waiting && this.active && this.generation === generation) this.resolvePreview('failed');
+      if (waiting && this.isCurrent(generation)) this.failDraw();
     }
   }
 
@@ -167,10 +241,16 @@ export struct NativeMermaidPreview {
             this.startPreview();
           })
           .onErrorReceive((event: OnErrorReceiveEvent) => {
-            if (this.active && event.request.isMainFrame()) this.resolvePreview('failed');
+            if (this.active && event.request.isMainFrame()) {
+              this.generation++;
+              this.resolvePreview('failed');
+            }
           })
           .onRenderExited(() => {
-            if (this.active) this.resolvePreview('failed');
+            if (this.active) {
+              this.generation++;
+              this.resolvePreview('failed');
+            }
           })
           .onAreaChange((_old: Area, area: Area) => {
             const width = Number(area.width);

@@ -7,8 +7,14 @@
   let result = -1
   let queue = Promise.resolve()
   let lastInput
+  let displayedSource = ''
+  let displayedDark
 
-  const clear = () => diagram.replaceChildren()
+  const clear = () => {
+    diagram.replaceChildren()
+    displayedSource = ''
+    displayedDark = undefined
+  }
 
   function safeSvg(svg) {
     // The renderer emits sanitized SVG in strict mode. Use an inert template before
@@ -42,8 +48,8 @@
       .replace(/<((?:img|image)\s+)/gi, '&lt;$1')
   }
 
-  function draw(payload, theme) {
-    lastInput = { payload, theme }
+  function draw(payload, theme, loading = false) {
+    lastInput = { payload, theme, loading }
     const generation = ++latest
     result = -1
     queue = queue.catch(() => {}).then(async () => {
@@ -54,8 +60,8 @@
         const source = prepareSource(new TextDecoder().decode(bytes))
         if (source.length > 50000) throw new Error('Diagram is too large')
         if (!source.trim()) {
-          clear()
-          result = -3
+          if (!loading) clear()
+          result = loading ? (displayedSource ? 0 : -4) : -3
           return
         }
         const dark = theme === 'dark' || (theme === 'system' && systemDark.matches)
@@ -71,21 +77,43 @@
             'suppressErrorRendering', 'dompurifyConfig', 'fontFamily', 'altFontFamily',
             'themeCSS', 'themeVariables'],
         })
-        const { svg } = await window.mermaid.render('nuwa-diagram-' + generation, source)
-        if (generation !== latest) return
-        diagram.replaceChildren(safeSvg(svg))
-        result = 0
+        const render = async (input, suffix = '') => {
+          const { svg } = await window.mermaid.render('nuwa-diagram-' + generation + suffix, input)
+          if (generation !== latest) return
+          diagram.replaceChildren(safeSvg(svg))
+          displayedSource = input
+          displayedDark = dark
+          result = 0
+        }
+        try {
+          await render(source)
+        } catch (error) {
+          if (generation !== latest) return
+          if (!loading) throw error
+          const trimmed = source.trimEnd()
+          const lineEnd = Math.max(trimmed.lastIndexOf('\n'), trimmed.lastIndexOf('\r'))
+          const prefix = trimmed.slice(0, Math.max(0, lineEnd))
+          if (prefix && !(displayedDark === dark && displayedSource.startsWith(prefix))) {
+            try {
+              await render(prefix, '-prefix')
+              return
+            } catch {
+              if (generation !== latest) return
+            }
+          }
+          result = displayedSource ? 0 : -4
+        }
       } catch {
         if (generation !== latest) return
-        clear()
-        result = -2
+        if (!loading) clear()
+        result = loading ? (displayedSource ? 0 : -4) : -2
       }
     })
     return 0
   }
 
   systemDark.addEventListener('change', () => {
-    if (lastInput?.theme === 'system') draw(lastInput.payload, lastInput.theme)
+    if (lastInput?.theme === 'system') draw(lastInput.payload, lastInput.theme, lastInput.loading)
   })
 
   window.NuwaMermaid = Object.freeze({

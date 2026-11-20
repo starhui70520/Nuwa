@@ -23,7 +23,7 @@ export interface NativeMarkdownBlock {
   parts?: NativeMarkdownPart[];
   rows?: NativeMarkdownPart[][][];
   lang?: string;
-  closed?: boolean;
+  hasDiagram?: boolean;
 }
 
 function linkTarget(value: string): string | undefined {
@@ -103,16 +103,6 @@ function tableRows(node: NativeMarkdownAstNode): NativeMarkdownPart[][][] {
   });
 }
 
-function finishedFence(input: string, node: NativeMarkdownAstNode): boolean {
-  const source = input.slice(node.position?.start.offset, node.position?.end.offset);
-  const firstLine = source.search(/[\r\n]/);
-  if (firstLine < 0) return false;
-  const start = /^[ \t]*(\x60{3,}|~{3,})/.exec(source)?.[1];
-  const lastLine = Math.max(source.lastIndexOf('\r'), source.lastIndexOf('\n'));
-  const end = /^[ \t>]*(\x60{3,}|~{3,})[ \t]*$/.exec(source.slice(lastLine + 1))?.[1];
-  return !!start && !!end && start[0] === end[0] && end.length >= start.length;
-}
-
 function blockHash(hash: number, value: string): number {
   for (let index = 0; index < value.length; index++) {
     hash = Math.imul(hash ^ value.charCodeAt(index), 16777619);
@@ -133,7 +123,7 @@ function partsHash(hash: number, parts: NativeMarkdownPart[]): number {
 function withKey(block: NativeMarkdownBlock): NativeMarkdownBlock {
   let hash = blockHash(2166136261, [
     block.kind, block.marker ?? '', block.lang ?? '', block.text ?? '',
-    (block.level ?? 0).toString(), block.closed ? 'closed' : '',
+    (block.level ?? 0).toString(),
   ].join('\u0000'));
   if (block.parts) hash = partsHash(hash, block.parts);
   for (const row of block.rows ?? []) {
@@ -142,6 +132,8 @@ function withKey(block: NativeMarkdownBlock): NativeMarkdownBlock {
   }
   for (const child of block.children ?? []) hash = blockHash(hash, child.key);
   block.key = (hash >>> 0).toString(36);
+  block.hasDiagram = block.lang?.toLowerCase() === 'mermaid' ||
+    block.children?.some((child: NativeMarkdownBlock): boolean => child.hasDiagram === true);
   return block;
 }
 
@@ -156,7 +148,7 @@ function orderedTaskMark(blocks: NativeMarkdownBlock[], complete: boolean): void
   }
 }
 
-function projectBlocks(nodes: NativeMarkdownAstNode[], input: string, listDepth: number = 0): NativeMarkdownBlock[] {
+function projectBlocks(nodes: NativeMarkdownAstNode[], listDepth: number = 0): NativeMarkdownBlock[] {
   const blocks: NativeMarkdownBlock[] = [];
   for (const node of nodes) {
     const children = node.children ?? [];
@@ -174,7 +166,7 @@ function projectBlocks(nodes: NativeMarkdownAstNode[], input: string, listDepth:
         block = { kind: 'paragraph', key: '', parts: inlineParts([node]) };
         break;
       case 'blockquote':
-        block = { kind: 'quote', key: '', children: projectBlocks(children, input, listDepth) };
+        block = { kind: 'quote', key: '', children: projectBlocks(children, listDepth) };
         break;
       case 'list': {
         const start = node.start ?? 1;
@@ -184,7 +176,7 @@ function projectBlocks(nodes: NativeMarkdownAstNode[], input: string, listDepth:
             index: number): NativeMarkdownBlock => {
             const marker = typeof item.checked === 'boolean' && !node.ordered ? (item.checked ? '☑' : '□') :
               node.ordered ? (start + index).toString() + '.' : bullet;
-            const itemBlocks = projectBlocks(item.children ?? [], input, listDepth + 1);
+            const itemBlocks = projectBlocks(item.children ?? [], listDepth + 1);
             if (node.ordered && typeof item.checked === 'boolean') orderedTaskMark(itemBlocks, item.checked);
             return withKey({ kind: 'item', key: '', marker, children: itemBlocks });
           }),
@@ -198,8 +190,7 @@ function projectBlocks(nodes: NativeMarkdownAstNode[], input: string, listDepth:
         block = { kind: 'hr', key: '' };
         break;
       case 'code':
-        block = { kind: 'code', key: '', text: node.value ?? '', lang: node.lang ?? 'text',
-          closed: finishedFence(input, node) };
+        block = { kind: 'code', key: '', text: node.value ?? '', lang: node.lang ?? 'text' };
         break;
       case 'math':
         block = { kind: 'math', key: '', text: node.value ?? '' };
@@ -215,7 +206,7 @@ export function nativeMarkdownBlocks(input: string, sourceIndices: number[] | un
   if (!input) return [];
   try {
     const ast = toNativeMarkdownAst(input, sourceIndices, disableLink);
-    return projectBlocks(ast.children ?? [], input);
+    return projectBlocks(ast.children ?? []);
   } catch {
     return [withKey({ kind: 'paragraph', key: '', parts: [{ text: input, strong: false, italic: false }] })];
   }

@@ -227,6 +227,24 @@ export struct NativeMarkdown {
     return block.lang?.toLowerCase() === 'mermaid';
   }
 
+  private renderKey(block: NativeMarkdownBlock, index: number): string {
+    // Preserve the mounted WebView and its last valid graph as the source grows.
+    return (block.hasDiagram ? 'diagram-' + block.kind : block.key) + ':' + index;
+  }
+
+  private currentBlock(original: NativeMarkdownBlock, path: string): NativeMarkdownBlock {
+    if (!original.hasDiagram) return original;
+    let children = this.blocks();
+    let block = original;
+    for (const index of path.split(':').slice(1)) {
+      const next = children[Number(index)];
+      if (!next) return original;
+      block = next;
+      children = next.children ?? [];
+    }
+    return block.kind === original.kind ? block : original;
+  }
+
   private setMermaidMode(path: string, code: boolean): void {
     if (code && !this.mermaidCodeBlocks.includes(path)) {
       this.mermaidCodeBlocks = [...this.mermaidCodeBlocks, path];
@@ -559,26 +577,24 @@ export struct NativeMarkdown {
             .fontColor($r('app.color.native_chat_secondary'))
             .layoutWeight(1)
         }
-        Button(this.copiedCodeKey === path + ':' + block.key ?
+        Button(this.copiedCodeKey === path + ':' + this.currentBlock(block, path).key ?
           this.label('已复制', 'Copied') : this.label('复制', 'Copy'), { buttonStyle: ButtonStyleMode.TEXTUAL })
           .height(28)
           .fontSize(13)
-          .onClick(() => { void this.copyCode(block.text ?? '', path + ':' + block.key); })
+          .onClick(() => {
+            const current = this.currentBlock(block, path);
+            void this.copyCode(current.text ?? '', path + ':' + current.key);
+          })
       }
       .width('100%')
       .padding(6)
       .backgroundColor($r('app.color.native_chat_sidebar'))
       if (this.isMermaid(block) && !this.mermaidCodeBlocks.includes(path)) {
-        if (this.loading && !block.closed) {
-          Text(this.label('图表生成中...', 'Rendering diagram...'))
-            .width('100%').height(160).textAlign(TextAlign.Center)
-            .fontSize(14).fontColor($r('app.color.native_chat_secondary'))
-        } else {
-          NativeMermaidPreview({ source: block.text ?? '', locale: this.locale, theme: this.theme })
-        }
+        NativeMermaidPreview({ source: this.currentBlock(block, path).text ?? '', loading: this.loading,
+          locale: this.locale, theme: this.theme })
       } else {
-        NativeHighlightedCode({ language: block.lang || 'text', source: block.text ?? '', loading: this.loading,
-          theme: this.theme, fontScale: this.fontScale })
+        NativeHighlightedCode({ language: block.lang || 'text', source: this.currentBlock(block, path).text ?? '',
+          loading: this.loading, theme: this.theme, fontScale: this.fontScale })
       }
     }
     .width('100%')
@@ -657,19 +673,19 @@ export struct NativeMarkdown {
         0, this.headingLineHeight(block.level ?? 1), 700)
     } else if (block.kind === 'list') {
       Column({ space: this.muted ? 2 : 6 }) {
-        ForEach(block.children ?? [], (item: NativeMarkdownBlock, index: number) => {
+        ForEach(this.currentBlock(block, path).children ?? [], (item: NativeMarkdownBlock, index: number) => {
           Row({ space: 8 }) {
-            Text(item.marker).fontSize(this.bodySize() * this.fontScale)
+            Text(this.currentBlock(item, path + ':' + index).marker).fontSize(this.bodySize() * this.fontScale)
               .lineHeight(this.bodySize() * this.fontScale * (this.muted ? 24 / 14 : 1.75))
               .constraintSize({ minWidth: 10 })
               .fontColor($r('app.color.native_chat_secondary'))
             Column() {
-              this.renderBlocks(item.children ?? [], path + ':' + index, true)
+              this.renderBlocks(this.currentBlock(item, path + ':' + index).children ?? [], path + ':' + index, true)
             }
             .layoutWeight(1).alignItems(HorizontalAlign.Start)
           }
           .width('100%').alignItems(VerticalAlign.Top)
-        }, (item: NativeMarkdownBlock, index: number): string => item.key + ':' + index)
+        }, (item: NativeMarkdownBlock, index: number): string => this.renderKey(item, index))
       }
       .width('100%').alignItems(HorizontalAlign.Start)
     } else if (block.kind === 'hr') {
@@ -678,7 +694,7 @@ export struct NativeMarkdown {
         .width('100%').margin({ top: 16, bottom: 16 })
     } else if (block.kind === 'quote') {
       Column() {
-        this.renderBlocks(block.children ?? [], path)
+        this.renderBlocks(this.currentBlock(block, path).children ?? [], path)
       }
       .width('100%').alignItems(HorizontalAlign.Start).padding({ left: 14 })
       .border({ width: { left: 2 }, color: $r('app.color.native_chat_caption') })
@@ -723,7 +739,7 @@ export struct NativeMarkdown {
         this.renderBlock(block, path + ':' + index)
       }
       .width('100%').alignItems(HorizontalAlign.Start).margin({ top: this.blockGap(block, blocks[index - 1], insideList) })
-    }, (block: NativeMarkdownBlock, index: number): string => block.key + ':' + index)
+    }, (block: NativeMarkdownBlock, index: number): string => this.renderKey(block, index))
   }
 
   build() {
