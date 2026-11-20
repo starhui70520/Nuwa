@@ -40,12 +40,57 @@
     return root
   }
 
+  function titleScalar(value) {
+    const singleQuoted = /^'((?:[^']|'')*)'(?:[ \t]+#.*)?$/.exec(value)
+    if (singleQuoted) return singleQuoted[1].replace(/''/g, "'")
+    const doubleQuoted = /^("(?:[^"\\]|\\.)*")(?:[ \t]+#.*)?$/.exec(value)
+    if (doubleQuoted) {
+      try {
+        return JSON.parse(doubleQuoted[1])
+      } catch {
+        return ''
+      }
+    }
+    if (/^["'!&*#|>{\[]/.test(value)) return ''
+    return value.replace(/[ \t]+#.*$/, '').trimEnd()
+  }
+
+  function titleFrontmatter(fields) {
+    // Only forward a title field. Mermaid still interprets the YAML block scalar's fold and chomp indicators.
+    const field = /^(?:title|'title'|"title"):[ \t]+([^\r\n\u0085\u2028\u2029]*)$/m.exec(fields)
+    const value = field?.[1].trim()
+    if (!value) return ''
+    const block = /^[|>](?:[1-9][+-]?|[+-][1-9]?)?(?=[ \t]*(?:#|$))/.exec(value)?.[0]
+    if (block) {
+      const lines = []
+      for (const line of fields.slice(field.index + field[0].length).split(/\r?\n/).slice(1)) {
+        if (line && !line.startsWith(' ')) break
+        if (/[\r\u0000-\u0008\u000b\u000c\u000e-\u001f\u0085\u2028\u2029]/.test(line)) return ''
+        lines.push(line.trim() ? line : '')
+      }
+      const first = lines.find((line) => line.length > 0)
+      if (!first) return ''
+      const indentation = Number(/[1-9]/.exec(block)?.[0] ?? first.match(/^ +/)[0].length)
+      if (lines.some((line) => line && !line.startsWith(' '.repeat(indentation)))) return ''
+      return '---\ntitle: ' + block + '\n' + lines.join('\n') + '\n---\n'
+    }
+    const title = titleScalar(value)
+    if (!title) return ''
+    const encoded = JSON.stringify(title).replace(/[<>%&\u0085\u2028\u2029]/g,
+      (character) => '\\u' + character.charCodeAt(0).toString(16).padStart(4, '0'))
+    return '---\ntitle: ' + encoded + '\n---\n'
+  }
+
   function prepareSource(source) {
-    // Match Android's HTML image handling. Configuration remains under app control.
-    return source.replace(/^\uFEFF/, '')
-      .replace(/^\s*---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/, '')
+    let title = ''
+    const body = source.replace(/^\uFEFF/, '')
+      .replace(/^\s*---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/, (_header, fields) => {
+        title = titleFrontmatter(fields)
+        return ''
+      })
       .replace(/%%\{[\s\S]*?\}%%/g, '')
       .replace(/<((?:img|image)\s+)/gi, '&lt;$1')
+    return title + body
   }
 
   function draw(payload, theme, loading = false) {

@@ -41,6 +41,14 @@
       "value": "#ADB2B8"
     },
     {
+      "name": "native_read_aloud_loading",
+      "value": "#65676B"
+    },
+    {
+      "name": "native_read_aloud_playing",
+      "value": "#5686FE"
+    },
+    {
       "name": "native_chat_caption",
       "value": "#81858C"
     },

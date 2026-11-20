@@ -1,5 +1,6 @@
 import { nativeIconTint } from '../native/NativeIconTint';
 import { NativeMessageCopyButton } from '../native/NativeMessageCopyButton';
+import { NativeReadAloudIndicator } from '../native/NativeReadAloudIndicator';
 import {
   NativeDocumentCard, NATIVE_DOCUMENT_CARD_HEIGHT, NATIVE_DOCUMENT_CARD_WIDTH,
 } from '../native/NativeDocumentCard';
@@ -74,6 +75,7 @@ import {
   createSidebarRows, createSidebarSections, filterSidebarGroups, NativeSidebarRow, NativeSidebarSearch,
   NativeSidebarSection, NativeSidebarSession, normalizeSidebarQuery, SIDEBAR_HISTORY_PAGE_SIZE, visibleSidebarRowIndex,
 } from '../native/NativeSidebarHistory';
+
 import { NativeBalanceRequest, NativeBalanceStore, NativeDeepSeekBalance } from '../native/NativeProviderBalance';
 import {
   checkNativeUpdate, fetchNativeReleaseHistory, getNativeCurrentVersion, isUpdateSnoozed, NativeReleaseHistoryItem,
@@ -270,6 +272,7 @@ struct NativeChat {
   private readonly stoppedUploadReplies = new Map<NativeChatClient, NativeReply>();
   @State private recognitionId: string = '';
   @State private readingId: string = '';
+  @State private readingState: 'idle' | 'loading' | 'playing' = 'idle';
   @State private collapsedThoughts: string[] = [];
   @State private viewportWidth: number = 390;
   @State private viewportHeight: number = 820;
@@ -396,12 +399,16 @@ struct NativeChat {
     }
   });
   private readonly speaker = new HarmonyTextToSpeech((id: string, state: string, code?: string) => {
-    if (id === this.readingId && state !== 'playing') {
-      this.readingId = '';
-      if (state === 'error' || state === 'unavailable') {
-        void recordNativeFeedbackLog(this.host(), 'warn', 'speech', 'Read-aloud unavailable', code);
-        this.toast(this.speechError(code, false));
-      }
+    if (id !== this.readingId) return;
+    if (state === 'playing') {
+      this.readingState = 'playing';
+      return;
+    }
+    this.readingId = '';
+    this.readingState = 'idle';
+    if (state === 'error' || state === 'unavailable') {
+      void recordNativeFeedbackLog(this.host(), 'warn', 'speech', 'Read-aloud unavailable', code);
+      this.toast(this.speechError(code, false));
     }
   });
 
@@ -2758,6 +2765,7 @@ struct NativeChat {
 
   private stopReadAloud(): void {
     this.readingId = '';
+    this.readingState = 'idle';
     this.speaker.stop();
   }
 
@@ -2767,6 +2775,7 @@ struct NativeChat {
     const active = this.readingId === message.id;
     this.speaker.stop();
     this.readingId = active ? '' : message.id;
+    this.readingState = active ? 'idle' : 'loading';
     if (this.readingId) {
       this.speaker.speak(message.id, text, this.settings.locale, this.speechOptions(), this.host());
     }
@@ -3676,10 +3685,18 @@ struct NativeChat {
           NativeMessageCopyButton({ text: this.copyableReply(message), locale: this.settings.locale })
         }
         if (this.assistantResponseText(message)) {
-          this.iconButton($r('app.media.native_speaker'),
-            this.readingId === message.id ? this.label('停止朗读', 'Stop read-aloud') : this.label('朗读', 'Read aloud'),
-            () => { this.readMessage(message); }, 28, 16,
-            this.readingId === message.id ? $r('app.color.native_chat_blue_text') : $r('app.color.native_chat_action'))
+          Button({ type: ButtonType.Circle }) {
+            if (this.readingId === message.id) {
+              NativeReadAloudIndicator({ mode: this.readingState === 'playing' ? 'playing' : 'loading' })
+            } else {
+              Image($r('app.media.native_read_aloud')).width(16).height(16).draggable(false)
+                .colorFilter(nativeIconTint($r('app.color.native_chat_action')))
+            }
+          }
+          .id(`nuwa-read-aloud-${message.id}`).width(28).height(28).padding(0).backgroundColor(Color.Transparent)
+          .accessibilityText(this.readingId === message.id ? this.label('停止朗读', 'Stop reading') :
+            this.label('朗读', 'Read aloud'))
+          .onClick(() => { this.readMessage(message); })
         }
         this.iconButton($r('app.media.native_retry'), this.label('重新生成', 'Regenerate'), () => { this.retry(message); },
           28, 16, $r('app.color.native_chat_action'), Color.Transparent,
@@ -4855,6 +4872,11 @@ struct NativeChat {
     this.openSettings();
   }
 
+  private sidebarProfileName(): string {
+    if (this.accountToken()) return this.account?.label || this.label('DeepSeek API 账号', 'DeepSeek API Account');
+    return this.settings.model.trim() || 'Nuwa';
+  }
+
   @Builder
   private drawer(desktop: boolean = false) {
     Column() {
@@ -4965,39 +4987,42 @@ struct NativeChat {
         }
         .height(52).width('100%')
       } else {
-        Row({ space: 10 }) {
+        Row({ space: 8 }) {
           Button({ type: ButtonType.Normal }) {
             Row({ space: 10 }) {
-              Image($r('app.media.native_welcome_logo')).width(31).height(31).borderRadius(10)
+              Image($r('app.media.native_welcome_logo')).width(32).height(32).borderRadius(16)
                 .draggable(false).accessibilityLevel('no')
-              Text(this.accountToken() ?
-                this.account?.label ?? this.label('DeepSeek API 账号', 'DeepSeek API account') : this.label('设置', 'Settings'))
-                .fontSize(this.appFontSize(15)).layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-                .fontColor($r('app.color.native_chat_primary'))
+              Text(this.sidebarProfileName()).fontSize(this.appFontSize(14)).fontWeight(FontWeight.Medium)
+                .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).fontColor($r('app.color.native_chat_primary'))
             }
-            .width('100%').padding({ left: 6 })
           }
-          .height(52).layoutWeight(1).padding(0).backgroundColor(Color.Transparent)
+          .height(48).flexShrink(1).padding(0).backgroundColor(Color.Transparent)
           .accessibilityDescription(this.label('打开设置', 'Open settings'))
           .onClick(() => { this.openSidebarSettings(); })
 
           if (this.balance) {
             Button({ type: ButtonType.Normal }) {
-              Text(this.balance.formatted).fontSize(this.appFontSize(12)).fontColor($r('app.color.native_chat_blue_text'))
+              Text(this.balance.formatted).fontSize(this.appFontSize(12)).fontWeight(FontWeight.Medium)
+                .maxLines(1).lineHeight(this.appFontSize(18)).padding({ left: 7, right: 7, top: 1, bottom: 1 })
+                .borderRadius(999).fontColor(this.lowBalance() ? $r('app.color.native_settings_balance_low') :
+                  $r('app.color.native_settings_balance'))
+                .backgroundColor(this.lowBalance() ? $r('app.color.native_settings_balance_low_bg') :
+                  $r('app.color.native_settings_balance_bg'))
             }
-            .height(52).padding(0).backgroundColor(Color.Transparent)
-            .accessibilityText(this.label(`账户余额 ${this.balance.formatted}，前往充值`,
-              `Account balance ${this.balance.formatted}. Top up`))
+            .height(48).padding(0).backgroundColor(Color.Transparent)
+            .accessibilityText(this.label(`账户余额：${this.balance.formatted}（点击充值）`,
+              `Account balance: ${this.balance.formatted} (tap to top up)`))
             .onClick(() => { void this.openLink('https://platform.deepseek.com/top_up'); })
           }
 
           Row() {
-            Text('⋯').fontSize(18).fontColor($r('app.color.native_chat_secondary'))
+            Text('⋯').fontSize(18).fontColor($r('app.color.native_chat_action'))
           }
-          .height(52).padding({ right: 6 }).focusable(false).accessibilityLevel('no-hide-descendants')
+          .height(48).constraintSize({ minWidth: 16 }).justifyContent(FlexAlign.End).flexGrow(1)
+          .focusable(false).accessibilityLevel('no-hide-descendants')
           .onClick(() => { this.openSidebarSettings(); })
         }
-        .height(52).width('100%')
+        .height(48).width('100%').padding({ left: 10, right: 10 }).margin({ top: 10, bottom: 4 })
       }
     }
     .width(desktop ? 261 : this.drawerWidth()).height('100%').padding({ left: 16, right: 10, top: 14, bottom: 8 })
