@@ -150,6 +150,12 @@ const DELETE_FILE_DOCS_URL = 'https://api-docs.deepseek.com/api/delete-file';
 const HISTORY_SAVE_RETRY_DELAYS = [1000, 2500];
 const STREAM_CHECKPOINT_MS = 1500;
 const USER_BUBBLE_HORIZONTAL_PADDING = 16;
+const SIDEBAR_MENU_WIDTH = 124;
+const SIDEBAR_MENU_TRIGGER_SIZE = 32;
+const SIDEBAR_MENU_EDGE_INSET = 16;
+const SIDEBAR_DESKTOP_WIDTH = 261;
+const SIDEBAR_ROW_END_PADDING = 6;
+const SIDEBAR_END_PADDING = 10;
 
 class ComposerCaretCallback extends FrameCallback {
   private readonly restore: () => void;
@@ -5048,6 +5054,13 @@ struct NativeChat {
     void this.save();
   }
 
+  private sidebarMenuAnchorInset(): number {
+    const drawerWidth = this.wide() ? SIDEBAR_DESKTOP_WIDTH : this.drawerWidth();
+    const triggerLeft = drawerWidth - SIDEBAR_END_PADDING - SIDEBAR_ROW_END_PADDING - SIDEBAR_MENU_TRIGGER_SIZE;
+    // Stay inside the native menu's window gutter so ArkUI can keep the requested alignment.
+    return Math.ceil(Math.max(5, triggerLeft + SIDEBAR_MENU_WIDTH + SIDEBAR_MENU_EDGE_INSET - this.viewportWidth));
+  }
+
   @Builder
   private sidebarMenuLabel(icon: Resource, title: string, color: ResourceColor = $r('app.color.native_chat_primary')) {
     Row({ space: 8 }) {
@@ -5073,6 +5086,24 @@ struct NativeChat {
         $r('app.color.native_chat_error')))
         .onClick(() => { this.deleteSessions([session.id], 'single'); })
     }
+    .constraintSize({ minWidth: SIDEBAR_MENU_WIDTH })
+  }
+
+  @Builder
+  private sidebarMenuTrigger(session: NativeSidebarSession, inset: number) {
+    // Widen the menu anchor while preserving the icon position and touch target.
+    Blank().width(SIDEBAR_MENU_TRIGGER_SIZE + 4)
+    Button('⋯', { buttonStyle: ButtonStyleMode.TEXTUAL }).fontSize(18)
+      .width(SIDEBAR_MENU_TRIGGER_SIZE + inset).height(SIDEBAR_MENU_TRIGGER_SIZE)
+      .padding({ left: inset, right: 0, top: 0, bottom: 0 })
+      .position({ right: 0, top: this.wide() ? 4 : 6 })
+      .responseRegion({ x: inset, y: 0, width: SIDEBAR_MENU_TRIGGER_SIZE, height: SIDEBAR_MENU_TRIGGER_SIZE })
+      .fontColor($r('app.color.native_chat_secondary')).accessibilityText(this.label('对话选项', "Chat options"))
+      .bindMenu(this.sessionMenu(session), {
+        placement: Placement.BottomLeft,
+        borderRadius: 12,
+        targetSpace: LengthMetrics.vp(4),
+      })
   }
 
   @Builder
@@ -5123,12 +5154,10 @@ struct NativeChat {
         })
         .priorityGesture(LongPressGesture({ duration: 450 }).onAction(() => { this.beginSidebarSelection(session.id); }))
         if (!this.selecting) {
-          Button('⋯', { buttonStyle: ButtonStyleMode.TEXTUAL }).fontSize(18).width(32).height(32).padding(0).margin({ left: 4 })
-            .fontColor($r('app.color.native_chat_secondary')).accessibilityText(this.label('对话选项', "Chat options"))
-            .bindMenu(this.sessionMenu(session), { borderRadius: 12 })
+          this.sidebarMenuTrigger(session, this.sidebarMenuAnchorInset())
         }
       }
-      .height(this.wide() ? 40 : 44).width('100%').padding({ left: this.wide() ? 10 : 12, right: 6 })
+      .height(this.wide() ? 40 : 44).width('100%').padding({ left: this.wide() ? 10 : 12, right: SIDEBAR_ROW_END_PADDING })
       .borderRadius(this.wide() ? 12 : 16)
       .backgroundColor(!this.selecting && session.id === this.history.activeId ?
         $r('app.color.native_chat_active_session') : Color.Transparent)
@@ -5316,7 +5345,8 @@ struct NativeChat {
         .height(48).width('100%').padding({ left: 10, right: 10 }).margin({ top: 10, bottom: 4 })
       }
     }
-    .width(desktop ? 261 : this.drawerWidth()).height('100%').padding({ left: 16, right: 10, top: 14, bottom: 8 })
+    .width(desktop ? SIDEBAR_DESKTOP_WIDTH : this.drawerWidth()).height('100%')
+    .padding({ left: 16, right: SIDEBAR_END_PADDING, top: 14, bottom: 8 })
   }
 
   @Builder
