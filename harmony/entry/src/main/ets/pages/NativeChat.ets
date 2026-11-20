@@ -7,6 +7,7 @@ import {
 import { common, ConfigurationConstant, wantConstant } from '@kit.AbilityKit';
 import { KeyboardAvoidMode, LengthMetrics } from '@kit.ArkUI';
 import { KeyCode } from '@kit.InputKit';
+import { inputMethod } from '@kit.IMEKit';
 import { url, util } from '@kit.ArkTS';
 import { preferences } from '@kit.ArkData';
 import { webview } from '@kit.ArkWeb';
@@ -280,6 +281,8 @@ struct NativeChat {
   @State private editText: string = '';
   private editorComposing: boolean = false;
   private editorFocusPending: string = '';
+  private editorFocused: boolean = false;
+  private editorKeyboardTimer: number = -1;
   private readonly messageEditor = new TextAreaController();
   private readonly composerEditor = new TextAreaController();
   private composerSelection: TextRange = {};
@@ -2694,10 +2697,13 @@ struct NativeChat {
   }
 
   private closeMessageEditor(): void {
+    if (this.editorKeyboardTimer >= 0) clearTimeout(this.editorKeyboardTimer);
+    this.editorKeyboardTimer = -1;
     this.editId = '';
     this.editText = '';
     this.editorComposing = false;
     this.editorFocusPending = '';
+    this.editorFocused = false;
   }
 
   private focusMessageEditor(id: string): void {
@@ -2709,7 +2715,16 @@ struct NativeChat {
         this.getUIContext().getFocusController().requestFocus('nuwa-message-editor');
       } catch {
         // The row can disappear if the author changes the visible branch.
+        return;
       }
+      this.editorKeyboardTimer = setTimeout(() => {
+        this.editorKeyboardTimer = -1;
+        if (this.visible && this.editId === id && this.editorFocused &&
+          canIUse('SystemCapability.MiscServices.InputMethodFramework')) {
+          // The input method attaches to the editor after its focus changes.
+          void inputMethod.getController().showTextInput().catch(() => {});
+        }
+      }, 80);
     }, 0);
   }
 
@@ -3567,14 +3582,21 @@ struct NativeChat {
               this.editText = value;
             })
             .onKeyEvent((event: KeyEvent): boolean => this.editMessageKey(event, message))
-            .onAppear(() => { this.focusMessageEditor(message.id); })
+            .onFocus(() => { this.editorFocused = true; })
+            .onBlur(() => { this.editorFocused = false; })
+            .onAreaChange((_old: Area, area: Area) => {
+              if (Number(area.height) > 0) this.focusMessageEditor(message.id);
+            })
           Row({ space: 8 }) {
             Button(this.label('取消', 'Cancel'), { type: ButtonType.Capsule })
-              .height(32).fontSize(this.appFontSize(13)).fontColor($r('app.color.native_chat_primary'))
-              .border({ width: 1, color: $r('app.color.native_chat_stroke') }).backgroundColor(Color.Transparent)
+              .height(32).constraintSize({ minWidth: 58 }).padding({ left: 14, right: 14 })
+              .fontSize(this.appFontSize(14)).fontWeight(FontWeight.Normal).fontColor($r('app.color.native_chat_primary'))
+              .border({ width: 1, color: $r('app.color.native_chat_editor_button_border') }).backgroundColor(Color.Transparent)
               .onClick(() => { this.closeMessageEditor(); })
             Button(this.label('发送', 'Send'), { type: ButtonType.Capsule })
-              .height(32).fontSize(this.appFontSize(13)).backgroundColor($r('app.color.native_chat_blue'))
+              .height(32).constraintSize({ minWidth: 58 }).padding({ left: 14, right: 14 })
+              .fontSize(this.appFontSize(14)).fontWeight(FontWeight.Medium).fontColor(Color.White)
+              .backgroundColor($r('app.color.native_chat_blue'))
               .enabled(this.canSendMessageEdit(message)).onClick(() => { this.edit(message); })
           }
           .width('100%').justifyContent(FlexAlign.End).padding({ top: 6, bottom: 10, left: 10, right: 10 })
@@ -5306,7 +5328,7 @@ struct NativeChat {
           const height = Number(area.height);
           if (height !== this.listViewportHeight) {
             this.listViewportHeight = height;
-            if (this.followLatest && this.laterCount === 0) this.scrollToLatest();
+            if (!this.editId && this.followLatest && this.laterCount === 0) this.scrollToLatest();
           }
         })
         .padding({ left: 20, right: 20, bottom: 16 })
