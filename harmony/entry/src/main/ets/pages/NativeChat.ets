@@ -1547,6 +1547,7 @@ struct NativeChat {
     this.draft = draft?.text ?? '';
     this.draftFiles = draft?.files ?? [];
     this.composerSelection = {};
+    this.compactToolsOpen = false;
   }
 
   private rememberCurrentDraft(): void {
@@ -2315,7 +2316,9 @@ struct NativeChat {
     const thread = visibleMessages(session);
     const message = createConversationMessage('user', text, '');
     message.files = this.draftFiles.map<NativeAttachment>((file: NativeDraftAttachment): NativeAttachment => file.item);
-    this.startReply(session, thread.length ? thread[thread.length - 1].id : null, message, true);
+    if (this.startReply(session, thread.length ? thread[thread.length - 1].id : null, message, true)) {
+      this.stopReadAloud();
+    }
   }
 
   private canContinue(message: NativeConversationMessage): boolean {
@@ -2554,6 +2557,10 @@ struct NativeChat {
     this.voiceInputPhase = 'idle';
     this.stopRecordingClock();
     this.recognition.cancel();
+    this.stopReadAloud();
+  }
+
+  private stopReadAloud(): void {
     this.readingId = '';
     this.speaker.stop();
   }
@@ -2592,10 +2599,7 @@ struct NativeChat {
 
   private toggleSpeaker(): void {
     const wasReading = !!this.readingId;
-    if (wasReading) {
-      this.readingId = '';
-      this.speaker.stop();
-    }
+    if (wasReading) this.stopReadAloud();
     const muted = wasReading || !this.settings.ttsMuted;
     this.settings.ttsMuted = muted;
     void this.saveSettings();
@@ -3742,6 +3746,7 @@ struct NativeChat {
       const next = upsertConversation(this.history, imported, true);
       await this.storage.saveConversations(context, next);
       this.rememberCurrentDraft();
+      if (this.history.activeId !== imported.id) this.stopVoice();
       this.history = next;
       this.restoreDraft(imported.id);
       this.shareImportVisible = false;
