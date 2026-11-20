@@ -741,6 +741,7 @@ private struct ChatDrawerLayout<Sidebar: View, Surface: View>: View {
             surface
                 .frame(width: surfaceWidth, height: size.height)
                 .background(Color.nuwaBgBase.ignoresSafeArea(.container, edges: .vertical))
+                .geometryGroup()
                 .position(x: offset + surfaceWidth / 2, y: size.height / 2)
                 .animation(wide || dragOffset != nil ? nil : spring, value: compactOpen)
         }
@@ -1034,77 +1035,76 @@ private struct ChatHeaderView: View {
 
 
     var body: some View {
-        NuwaGlassGroup(spacing: 10) {
-            HStack(spacing: 10) {
-                Button(action: onOpenDrawer) {
-                    Image(systemName: "sidebar.leading")
-                        .font(.system(size: 17, weight: .medium))
+        HStack(spacing: 10) {
+            Button(action: onOpenDrawer) {
+                Image(systemName: "sidebar.leading")
+                    .font(.system(size: 17, weight: .medium))
+                    .foregroundStyle(Color.nuwaLabelPrimary)
+                    .frame(width: 44, height: 44)
+                    .background(Color.nuwaControlFill, in: Circle())
+                    .overlay(Circle().strokeBorder(Color.nuwaControlBorder, lineWidth: 0.75))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(settings.locale == .enUS
+                ? (sidebarShown ? "Hide sidebar" : "Show sidebar")
+                : (sidebarShown ? "隐藏边栏" : "打开边栏"))
+
+            if hasMessages {
+                let displayTitle = sessionTitle.isEmpty ? L10n.t("untitledChat", locale: settings.locale) : sessionTitle
+                Text(displayTitle)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(Color.nuwaLabelPrimary)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .contentShape(Rectangle())
+                    .onTapGesture(count: 2, perform: onScrollToTop)
+                    .accessibilityAction(named: Text(settings.locale == .enUS ? "Scroll to top" : "回到顶部"), onScrollToTop)
+                    .allowsHitTesting(!drawerModal)
+                    .accessibilityHidden(drawerModal)
+            } else {
+                Spacer(minLength: 0)
+            }
+
+            HStack(spacing: 2) {
+                Button {
+                    if speech.isSpeaking {
+                        speech.stopSpeaking()
+                        settings.ttsMuted = true
+                    } else {
+                        settings.ttsMuted.toggle()
+                        onToast(settings.ttsMuted ? "已静音朗读" : "已取消朗读静音")
+                    }
+                } label: {
+                    Image(systemName: (speech.isSpeaking || !settings.ttsMuted) ? "speaker.wave.2" : "speaker.slash")
+                        .font(.system(size: 16, weight: .medium))
                         .foregroundStyle(Color.nuwaLabelPrimary)
-                        .frame(width: 44, height: 44)
-                        .nuwaGlass(in: Circle(), interactive: true)
+                        .frame(width: 38, height: 34)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(settings.locale == .enUS
-                    ? (sidebarShown ? "Hide sidebar" : "Show sidebar")
-                    : (sidebarShown ? "隐藏边栏" : "打开边栏"))
+                .accessibilityLabel("朗读开关")
 
-                if hasMessages {
-                    let displayTitle = sessionTitle.isEmpty ? L10n.t("untitledChat", locale: settings.locale) : sessionTitle
-                    Text(displayTitle)
-                        .font(.system(size: 14, weight: .medium))
+                Button(action: onCreateNewSession) {
+                    Image(systemName: "plus.bubble")
+                        .font(.system(size: 16, weight: .medium))
                         .foregroundStyle(Color.nuwaLabelPrimary)
-                        .lineLimit(1)
-                        .frame(maxWidth: .infinity, alignment: .center)
+                        .frame(width: 38, height: 34)
                         .contentShape(Rectangle())
-                        .onTapGesture(count: 2, perform: onScrollToTop)
-                        .accessibilityAction(named: Text(settings.locale == .enUS ? "Scroll to top" : "回到顶部"), onScrollToTop)
-                        .allowsHitTesting(!drawerModal)
-                        .accessibilityHidden(drawerModal)
-                } else {
-                    Spacer(minLength: 0)
                 }
-
-                HStack(spacing: 2) {
-                    Button {
-                        if speech.isSpeaking {
-                            speech.stopSpeaking()
-                            settings.ttsMuted = true
-                        } else {
-                            settings.ttsMuted.toggle()
-                            onToast(settings.ttsMuted ? "已静音朗读" : "已取消朗读静音")
-                        }
-                    } label: {
-                        Image(systemName: (speech.isSpeaking || !settings.ttsMuted) ? "speaker.wave.2" : "speaker.slash")
-                            .font(.system(size: 16, weight: .medium))
-                            .foregroundStyle(Color.nuwaLabelPrimary)
-                            .frame(width: 38, height: 34)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("朗读开关")
-
-                    Button(action: onCreateNewSession) {
-                        Image(systemName: "plus.bubble")
-                            .font(.system(size: 16, weight: .medium))
-                            .foregroundStyle(Color.nuwaLabelPrimary)
-                            .frame(width: 38, height: 34)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .keyboardShortcut("n", modifiers: .command)
-                    .accessibilityLabel("开启新对话")
-                }
-                .padding(.horizontal, 4)
-                .frame(height: 42)
-                .nuwaGlass(in: Capsule(), interactive: true)
-                .allowsHitTesting(!drawerModal)
-                .accessibilityHidden(drawerModal)
+                .buttonStyle(.plain)
+                .keyboardShortcut("n", modifiers: .command)
+                .accessibilityLabel("开启新对话")
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 8)
-            .padding(.bottom, 6)
+            .padding(.horizontal, 4)
+            .frame(height: 42)
+            .nuwaGlass(in: Capsule(), interactive: true)
+            .allowsHitTesting(!drawerModal)
+            .accessibilityHidden(drawerModal)
         }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 6)
     }
 }
 
