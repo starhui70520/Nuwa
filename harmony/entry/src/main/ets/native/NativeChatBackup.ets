@@ -619,13 +619,23 @@ export function importedAttachmentPreview(session: NativeConversation, item: Nat
   return '';
 }
 
+export function importedAttachmentOriginalUri(context: common.UIAbilityContext, session: NativeConversation,
+  item: NativeAttachment): string {
+  const image = retainedImage(session, item);
+  try {
+    return image?.blobId ? fileUri.getUriFromPath(backupImagePath(context, image.blobId)) : '';
+  } catch {
+    return '';
+  }
+}
+
 export async function hydrateImportedAttachment(context: common.UIAbilityContext, session: NativeConversation,
   item: NativeAttachment): Promise<NativeAttachment | null> {
   if (item.local) return null;
   const image = retainedImage(session, item);
   if (!image) return null;
   const store = async (input: NativeBackupZipInput, checksum?: number): Promise<NativeAttachment | null> => {
-    if ((image.size !== undefined && input.size !== image.size) || input.size > MAX_BACKUP_ENTRY_BYTES) {
+    if (image.size !== undefined && input.size !== image.size) {
       throw new Error('图片原件大小无效。');
     }
     if (input.size === 0) return null;
@@ -1086,6 +1096,14 @@ function jsonEntry(name: string, value: Object): NativeBackupZipEntry {
   return { name: name, data: backupUtf8(JSON.stringify(value)) };
 }
 
+async function writeArchiveJson(writer: NativeBackupZipWriter, name: string, value: Object): Promise<void> {
+  const entry = jsonEntry(name, value);
+  if (entry.data.byteLength > MAX_BACKUP_ENTRY_BYTES) {
+    throw new Error('备份中的单个 JSON 文件超过 64 MiB。');
+  }
+  await writer.add(entry.name, memoryBackupInput(entry.data));
+}
+
 function summaryEntry(file: ArchiveSession): ArchiveIndexEntry {
   return {
     id: file.id, title: file.title, pinned: file.pinned, message_count: file.messages.length,
@@ -1347,13 +1365,13 @@ export class NativeChatBackup {
       const manifest: ArchiveManifest = { export_format_version: VERSION };
       const images = new Map<string, BackupImageSource>();
       const index: ArchiveIndexEntry[] = [];
-      await writer.add(MANIFEST, memoryBackupInput(backupUtf8(JSON.stringify(manifest))));
+      await writeArchiveJson(writer, MANIFEST, manifest);
       for (const session of sessions) {
         const file = archiveSession(session, images, locale);
-        await writer.add(sessionPath(file.id), memoryBackupInput(backupUtf8(JSON.stringify(file))));
+        await writeArchiveJson(writer, sessionPath(file.id), file);
         index.push(summaryEntry(file));
       }
-      await writer.add(SESSION_INDEX, memoryBackupInput(backupUtf8(JSON.stringify(index))));
+      await writeArchiveJson(writer, SESSION_INDEX, index);
       for (const name of images.keys()) {
         const image = images.get(name);
         if (image) {

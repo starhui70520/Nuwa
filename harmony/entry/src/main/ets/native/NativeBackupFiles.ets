@@ -1,12 +1,14 @@
 import { common } from '@kit.AbilityKit';
 import { util } from '@kit.ArkTS';
-import { fileIo } from '@kit.CoreFileKit';
+import { BusinessError } from '@kit.BasicServicesKit';
+import { fileIo, statfs } from '@kit.CoreFileKit';
 import { NativeBackupZipInput, NativeBackupZipStreamEntry } from './NativeBackupZip';
 import { ensureNativeDirectory } from './NativeFileSystem';
 
 const IO_CHUNK = 256 * 1024;
 const IMAGE_DIRECTORY = 'nuwa-history-images';
 const PRUNE_AFTER_MS = 24 * 60 * 60 * 1_000;
+const FILE_SYSTEM_FULL = 13900025;
 
 interface RetainedImage {
   blobId?: string;
@@ -14,6 +16,26 @@ interface RetainedImage {
 
 interface RetainedArchive {
   images?: RetainedImage[];
+}
+
+class NativeBackupSpaceError extends Error {
+  constructor() {
+    super('设备存储空间不足，请清理空间后重试。');
+  }
+}
+
+export function isBackupSpaceError(error: Error): boolean {
+  return error instanceof NativeBackupSpaceError || (error as BusinessError)?.code === FILE_SYSTEM_FULL;
+}
+
+export async function ensureBackupSpace(directory: string, requiredBytes: number): Promise<void> {
+  let available = -1;
+  try {
+    available = await statfs.getFreeSize(directory);
+  } catch {
+    // If space cannot be queried, the filesystem still enforces its own write limit.
+  }
+  if (available >= 0 && requiredBytes > available) throw new NativeBackupSpaceError();
 }
 
 function validBlobId(id: string): boolean {
@@ -104,6 +126,7 @@ export async function copyBackupFile(from: string, to: string): Promise<void> {
 
 export async function stageBackupImage(context: common.UIAbilityContext,
   entry: NativeBackupZipStreamEntry): Promise<string> {
+  await ensureBackupSpace(context.filesDir, entry.size);
   const id = util.generateRandomUUID(true);
   await ensureNativeDirectory(imageDirectory(context));
   const path = backupImagePath(context, id);

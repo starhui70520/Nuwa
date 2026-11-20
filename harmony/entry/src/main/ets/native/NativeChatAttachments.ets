@@ -5,6 +5,7 @@ import { zlib } from '@kit.BasicServicesKit';
 import { fileIo, fileUri, picker } from '@kit.CoreFileKit';
 import { image } from '@kit.ImageKit';
 import { http } from '@kit.NetworkKit';
+import { ensureBackupSpace } from './NativeBackupFiles';
 import { NativeChatConfig } from './NativeChatClient';
 import { NativeBackupZipInput } from './NativeBackupZip';
 import type { NativeClipboardAttachments } from './NativeAttachmentClipboard';
@@ -586,9 +587,10 @@ export class NativeChatAttachments {
 
   async storeOriginal(context: common.UIAbilityContext, item: NativeAttachment, source: NativeBackupZipInput,
     mimeType: string, expectedChecksum?: number): Promise<NativeAttachment> {
-    if (!Number.isSafeInteger(source.size) || source.size <= 0 || source.size > MAX_BYTES) {
+    if (!Number.isSafeInteger(source.size) || source.size <= 0) {
       throw new Error('本地附件大小无效。');
     }
+    await ensureBackupSpace(context.filesDir, source.size);
     const stored: NativeAttachment = {
       id: util.generateRandomUUID(true),
       archiveId: item.archiveId ?? item.id,

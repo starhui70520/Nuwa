@@ -14,7 +14,7 @@ import { NativeChatStorage } from '../native/NativeChatStorage';
 import { MAX_FILE_BACKUP_BYTES } from '../native/NativeBackupZip';
 import {
   completeNativeMigrationDownload, consumePendingNativeMigration, discardIncompleteNativeMigration,
-  discardPendingNativeMigration, hasPendingNativeMigration, nativeMigrationDownloadPath,
+  discardPendingNativeMigration, hasPendingNativeMigration, NATIVE_MIGRATION_SIZE_ERROR, nativeMigrationDownloadPath,
 } from '../native/NativePendingMigration';
 import { buildNativeMigrationExportScript } from '../native/NativeMigrationStrategy';
 import { openNuwaPrivacyPolicy } from '../native/PrivacyPolicy';
@@ -735,7 +735,7 @@ struct Index {
     }
     if (item.getTotalBytes() > MAX_FILE_BACKUP_BYTES) {
       item.cancel();
-      this.migrationStatusText = '导出包超过 512 MB，无法导入';
+      this.migrationStatusText = NATIVE_MIGRATION_SIZE_ERROR;
       return;
     }
     try {
@@ -782,7 +782,7 @@ struct Index {
         this.nativeMigrationDownload = item;
         if (item.getReceivedBytes() > MAX_FILE_BACKUP_BYTES) {
           this.cancelNativeMigrationDownload();
-          this.migrationStatusText = '导出包超过 512 MB，无法导入';
+          this.migrationStatusText = NATIVE_MIGRATION_SIZE_ERROR;
         }
       }
     });

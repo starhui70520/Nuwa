@@ -30,8 +30,10 @@ import {
   nativeBackupDropUri, readNativeAttachmentDrop,
 } from '../native/NativeAttachmentDrop';
 import {
-  commitChatBackup, hydrateImportedAttachment, importedAttachmentPreview, NativeChatBackup, nativeArchivedReplyTemplate,
+  commitChatBackup, hydrateImportedAttachment, importedAttachmentOriginalUri, importedAttachmentPreview,
+  NativeChatBackup, nativeArchivedReplyTemplate,
 } from '../native/NativeChatBackup';
+import { isBackupSpaceError } from '../native/NativeBackupFiles';
 import {
   NativeChatCitation, NativeChatSource, NativeChatSources, nativeSearchResults, safeNativeSourceUrl,
 } from '../native/NativeChatSources';
@@ -2594,7 +2596,9 @@ struct NativeChat {
       return;
     }
     const context = this.host();
-    const uri = this.attachments.previewUri(context, item);
+    const session = this.session();
+    const uri = this.attachments.previewUri(context, item) ||
+      (session ? importedAttachmentOriginalUri(context, session, item) : '');
     if (!uri) {
       this.toast(this.label('本机没有该附件原件', 'The original attachment is unavailable on this device.'));
       return;
@@ -3314,14 +3318,16 @@ struct NativeChat {
       }
       return true;
     } catch (error) {
+      const storageFull = isBackupSpaceError(error as Error);
+      const spaceMessage = this.label('设备存储空间不足，请清理空间后重试。', 'Free up storage space and try again.');
       if (settingsFile) {
         this.historyImportFailed = true;
-        this.historyImportResult = this.label(
+        this.historyImportResult = storageFull ? spaceMessage : this.label(
           '文件导入失败，可能是文件格式错误或使用了旧版的对话导出 ZIP 文件，请前往 DeepSeek 重新导出历史对话文件后再次导入。',
           'File import failed. The file format may be invalid, or the ZIP file may use an older chat export format. ' +
           'Please export your chat history from DeepSeek again and retry the import.');
       } else {
-        this.toast((error as Error).message || this.label('文件导入失败', "Unable to import file"));
+        this.toast(storageFull ? spaceMessage : (error as Error).message || this.label('文件导入失败', "Unable to import file"));
       }
       return false;
     } finally {
@@ -3340,7 +3346,9 @@ struct NativeChat {
         this.toast(this.label('已导出历史对话', "Chat history exported"));
       }
     } catch (error) {
-      this.toast((error as Error).message || this.label('导出失败', "Export failed"));
+      this.toast(isBackupSpaceError(error as Error) ?
+        this.label('设备存储空间不足，请清理空间后重试。', 'Free up storage space and try again.') :
+        (error as Error).message || this.label('导出失败', "Export failed"));
     } finally {
       this.backupBusy = false;
     }

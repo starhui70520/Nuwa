@@ -6,6 +6,7 @@ import { MAX_FILE_BACKUP_BYTES } from './NativeBackupZip';
 const COMPLETED_MIGRATION_ZIP = 'nuwa-native-migration.zip';
 const FILE_NOT_FOUND = 13900002;
 const activeImports = new Set<string>();
+export const NATIVE_MIGRATION_SIZE_ERROR = '导出包超出 ZIP32 格式容量，无法导入';
 
 function completedPath(context: common.UIAbilityContext): string {
   return `${context.filesDir}/${COMPLETED_MIGRATION_ZIP}`;
@@ -58,7 +59,7 @@ export async function completeNativeMigrationDownload(context: common.UIAbilityC
       throw new Error('导出包下载未完成，请重新下载');
     }
     if (stat.size > MAX_FILE_BACKUP_BYTES) {
-      throw new Error('导出包超过 512 MB，无法导入');
+      throw new Error(NATIVE_MIGRATION_SIZE_ERROR);
     }
     const header = new ArrayBuffer(4);
     if (await fileIo.read(file.fd, header) !== header.byteLength ||
