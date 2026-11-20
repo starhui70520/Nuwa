@@ -49,6 +49,7 @@ import { NativeMarkdown } from '../native/NativeMarkdown';
 import { NativeMathRendererHost } from '../native/NativeMathRendererHost';
 import { NativeDraftStorage, NativeStoredDraft } from '../native/NativeDraftStorage';
 import { CHAT_PAGE_SIZE, nativeMessageRange, NativeMessageList, NativeMessageRange, NativeMessageRow } from '../native/NativeMessageList';
+import { nativeBranchControlsId, nativeBranchControlsTop, NativeBranchScrollAnchor } from '../native/NativeBranchScrollAnchor';
 import { NativeMigrationPrompt } from '../native/NativeMigrationPrompt';
 import { NativeMigrationIntent } from '../native/NativeMigrationStrategy';
 import { hasPendingNativeMigration } from '../native/NativePendingMigration';
@@ -245,6 +246,7 @@ struct NativeChat {
   private sidebarResultCount: number = 0;
   private sidebarDateTimer: number = -1;
   private readonly messageList = new NativeMessageList();
+  private readonly branchScrollAnchor = new NativeBranchScrollAnchor();
   private messagePath: NativeConversationMessage[] = [];
   private visibleSession?: NativeConversation;
   private messageRange: NativeMessageRange = { start: 0, end: 0 };
@@ -335,6 +337,7 @@ struct NativeChat {
   }
 
   onPageHide(): void {
+    this.branchScrollAnchor.cancel();
     this.fileDropHint = null;
     this.clearUploadQuota();
     this.sidebarSearch.cancel();
@@ -1846,7 +1849,9 @@ struct NativeChat {
             this.lastStreamSave = Date.now();
             void this.save(context, true);
           }
-        }, (event: string): void => {
+        }, (event: string, outcome: NativeReplyOutcome): void => {
+          if (!outcome.canPrefill) reply.message.canPrefill = false;
+          if (outcome.thinkingSignature) reply.message.thinkingSignature = outcome.thinkingSignature;
           const readLink = readLinks.apply(event, reply.message.content.length);
           if (readLink) {
             reply.message.readLinks = [...(reply.message.readLinks ?? []), readLink]
@@ -1944,7 +1949,8 @@ struct NativeChat {
     for (const step of current.steps) {
       const adjusted: NativeToolTimelineStep = {
         type: step.type, key: `${prefix.length}-${step.key}`, kind: step.kind, status: step.status,
-        queries: step.queries, resultUrls: step.resultUrls, pages: step.pages, patterns: step.patterns, text: step.text,
+        queries: step.queries, resultUrls: step.resultUrls, hasSuccessfulSearch: step.hasSuccessfulSearch,
+        pages: step.pages, patterns: step.patterns, text: step.text,
         startOffset: step.startOffset === undefined ? undefined : prefix.length + step.startOffset,
         active: step.active,
       };
@@ -1984,7 +1990,7 @@ struct NativeChat {
       if (error && !reply.message.failure) {
         const status = cause instanceof NativeModelError ? cause.status : undefined;
         reply.message.failure = {
-          kind: status === 0 ? 'network' : 'response',
+          kind: cause instanceof NativeModelError && cause.kind === 'network' ? 'network' : 'response',
           detail: ((cause as Error).message || '').slice(0, 512),
           status: status && status >= 100 && status <= 599 ? status : undefined,
         };
@@ -2031,7 +2037,7 @@ struct NativeChat {
     const hasServerTools = !!message.readLinks?.length ||
       message.toolTimeline?.steps.some((step: NativeToolTimelineStep): boolean => step.type !== 'thinking' && step.type !== 'text');
     return !!session && path[path.length - 1]?.id === message.id && path[path.length - 2]?.role === 'user' &&
-      message.canPrefill === true && !message.sources?.length && message.stopReason !== 'refusal' && message.stopReason !== 'tool_use' &&
+      message.canPrefill === true && message.stopReason !== 'refusal' && message.stopReason !== 'tool_use' &&
       !hasServerTools && nativeArchivedReplyTemplate(session, message.id) === undefined &&
       (message.status === 'stopped' || (message.status === 'done' && message.stopReason === 'max_tokens'));
   }
@@ -2042,7 +2048,7 @@ struct NativeChat {
       return;
     }
     const config = this.requestConfig();
-    config.model = message.model || config.model;
+    config.model = config.model || message.model || 'deepseek-flash';
     config.thinking = message.thinking ?? config.thinking;
     config.search = message.search ?? config.search;
     config.requestTitle = !session.title;
@@ -2110,7 +2116,7 @@ struct NativeChat {
       this.openSettings('account');
       return;
     }
-    config.model = failed.model || config.model;
+    config.model = config.model || failed.model || 'deepseek-flash';
     config.thinking = failed.thinking ?? config.thinking;
     config.search = failed.search ?? config.search;
     config.requestTitle = !session.title;
@@ -2207,12 +2213,21 @@ struct NativeChat {
       const listIndex = pathIndex - this.messageRange.start + Number(this.earlierCount > 0);
       const keepPosition = pathIndex >= this.messageRange.start && pathIndex < this.messageRange.end;
       const top = keepPosition ? this.scroller.getItemRect(listIndex).y : 0;
+      const context = this.getUIContext();
+      const controlsTop = keepPosition ? nativeBranchControlsTop(context, message.id) : undefined;
+      this.branchScrollAnchor.cancel();
       this.closeMessageEditor();
       this.followLatest = false;
       this.closeSources();
       this.history = upsertConversation(this.history, selectMessageVersion(session, sibling.id));
       if (keepPosition && pathIndex >= this.messageRange.start && pathIndex < this.messageRange.end) {
-        this.restoreListPosition(pathIndex - this.messageRange.start + Number(this.earlierCount > 0), top);
+        const targetIndex = pathIndex - this.messageRange.start + Number(this.earlierCount > 0);
+        if (controlsTop === undefined) {
+          this.restoreListPosition(targetIndex, top);
+        } else {
+          this.branchScrollAnchor.restore(context, this.scroller, sibling.id, targetIndex, controlsTop,
+            (): boolean => this.visible && this.history.activeId === session.id && this.messagePath[pathIndex]?.id === sibling.id);
+        }
       }
       this.stopVoice();
       void this.save();
@@ -2874,6 +2889,7 @@ struct NativeChat {
           26, 14, $r('app.color.native_chat_secondary'), Color.Transparent,
           () => !this.reply() && this.version(message) + 1 < this.versions(message).length)
       }
+      .id(nativeBranchControlsId(message.id))
     }
   }
 
@@ -3066,7 +3082,7 @@ struct NativeChat {
     if (message.failure) {
       return describeNativeReplyFailure(message.failure, this.settings.locale);
     }
-    return { text: this.archivedReplyTemplate(message) || this.label('回复失败，请重试', 'Reply failed. Please try again.') };
+    return { text: this.archivedReplyTemplate(message) || '' };
   }
 
   private copyableReply(message: NativeConversationMessage): string {
@@ -3126,10 +3142,8 @@ struct NativeChat {
           }
           this.sourcesSummary(message.id + ':summary', nativeSearchResults(message.sources ?? []))
         }
-        if (message.status === 'error' && message.stopReason !== 'refusal') {
+        if (message.status === 'error' && message.stopReason !== 'refusal' && this.replyNotice(message).text) {
           this.replyErrorNotice(message)
-        } else if (message.status === 'stopped') {
-          Text(this.label('已停止生成', "Generation stopped")).fontSize(13).fontColor($r('app.color.native_chat_secondary'))
         }
         Row({ space: 10 }) {
           this.branchControls(message)

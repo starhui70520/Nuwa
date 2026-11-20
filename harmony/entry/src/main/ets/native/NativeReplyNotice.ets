@@ -30,7 +30,7 @@ export function describeNativeReplyFailure(failure: NativeReplyFailure, locale: 
   const english = locale === 'en-US';
   switch (failure.kind) {
     case 'network':
-      return { text: english ? 'Network error. Please check your network connection.' : '网络异常，请检查你的网络状况' };
+      return { text: english ? 'Network Error. Please check your network status.' : '网络异常，请检查你的网络状况' };
     case 'upload':
       return { text: failure.detail || (english ? 'Upload failed' : '上传失败') };
     case 'unsupported-image':
@@ -42,19 +42,19 @@ export function describeNativeReplyFailure(failure: NativeReplyFailure, locale: 
   switch (failure.status) {
     case 401:
       return {
-        text: english ? 'The API Key is invalid or has been deleted. Replace it and try again.' :
+        text: english ? 'The API Key is invalid or has been deleted. Please replace it and try again.' :
           'API Key 无效或已被删除，请更换后重试', action: 'api-key',
       };
     case 402:
       return {
-        text: english ? 'Insufficient account balance. Top up and try again.' : '账户余额不足，请充值后重试',
+        text: english ? 'Insufficient account balance. Please top up and try again.' : '账户余额不足，请充值后重试',
         action: 'top-up',
       };
     case 429:
       return { text: english ? 'Too many requests. Please try again later.' : '请求过于频繁，请稍后再试' };
   }
   if ((failure.status ?? 0) >= 500) {
-    return { text: english ? 'Server busy. Please try again later.' : '服务器繁忙，请稍后再试' };
+    return { text: english ? 'Server busy, please try again later.' : '服务器繁忙，请稍后再试' };
   }
-  return { text: failure.detail || (english ? 'Reply failed. Please try again.' : '回复失败，请重试') };
+  return { text: failure.detail };
 }

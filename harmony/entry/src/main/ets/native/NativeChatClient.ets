@@ -229,7 +229,10 @@ const MAX_BYTES_AWAITING_HEADERS: number = 1024 * 1024;
 const ANTHROPIC_STOP_REASONS: Set<string> = new Set<string>(['end_turn', 'max_tokens', 'tool_use', 'refusal']);
 const ANTHROPIC_SEARCH_KINDS: Set<string> = new Set<string>(['search', 'deep_search', 'image_search', 'deep_image_search']);
 
+export type NativeModelErrorKind = 'http' | 'stream' | 'network' | 'interrupted' | 'protocol';
+
 export class NativeModelError extends Error {
+  readonly kind: NativeModelErrorKind;
   readonly status: number;
   readonly receivedContent: boolean;
   readonly inputLimit: boolean;
@@ -238,8 +241,10 @@ export class NativeModelError extends Error {
   readonly imageMessageIndex: number;
   readonly imageBlockIndex: number;
 
-  constructor(message: string, status: number, receivedContent: boolean, apiKey: string, accountToken: string) {
+  constructor(message: string, status: number, receivedContent: boolean, apiKey: string, accountToken: string,
+    kind: NativeModelErrorKind = status === 0 ? 'network' : 'http') {
     super(redactCredentials(message, apiKey, accountToken));
+    this.kind = kind;
     this.status = status;
     this.receivedContent = receivedContent;
     this.inputLimit = /user input too long.*exceeds max 32768 tokens/i.test(message);
@@ -249,6 +254,19 @@ export class NativeModelError extends Error {
     this.imageMessageIndex = image ? Number(image[1]) : -1;
     this.imageBlockIndex = image ? Number(image[2]) : -1;
   }
+}
+
+class ChatStreamError extends Error {
+  readonly kind: NativeModelErrorKind;
+
+  constructor(kind: NativeModelErrorKind, message: string) {
+    super(message);
+    this.kind = kind;
+  }
+}
+
+function hasPrefillContent(prefill: NativeReplyPrefill, thinking: boolean): boolean {
+  return !!prefill.text.trim() || (thinking && !!prefill.reasoning.trim());
 }
 
 export function usesExtendedNativeRequest(config: NativeChatConfig, messages: NativeChatMessage[]): boolean {
@@ -272,6 +290,10 @@ function httpErrorMessage(bytes: Uint8Array, fallback: string): string {
     // Plain text error bodies from compatible providers are meaningful as well.
   }
   return response || fallback;
+}
+
+function successfulStatus(status: number): boolean {
+  return status >= 200 && status < 300;
 }
 
 interface StreamResponseHead {
@@ -423,16 +445,15 @@ class ChatStream {
   private dataLines: string[] = [];
   private readonly openBlocks = new Map<number, string>();
   private done: boolean = false;
-  private hasReply: boolean = false;
   receivedContent: boolean = false;
   private outcome: NativeReplyOutcome = { stopReason: '', canPrefill: true, thinkingSignature: '' };
   private readonly onDelta: (content: string, reasoning: string) => void;
   private readonly protocol: 'openai' | 'anthropic';
-  private readonly onAnthropicEvent?: (data: string) => void;
+  private readonly onAnthropicEvent?: (data: string, outcome: NativeReplyOutcome) => void;
   private readonly onTitle?: (title: string) => void;
 
   constructor(onDelta: (content: string, reasoning: string) => void,
-    protocol: 'openai' | 'anthropic' = 'openai', onAnthropicEvent?: (data: string) => void,
+    protocol: 'openai' | 'anthropic' = 'openai', onAnthropicEvent?: (data: string, outcome: NativeReplyOutcome) => void,
     onTitle?: (title: string) => void) {
     this.onAnthropicEvent = onAnthropicEvent;
     this.onTitle = onTitle;
@@ -451,18 +472,30 @@ class ChatStream {
     }
     if (this.protocol === 'anthropic') {
       if (!this.done && !this.outcome.stopReason) {
-        throw new Error('模型回复已中断');
+        throw new ChatStreamError('interrupted', '');
       }
       return this.outcome;
     }
-    if (!this.hasReply && !this.outcome.stopReason) {
-      throw new Error('模型未返回可读取的回复，请检查服务器地址和模型名称');
-    }
+    this.finishOpenAI();
     return this.outcome;
   }
 
   currentOutcome(): NativeReplyOutcome {
-    return this.outcome;
+    return {
+      stopReason: this.outcome.stopReason,
+      canPrefill: this.outcome.canPrefill,
+      thinkingSignature: this.outcome.thinkingSignature,
+      title: this.outcome.title,
+    };
+  }
+
+  private emitAnthropicEvent(data: string): void {
+    this.onAnthropicEvent?.(data, this.currentOutcome());
+  }
+
+  private finishOpenAI(): void {
+    this.done = true;
+    if (!this.outcome.stopReason) this.outcome.stopReason = 'end_turn';
   }
 
   completed(): boolean {
@@ -520,7 +553,7 @@ class ChatStream {
       return;
     }
     if (data.trim() === '[DONE]') {
-      this.done = true;
+      this.finishOpenAI();
       return;
     }
     let chunk: ChatChunk;
@@ -528,7 +561,7 @@ class ChatStream {
       chunk = JSON.parse(data) as ChatChunk;
     } catch {
       if (eventName === 'error') {
-        throw new Error(data || '服务端报告了流式错误');
+        throw new ChatStreamError('stream', data || '服务端报告了流式错误');
       }
       return;
     }
@@ -537,20 +570,18 @@ class ChatStream {
     }
     if (chunk.error || eventName === 'error') {
       const message = chunk.error?.message ?? chunk.message;
-      throw new Error(typeof message === 'string' && message ? message : '服务端报告了流式错误');
+      throw new ChatStreamError('stream', typeof message === 'string' && message ? message : '服务端报告了流式错误');
     }
     const choice = chunk.choices?.[0];
     const finish = choice?.finish_reason;
     if (finish) {
-      this.outcome.stopReason = finish === 'length' ? 'max_tokens' : finish === 'content_filter' ? 'refusal' :
-        finish === 'tool_calls' || finish === 'function_call' ? 'tool_use' : 'end_turn';
+      this.outcome.stopReason = finish === 'length' ? 'max_tokens' : finish === 'content_filter' ? 'refusal' : 'end_turn';
     }
     const delta = choice?.delta;
     const content = typeof delta?.content === 'string' ? delta.content : '';
     const reasoningValue = delta?.reasoning_content ?? delta?.reasoning;
     const reasoning = typeof reasoningValue === 'string' ? reasoningValue : '';
     if (content || reasoning) {
-      this.hasReply = true;
       this.receivedContent = true;
       this.onDelta(content, reasoning);
     }
@@ -561,23 +592,24 @@ class ChatStream {
     try {
       event = JSON.parse(data) as AnthropicDeltaEvent;
     } catch {
-      if (eventName === 'error') throw new Error(data || '服务端报告了流式错误');
+      if (eventName === 'error') throw new ChatStreamError('stream', data);
       return;
     }
     if (typeof event?.error?.message === 'string') {
-      throw new Error(event.error.message || '服务端报告了流式错误');
+      throw new ChatStreamError('stream', event.error.message);
     }
     if (eventName === 'error') {
-      throw new Error(data || '服务端报告了流式错误');
+      throw new ChatStreamError('stream', data);
     }
     if (!isRecord(event)) return;
     if (event.type === 'error') {
-      throw new Error(typeof event.message === 'string' && event.message ? event.message : '服务端报告了流式错误');
+      throw new ChatStreamError('stream',
+        typeof event.message === 'string' && event.message ? event.message : '服务端报告了流式错误');
     }
     if (event.type === 'message_stop') {
-      this.onAnthropicEvent?.(data);
       this.done = true;
       this.openBlocks.clear();
+      this.emitAnthropicEvent(data);
       return;
     }
     const delta = event.delta;
@@ -593,12 +625,12 @@ class ChatStream {
             this.onTitle?.(title);
           }
         }
-        this.onAnthropicEvent?.(data);
+        this.emitAnthropicEvent(data);
       }
       return;
     }
     if (event.type === 'message_start') {
-      if (isRecord(event.message)) this.onAnthropicEvent?.(data);
+      if (isRecord(event.message)) this.emitAnthropicEvent(data);
       return;
     }
     const index = event.index ?? -1;
@@ -616,21 +648,23 @@ class ChatStream {
         if (delta) this.applyAnthropicDelta(index, delta, data);
         break;
       case 'content_block_stop':
-        if (this.openBlocks.delete(index)) this.onAnthropicEvent?.(data);
+        if (this.openBlocks.delete(index)) this.emitAnthropicEvent(data);
         break;
     }
   }
 
   private startAnthropicBlock(block: AnthropicStartedBlock, data: string): void {
     this.receivedContent = true;
-    this.onAnthropicEvent?.(data);
+    if (block.type === 'thinking') {
+      this.outcome.thinkingSignature = typeof block.signature === 'string' ? block.signature : '';
+    } else if (block.type !== 'text') {
+      this.outcome.canPrefill = false;
+    }
+    this.emitAnthropicEvent(data);
     if (block.type === 'text') {
       if (block.text) this.onDelta(block.text, '');
     } else if (block.type === 'thinking') {
-      this.outcome.thinkingSignature = typeof block.signature === 'string' ? block.signature : '';
       if (block.thinking) this.onDelta('', block.thinking);
-    } else {
-      this.outcome.canPrefill = false;
     }
   }
 
@@ -638,23 +672,23 @@ class ChatStream {
     const kind = this.openBlocks.get(index);
     if (kind === 'text') {
       if (delta.type === 'text_delta' && typeof delta.text === 'string') {
-        this.onAnthropicEvent?.(data);
+        this.emitAnthropicEvent(data);
         if (delta.text) this.onDelta(delta.text, '');
       } else if (delta.type === 'citations_delta' && delta.citation?.type === 'web_search_result_location' &&
         typeof delta.citation.url === 'string' &&
         nullableString(delta.citation.title)) {
-        this.onAnthropicEvent?.(data);
+        this.emitAnthropicEvent(data);
       }
     } else if (kind === 'thinking') {
       if (delta.type === 'thinking_delta' && typeof delta.thinking === 'string') {
-        this.onAnthropicEvent?.(data);
+        this.emitAnthropicEvent(data);
         if (delta.thinking) this.onDelta('', delta.thinking);
       } else if (delta.type === 'signature_delta' && typeof delta.signature === 'string') {
         this.outcome.thinkingSignature += delta.signature;
-        this.onAnthropicEvent?.(data);
+        this.emitAnthropicEvent(data);
       }
     } else if (kind === 'server_tool_use' && delta.type === 'input_json_delta' && typeof delta.partial_json === 'string') {
-      this.onAnthropicEvent?.(data);
+      this.emitAnthropicEvent(data);
     }
   }
 }
@@ -714,7 +748,8 @@ export class NativeChatClient {
 
   async send(config: NativeChatConfig, messages: NativeChatMessage[],
     onDelta: (content: string, reasoning: string) => void,
-    onAnthropicEvent?: (data: string) => void, onTitle?: (title: string) => void): Promise<NativeReplyOutcome> {
+    onAnthropicEvent?: (data: string, outcome: NativeReplyOutcome) => void,
+    onTitle?: (title: string) => void): Promise<NativeReplyOutcome> {
     this.cancel();
     const apiKey = config.apiKey.trim();
     const accountToken = config.accountToken?.trim() ?? '';
@@ -761,17 +796,15 @@ export class NativeChatClient {
       const extended = usesExtendedNativeRequest(config, messages);
       const anthropicMessages = messages.map<AnthropicChatMessage>(anthropicMessage);
       const prefill = config.prefill;
-      if (prefill) {
+      if (prefill && hasPrefillContent(prefill, config.thinking === true)) {
         const blocks: AnthropicContentBlock[] = [];
-        if (config.thinking && prefill.reasoning && prefill.thinkingSignature) {
+        if (config.thinking && prefill.reasoning.trim()) {
           blocks.push({ type: 'thinking', thinking: prefill.reasoning, signature: prefill.thinkingSignature });
         }
         if (prefill.text) {
           blocks.push({ type: 'text', text: prefill.text });
         }
-        if (blocks.length) {
-          anthropicMessages.push({ role: 'assistant', content: blocks });
-        }
+        anthropicMessages.push({ role: 'assistant', content: blocks });
       }
       body = {
         model: model,
@@ -793,8 +826,9 @@ export class NativeChatClient {
       if (system.trim()) {
         textMessages.unshift({ role: 'system', content: system });
       }
-      if (config.prefill?.text) {
-        textMessages.push({ role: 'assistant', content: config.prefill.text });
+      const prefill = config.prefill;
+      if (prefill?.text && hasPrefillContent(prefill, config.thinking === true)) {
+        textMessages.push({ role: 'assistant', content: prefill.text });
       }
       body = { model: model, messages: textMessages, stream: true } as ChatRequestBody;
     }
@@ -830,32 +864,43 @@ export class NativeChatClient {
         if (this.settleRequest === settle) {
           onDelta(content, reasoning);
         }
-      }, protocol, onAnthropicEvent, (title: string): void => {
+      }, protocol, (data: string, outcome: NativeReplyOutcome): void => {
+        if (this.settleRequest === settle) onAnthropicEvent?.(data, outcome);
+      }, (title: string): void => {
         if (this.settleRequest === settle && config.requestTitle) {
           onTitle?.(title);
         }
       });
       const errorBody = new Uint8Array(MAX_ERROR_BODY_BYTES);
       let errorBodyLength = 0;
-      let streamError: string = '';
+      let streamError: ChatStreamError | undefined;
       let responseHead: StreamResponseHead | undefined;
       let pendingChunks: ArrayBuffer[] = [];
       let pendingBytes = 0;
       let overflowed = false;
+      const fail = (kind: NativeModelErrorKind, message: string, status: number,
+        receivedContent: boolean = stream.receivedContent): void => {
+        settle(new NativeModelError(message, status, receivedContent, apiKey, accountToken, kind));
+      };
+      const failHttp = (status: number): void => {
+        const message = httpErrorMessage(errorBody.subarray(0, errorBodyLength), `服务端请求失败 (HTTP ${status})`);
+        fail('http', message, status, false);
+      };
       const consume = (bytes: ArrayBuffer): void => {
         if (this.settleRequest !== settle || streamError || !responseHead?.stream ||
-          (responseHead.status !== 0 && (responseHead.status < 200 || responseHead.status >= 300))) {
+          (responseHead.status !== 0 && !successfulStatus(responseHead.status))) {
           return;
         }
         try {
           stream.push(bytes);
-          if (stream.completed() && responseHead.status >= 200 && responseHead.status < 300) {
+          if (stream.completed() && successfulStatus(responseHead.status)) {
             settle();
           }
         } catch (error) {
-          streamError = error instanceof Error ? error.message : '无法读取模型回复';
-          if (responseHead.status >= 200 && responseHead.status < 300) {
-            settle(new NativeModelError(streamError, responseHead.status, stream.receivedContent, apiKey, accountToken));
+          streamError = error instanceof ChatStreamError ? error :
+            new ChatStreamError('protocol', error instanceof Error ? error.message : '无法读取模型回复');
+          if (successfulStatus(responseHead.status)) {
+            fail(streamError.kind, streamError.message, responseHead.status);
           }
         }
       };
@@ -867,7 +912,7 @@ export class NativeChatClient {
           if (head.interim) return;
           responseHead = head;
           if (head.stream && overflowed) {
-            streamError = '无法读取模型回复';
+            streamError = new ChatStreamError('protocol', '无法读取模型回复');
           }
           for (const bytes of pendingChunks) consume(bytes);
           pendingChunks = [];
@@ -898,18 +943,17 @@ export class NativeChatClient {
           if (this.settleRequest !== settle) {
             return;
           }
-          if (status < 200 || status >= 300) {
-            const message = httpErrorMessage(errorBody.subarray(0, errorBodyLength), `服务端请求失败 (HTTP ${status})`);
-            settle(new NativeModelError(message, status, false, apiKey, accountToken));
+          if (!successfulStatus(status)) {
+            failHttp(status);
             return;
           }
           if (!responseHead?.stream) {
             const message = httpErrorMessage(errorBody.subarray(0, errorBodyLength), '服务器未返回流式回复');
-            settle(new NativeModelError(message, status, false, apiKey, accountToken));
+            fail('protocol', message, status, false);
             return;
           }
           if (streamError) {
-            settle(new NativeModelError(streamError, status, stream.receivedContent, apiKey, accountToken));
+            fail(streamError.kind, streamError.message, status);
             return;
           }
           try {
@@ -917,11 +961,24 @@ export class NativeChatClient {
             settle();
           } catch (error) {
             const message = error instanceof Error ? error.message : '无法读取模型回复';
-            settle(new NativeModelError(message, status, stream.receivedContent, apiKey, accountToken));
+            const kind = error instanceof ChatStreamError ? error.kind : 'protocol';
+            fail(kind, message, status);
           }
         }, (error: BusinessError): void => {
-          const message = streamError || `无法连接模型服务 (${error.code})`;
-          settle(new NativeModelError(message, 0, stream.receivedContent, apiKey, accountToken));
+          if (this.settleRequest !== settle) return;
+          const status = responseHead?.status ?? 0;
+          if (status !== 0 && !successfulStatus(status)) {
+            failHttp(status);
+          } else if (streamError) {
+            fail(streamError.kind, streamError.message, status);
+          } else if (responseHead?.stream && stream.completed()) {
+            // A valid terminal frame already ended the reply. NetStack may report a later socket reset.
+            settle();
+          } else if (responseHead) {
+            fail('protocol', error.message || '无法读取模型回复', status);
+          } else {
+            fail('network', `无法连接模型服务 (${error.code})`, 0);
+          }
         });
       } catch {
         settle(new Error('无法发起模型请求'));

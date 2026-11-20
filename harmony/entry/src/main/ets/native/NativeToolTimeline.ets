@@ -22,6 +22,7 @@ export interface NativeToolTimelineStep {
   status?: NativeToolStatus;
   queries?: string[];
   resultUrls?: string[];
+  hasSuccessfulSearch?: boolean;
   pages?: NativeTimelinePage[];
   patterns?: NativeTimelinePattern[];
   text?: string;
@@ -251,7 +252,32 @@ function appendSearch(step: NativeToolTimelineStep, queries: string[], urls: str
   step.queries = priorQueries.concat(queries.slice(0, MAX_ITEMS - priorQueries.length));
   const visible = urls.filter((url: string): boolean => !priorUrls.includes(url));
   step.resultUrls = priorUrls.concat(visible.slice(0, MAX_ITEMS - priorUrls.length));
+  const succeeded = step.hasSuccessfulSearch === true || step.status === 'done' || status === 'done';
   step.status = mergeStatus(step.status, status);
+  step.hasSuccessfulSearch = step.status === 'wip' ? succeeded : undefined;
+}
+
+/** Settle a persisted live projection after the stream is no longer available. */
+export function settleInterruptedNativeToolTimeline(view: NativeToolTimelineView): void {
+  view.steps = view.steps.filter((step: NativeToolTimelineStep): boolean => step.type !== 'read_link');
+  for (const step of view.steps) {
+    if (step.type === 'thinking' && step.active) {
+      step.active = false;
+    } else if (step.type === 'search' && step.status === 'wip') {
+      // Older snapshots only recorded result URLs, while a successful search may return no results.
+      const succeeded = step.hasSuccessfulSearch ?? !!step.resultUrls?.length;
+      step.status = succeeded ? 'done' : 'failed';
+      step.hasSuccessfulSearch = undefined;
+    } else if (step.type === 'open') {
+      for (const page of step.pages ?? []) {
+        if (page.status === 'wip') page.status = 'failed';
+      }
+    } else if (step.type === 'find') {
+      for (const pattern of step.patterns ?? []) {
+        if (pattern.status === 'wip') pattern.status = 'failed';
+      }
+    }
+  }
 }
 
 export class NativeToolTimeline {
@@ -592,6 +618,7 @@ function validTimelineStep(step: NativeToolTimelineStep, answerOffset: number): 
   switch (step.type) {
     case 'search':
       return SEARCH_KINDS.includes(step.kind ?? '') && validStatus(step.status) &&
+        (step.hasSuccessfulSearch === undefined || typeof step.hasSuccessfulSearch === 'boolean') &&
         Array.isArray(step.queries) && step.queries.length <= MAX_ITEMS &&
         step.queries.every((query: string): boolean => typeof query === 'string' && query.length <= 1_600) &&
         Array.isArray(step.resultUrls) && step.resultUrls.length <= MAX_ITEMS &&

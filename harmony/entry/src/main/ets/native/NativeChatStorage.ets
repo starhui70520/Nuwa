@@ -8,7 +8,7 @@ import { NativeAttachment } from './NativeChatAttachments';
 import { ensureNativeDirectory } from './NativeFileSystem';
 import { NativeFailedUpload, NativeReplyFailure } from './NativeReplyNotice';
 import { validNativeReadLinks } from './NativeReadLinks';
-import { isValidNativeToolTimeline } from './NativeToolTimeline';
+import { isValidNativeToolTimeline, settleInterruptedNativeToolTimeline } from './NativeToolTimeline';
 import { backupImageIds, pruneBackupImages, removeBackupImage } from './NativeBackupFiles';
 import {
   NativeConversation,
@@ -190,8 +190,13 @@ function readLegacyDocument(document: LegacyConversationDocument): NativeConvers
 function recoverInterrupted(state: NativeConversationState): NativeConversationState {
   for (const session of state.sessions) {
     for (const message of session.messages) {
-      if (message.status === 'pending' || message.status === 'streaming') {
+      if (message.role === 'assistant' && (message.status === 'pending' || message.status === 'streaming')) {
         message.status = 'stopped';
+        if (message.toolTimeline) {
+          // A pending link is hidden after stopping, but still rules out continuing after reload.
+          if (message.toolTimeline.steps.some(step => step.type === 'read_link')) message.canPrefill = false;
+          settleInterruptedNativeToolTimeline(message.toolTimeline);
+        }
       }
     }
   }
