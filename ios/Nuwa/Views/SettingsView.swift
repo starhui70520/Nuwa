@@ -216,14 +216,9 @@ struct SettingsView: View {
             switch result {
             case .success(let urls):
                 guard let url = urls.first else { return }
-                let accessed = url.startAccessingSecurityScopedResource()
                 Task {
-                    defer { if accessed { url.stopAccessingSecurityScopedResource() } }
                     do {
-                        let data = try await Task.detached(priority: .userInitiated) {
-                            try Data(contentsOf: url)
-                        }.value
-                        let count = try await chatStore.importFromFileDataAsync(data)
+                        let count = try await chatStore.importFromFile(url)
                         chatStore.showToast(count == 1 ? "已导入 1 个对话" : "已导入 \(count) 个对话")
                     } catch {
                         chatStore.showToast("导入失败：\(error.localizedDescription)")
@@ -355,6 +350,15 @@ struct SettingsView: View {
                 value: LocationCatalog.displayName(for: settings.location, locale: loc)
             ) {
                 withAnimation(.easeInOut(duration: 0.2)) { page = .location }
+            }
+            if UIDevice.current.userInterfaceIdiom == .phone {
+                let title = loc == .enUS ? "Haptic feedback" : "触感反馈"
+                rowDivider
+                pickerRow(icon: "waveform.path", label: title) {
+                    Toggle(title, isOn: $settings.hapticFeedbackEnabled)
+                        .labelsHidden()
+                        .accessibilityIdentifier("hapticFeedback")
+                }
             }
         }
 

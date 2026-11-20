@@ -263,17 +263,29 @@ enum DeepSeekZipImporter {
 
         // Sort ascending by numeric id so parent_id always appears before child (1:1 toLocal.ts buildTree)
         let sortedRaw = rawMessages.sorted { ($0["id"] as? Int ?? 0) < ($1["id"] as? Int ?? 0) }
-        var uuidByNumId: [Int: UUID] = [:]
-        var indexByNumId: [Int: Int] = [:]
+        var indexByNumId = [Int: Int](minimumCapacity: sortedRaw.count)
         var messages: [ChatMessage] = []
+        var parentIndices: [Int?] = []
+        messages.reserveCapacity(sortedRaw.count)
+        parentIndices.reserveCapacity(sortedRaw.count)
+        var lastTimestamp: (raw: String, date: Date)?
 
         for raw in sortedRaw {
             guard let numId = raw["id"] as? Int else { continue }
             let localId = UUID()
-            uuidByNumId[numId] = localId
-            let parentNum = raw["parent_id"] as? Int
-            let parentUUID = parentNum.flatMap { uuidByNumId[$0] }
-            let insertedAt = parseDate(raw["inserted_at"] as? String)
+            let parentIndex = (raw["parent_id"] as? Int).flatMap { indexByNumId[$0] }
+            let parentUUID = parentIndex.map { messages[$0].id }
+            let insertedAt: Date
+            if let rawDate = raw["inserted_at"] as? String {
+                if let lastTimestamp, lastTimestamp.raw == rawDate {
+                    insertedAt = lastTimestamp.date
+                } else {
+                    insertedAt = parseDate(rawDate)
+                    lastTimestamp = (rawDate, insertedAt)
+                }
+            } else {
+                insertedAt = Date()
+            }
             let roleStr = (raw["role"] as? String ?? "").uppercased()
             let fragments = raw["fragments"] as? [[String: Any]] ?? []
 
@@ -511,11 +523,12 @@ enum DeepSeekZipImporter {
                 )
             }
 
-            if let pNum = parentNum, let pIdx = indexByNumId[pNum] {
+            if let pIdx = parentIndex {
                 messages[pIdx].selectedChildId = localId
             }
             indexByNumId[numId] = messages.count
             messages.append(built)
+            parentIndices.append(parentIndex)
         }
 
         // Select the active path from current_message_id back to root (1:1 toLocal.ts)
@@ -523,19 +536,11 @@ enum DeepSeekZipImporter {
         if let currentNum = obj["current_message_id"] as? Int, let curIdx = indexByNumId[currentNum] {
             messages[curIdx].selectedChildId = nil
             var cursorIdx = curIdx
-            var visited = Set<UUID>()
-            while !visited.contains(messages[cursorIdx].id) {
-                let currentMsg = messages[cursorIdx]
-                visited.insert(currentMsg.id)
-                if let pUUID = currentMsg.parentId,
-                   let pIdx = messages.firstIndex(where: { $0.id == pUUID }) {
-                    messages[pIdx].selectedChildId = currentMsg.id
-                    cursorIdx = pIdx
-                } else {
-                    rootId = currentMsg.id
-                    break
-                }
+            while let pIdx = parentIndices[cursorIdx] {
+                messages[pIdx].selectedChildId = messages[cursorIdx].id
+                cursorIdx = pIdx
             }
+            rootId = messages[cursorIdx].id
         }
 
         let sessionId = externalId.flatMap(UUID.init(uuidString:)) ?? stableUUID(for: externalId ?? UUID().uuidString)

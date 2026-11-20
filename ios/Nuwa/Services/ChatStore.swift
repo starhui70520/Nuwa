@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UIKit
 
 /// Isolated per-session draft store so typing in the composer NEVER invalidates
 /// ChatView, MessageList, or SessionDrawerView (zero keystroke frame drops!).
@@ -198,10 +199,14 @@ final class LiveReplyStore: ObservableObject {
 
 @MainActor
 final class ChatStore: ObservableObject {
-    @Published var sessions: [ChatSession] = []
-    @Published var activeSessionId: UUID?
+    @Published private(set) var sessions: [ChatSession] = [] {
+        didSet { activeTimelineCache = nil }
+    }
+    @Published private(set) var activeSessionId: UUID? {
+        didSet { activeTimelineCache = nil }
+    }
     @Published var isGenerating = false
-    @Published var importingHistory = false
+    @Published private(set) var importingHistory = false
     @Published var toastMessage: String?
     @Published private(set) var historyLoaded = false
     @Published private(set) var historyLoadFailed = false
@@ -219,6 +224,9 @@ final class ChatStore: ObservableObject {
     private var manuallyRenamedSessions: Set<UUID> = []
     private var rejectedHistoryImageIds: Set<String> = []
     private var consumingPendingMigration = false
+    private var committingImport = false
+    private var saveDeferredByImport = false
+    private var activeTimelineCache: ActiveTimeline?
 
     private static let persistenceQueue = DispatchQueue(label: "com.rankchord.nuwa.persistence", qos: .utility)
     nonisolated(unsafe) private static let persistence = ChatHistoryPersistence()
@@ -236,6 +244,19 @@ final class ChatStore: ObservableObject {
     var activeSession: ChatSession? {
         guard let activeSessionId else { return nil }
         return sessions.first { $0.id == activeSessionId }
+    }
+
+    struct ActiveTimeline {
+        let messages: [ChatMessage]
+        let versions: [UUID: MessageVersionInfo]
+    }
+
+    var activeTimeline: ActiveTimeline? {
+        if let activeTimelineCache { return activeTimelineCache }
+        guard let session = activeSession else { return nil }
+        let timeline = ActiveTimeline(messages: session.visibleMessages(), versions: session.messageVersions())
+        activeTimelineCache = timeline
+        return timeline
     }
 
     func matchingSessionIDs(query: String) async -> Set<UUID> {
@@ -285,6 +306,7 @@ final class ChatStore: ObservableObject {
     }
 
     func togglePin(_ id: UUID) {
+        guard !committingImport else { return }
         guard let idx = sessions.firstIndex(where: { $0.id == id }) else { return }
         sessions[idx].isPinned.toggle()
         sessions[idx].pinnedAt = sessions[idx].isPinned ? Date() : nil
@@ -293,6 +315,7 @@ final class ChatStore: ObservableObject {
     }
 
     func setSessionsPinned(_ ids: Set<UUID>, pinned: Bool) {
+        guard !committingImport else { return }
         var changed = false
         let now = Date()
         for idx in sessions.indices where ids.contains(sessions[idx].id) {
@@ -309,6 +332,7 @@ final class ChatStore: ObservableObject {
     }
 
     func renameSession(_ id: UUID, title: String) {
+        guard !committingImport else { return }
         let clean = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty, let idx = sessions.firstIndex(where: { $0.id == id }) else { return }
         manuallyRenamedSessions.insert(id)
@@ -319,6 +343,7 @@ final class ChatStore: ObservableObject {
     }
 
     func deleteSession(_ id: UUID) {
+        guard !committingImport else { return }
         if activeSessionId == id {
             stopGenerating()
             activeSessionId = nil
@@ -330,6 +355,7 @@ final class ChatStore: ObservableObject {
     }
 
     func deleteSessions(_ ids: Set<UUID>) {
+        guard !committingImport else { return }
         if let active = activeSessionId, ids.contains(active) {
             stopGenerating()
             activeSessionId = nil
@@ -341,7 +367,7 @@ final class ChatStore: ObservableObject {
     }
 
     func deleteAllSessions() {
-        guard historyLoaded else { return }
+        guard historyLoaded, !importingHistory else { return }
         stopGenerating()
         sessions.removeAll()
         draftStore.clearAll()
@@ -425,7 +451,7 @@ final class ChatStore: ObservableObject {
 
     func editUserMessage(messageId: UUID, newContent: String, settings: SettingsStore) {
         let trimmed = newContent.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !isGenerating,
+        guard !importingHistory, !isGenerating,
               let sessionId = activeSessionId,
               let sIdx = sessions.firstIndex(where: { $0.id == sessionId })
         else { return }
@@ -462,7 +488,7 @@ final class ChatStore: ObservableObject {
     }
 
     func regenerateReply(messageId: UUID? = nil, settings: SettingsStore) {
-        guard !isGenerating,
+        guard !importingHistory, !isGenerating,
               let sessionId = activeSessionId,
               let sIdx = sessions.firstIndex(where: { $0.id == sessionId })
         else { return }
@@ -507,7 +533,7 @@ final class ChatStore: ObservableObject {
     }
 
     func continueReply(messageId: UUID, settings: SettingsStore) {
-        guard !isGenerating,
+        guard !importingHistory, !isGenerating,
               let sessionId = activeSessionId,
               let sIdx = sessions.firstIndex(where: { $0.id == sessionId })
         else { return }
@@ -541,7 +567,7 @@ final class ChatStore: ObservableObject {
     }
 
     func selectVersion(messageId: UUID) {
-        guard !isGenerating,
+        guard !committingImport, !isGenerating,
               let sessionId = activeSessionId,
               let sIdx = sessions.firstIndex(where: { $0.id == sessionId })
         else { return }
@@ -552,7 +578,7 @@ final class ChatStore: ObservableObject {
     // MARK: - Attachment Preparation & Re-upload Recovery
 
     private func saveServerIds(sessionId: UUID, map: [String: String]) {
-        guard !map.isEmpty,
+        guard !Task.isCancelled, !map.isEmpty,
               let sIdx = sessions.firstIndex(where: { $0.id == sessionId })
         else { return }
         for mIdx in sessions[sIdx].messages.indices where sessions[sIdx].messages[mIdx].role == .user {
@@ -687,6 +713,10 @@ final class ChatStore: ObservableObject {
         let initialWantsTitle = sessions.first(where: { $0.id == sessionId })?.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true
 
         activeTask = Task {
+            let supportsReplyHaptics = UIDevice.current.userInterfaceIdiom == .phone
+            let hapticClock = ContinuousClock()
+            var lastReplyHaptic: ContinuousClock.Instant?
+            var replyHaptics: UIImpactFeedbackGenerator?
             var omitExtendedFor1M = false
             var fileRetryAttempt = 0
             var skippedBadImages = 0
@@ -753,6 +783,15 @@ final class ChatStore: ObservableObject {
 
                             case .textDelta(let streamIdx, let delta):
                                 receivedContent = true
+                                if supportsReplyHaptics, settings.hapticFeedbackEnabled, !delta.isEmpty,
+                                   activeSessionId == sessionId, UIApplication.shared.applicationState == .active {
+                                    let now = hapticClock.now
+                                    if lastReplyHaptic.map({ $0.duration(to: now) >= .milliseconds(300) }) ?? true {
+                                        if replyHaptics == nil { replyHaptics = UIImpactFeedbackGenerator(style: .soft) }
+                                        replyHaptics?.impactOccurred(intensity: 0.45)
+                                        lastReplyHaptic = now
+                                    }
+                                }
                                 if let localIdx = blockIndexMap[streamIdx],
                                    localIdx < draft.blocks.count,
                                    case .text(let id, let existing, let cites, let isTemplate) = draft.blocks[localIdx] {
@@ -934,15 +973,14 @@ final class ChatStore: ObservableObject {
         else { return }
 
         consumingPendingMigration = true
-        UserDefaults.standard.removeObject(forKey: MigrationWebViewController.keyPendingPath)
-        UserDefaults.standard.removeObject(forKey: MigrationWebViewController.keyPendingName)
-
         guard FileManager.default.fileExists(atPath: pendingPath) else {
+            UserDefaults.standard.removeObject(forKey: MigrationWebViewController.keyPendingPath)
+            UserDefaults.standard.removeObject(forKey: MigrationWebViewController.keyPendingName)
             consumingPendingMigration = false
             return
         }
-        importFromFilePath(pendingPath) { [weak self] in
-            try? FileManager.default.removeItem(atPath: pendingPath)
+        importFromFilePath(pendingPath) { [weak self] succeeded in
+            if succeeded { try? FileManager.default.removeItem(atPath: pendingPath) }
             self?.consumingPendingMigration = false
         }
     }
@@ -955,11 +993,15 @@ final class ChatStore: ObservableObject {
         }.value
     }
 
-    func importFromFileDataAsync(_ data: Data) async throws -> Int {
+    func importFromFile(_ url: URL) async throws -> Int {
         guard historyLoaded else { throw HistoryUnavailable() }
+        guard !importingHistory else { throw HistoryImportInProgress() }
         importingHistory = true
         defer { importingHistory = false }
         let parsed: [ChatSession] = try await Task.detached(priority: .userInitiated) {
+            let accessed = url.startAccessingSecurityScopedResource()
+            defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+            let data = try Data(contentsOf: url, options: .mappedIfSafe)
             if data.count >= 4 && data[0] == 0x50 && data[1] == 0x4B && data[2] == 0x03 && data[3] == 0x04 {
                 return try DeepSeekZipImporter.parseZipData(data)
             }
@@ -972,29 +1014,21 @@ final class ChatStore: ObservableObject {
                 return normalized
             }
         }.value
-        return mergeSessions(parsed)
+        return try await commitImportedSessions(parsed)
     }
 
-    func importFromFilePath(_ path: String, onFinished: (() -> Void)? = nil) {
-        guard historyLoaded else {
-            showToast(HistoryUnavailable().localizedDescription)
-            onFinished?()
-            return
-        }
-        importingHistory = true
-        UserDefaults.standard.removeObject(forKey: MigrationWebViewController.keyPendingPath)
-        UserDefaults.standard.removeObject(forKey: MigrationWebViewController.keyPendingName)
+    func importFromFilePath(_ path: String, onFinished: ((Bool) -> Void)? = nil) {
         Task {
-            defer {
-                importingHistory = false
-                onFinished?()
-            }
+            var succeeded = false
+            defer { onFinished?(succeeded) }
             do {
-                let data = try await Task.detached(priority: .userInitiated) {
-                    try Data(contentsOf: URL(fileURLWithPath: path))
-                }.value
-                let count = try await importFromFileDataAsync(data)
+                let count = try await importFromFile(URL(fileURLWithPath: path))
+                if UserDefaults.standard.string(forKey: MigrationWebViewController.keyPendingPath) == path {
+                    UserDefaults.standard.removeObject(forKey: MigrationWebViewController.keyPendingPath)
+                    UserDefaults.standard.removeObject(forKey: MigrationWebViewController.keyPendingName)
+                }
                 showToast(count == 1 ? "已导入 1 个对话" : "已导入 \(count) 个对话")
+                succeeded = true
             } catch {
                 AppLogStore.shared.record(.error, source: "migration.import", message: error.localizedDescription)
                 showToast("导入失败：\(error.localizedDescription)")
@@ -1004,13 +1038,14 @@ final class ChatStore: ObservableObject {
 
     func importFromShareLink(_ input: String) async throws -> ChatSession {
         guard historyLoaded else { throw HistoryUnavailable() }
+        guard !importingHistory else { throw HistoryImportInProgress() }
+        importingHistory = true
+        defer { importingHistory = false }
         do {
             let session = try await ShareLinkImporter.fetchSharedSession(input: input)
             stopGenerating()
-            sessions.insert(session, at: 0)
+            _ = try await commitImportedSessions([session])
             activeSessionId = session.id
-            listStore.sync(from: sessions)
-            scheduleSave(immediate: true)
             return session
         } catch {
             AppLogStore.shared.record(.error, source: "shareLink.import", message: error.localizedDescription)
@@ -1033,8 +1068,40 @@ final class ChatStore: ObservableObject {
         }
     }
 
-    private func mergeSessions(_ incoming: [ChatSession]) -> Int {
+    private func commitImportedSessions(_ incoming: [ChatSession]) async throws -> Int {
         if isGenerating, incoming.contains(where: { $0.id == activeSessionId }) { stopGenerating() }
+        let merged = mergeSessions(incoming)
+        guard merged.changed else { return merged.count }
+
+        // Keep delayed snapshots from overwriting the import while SQLite commits it.
+        committingImport = true
+        saveWorkItem?.cancel()
+        let targetURL = Self.storageURL
+        let snapshot = merged.sessions
+        defer {
+            committingImport = false
+            if saveDeferredByImport {
+                saveDeferredByImport = false
+                scheduleSave(immediate: true, checkpoint: true)
+            }
+        }
+        do {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                Self.persistenceQueue.async {
+                    continuation.resume(with: Result { try Self.persistence.save(snapshot, legacyURL: targetURL) })
+                }
+            }
+        } catch {
+            saveDeferredByImport = true
+            throw error
+        }
+        // An unrelated reply can finish while the disk write runs.
+        sessions = saveDeferredByImport ? mergeSessions(incoming).sessions : snapshot
+        listStore.sync(from: sessions)
+        return merged.count
+    }
+
+    private func mergeSessions(_ incoming: [ChatSession]) -> (sessions: [ChatSession], count: Int, changed: Bool) {
         var merged = sessions
         var existingById = Dictionary(uniqueKeysWithValues: merged.enumerated().map { ($1.id, $0) })
         var importedCount = 0
@@ -1059,11 +1126,7 @@ final class ChatStore: ObservableObject {
                 changed = true
             }
         }
-        guard changed else { return importedCount }
-        sessions = merged
-        listStore.sync(from: sessions)
-        scheduleSave(immediate: true)
-        return importedCount
+        return (merged, importedCount, changed)
     }
 
     // MARK: - Background Serial Disk Persistence (Never Blocks Main Thread!)
@@ -1074,6 +1137,10 @@ final class ChatStore: ObservableObject {
 
     private func scheduleSave(immediate: Bool = false, checkpoint: Bool = false) {
         guard historyLoaded else { return }
+        if committingImport {
+            saveDeferredByImport = true
+            return
+        }
         saveWorkItem?.cancel()
         var sessionsToSave = sessions
         if checkpoint, let reply = liveReply.message, let activeSessionId,
@@ -1122,4 +1189,8 @@ final class ChatStore: ObservableObject {
 
 private struct HistoryUnavailable: LocalizedError {
     var errorDescription: String? { "本地对话记录尚不可用，请稍后重试。" }
+}
+
+private struct HistoryImportInProgress: LocalizedError {
+    var errorDescription: String? { "正在导入历史对话，请稍候。" }
 }

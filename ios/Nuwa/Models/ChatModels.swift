@@ -411,10 +411,12 @@ struct ChatSession: Identifiable, Codable, Equatable {
         guard let root = rootMessageId else {
             return messages
         }
-        var byId = Dictionary(uniqueKeysWithValues: messages.map { ($0.id, $0) })
+        var byId = [UUID: Int](minimumCapacity: messages.count)
+        for (index, message) in messages.enumerated() { byId[message.id] = index }
         var path: [ChatMessage] = []
         var cursor: UUID? = root
-        while let id = cursor, let msg = byId.removeValue(forKey: id) {
+        while let id = cursor, let index = byId.removeValue(forKey: id) {
+            let msg = messages[index]
             path.append(msg)
             cursor = msg.selectedChildId
         }
@@ -422,10 +424,18 @@ struct ChatSession: Identifiable, Codable, Equatable {
     }
 
     func messageVersions() -> [UUID: MessageVersionInfo] {
-        let siblings = Dictionary(grouping: messages.map { ($0.parentId, $0.id) }, by: \.0)
+        var firstChild = [UUID?: UUID](minimumCapacity: messages.count)
+        var siblings: [UUID?: [UUID]] = [:]
+        for message in messages {
+            let parent = message.parentId
+            if let first = firstChild[parent] {
+                siblings[parent, default: [first]].append(message.id)
+            } else {
+                firstChild[parent] = message.id
+            }
+        }
         var versions: [UUID: MessageVersionInfo] = [:]
-        for group in siblings.values where group.count > 1 {
-            let ids = group.map(\.1)
+        for ids in siblings.values {
             for (index, id) in ids.enumerated() {
                 versions[id] = MessageVersionInfo(ids: ids, index: index)
             }

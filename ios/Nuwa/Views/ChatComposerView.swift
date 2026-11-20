@@ -17,6 +17,7 @@ struct ChatComposerView: View {
     let isTranscribing: Bool
     let recordingSeconds: Int
     let audioLevel: Float
+    let hapticFeedbackEnabled: Bool
     let onSend: () -> Void
     let onStop: () -> Void
     let onToggleVoice: () -> Void
@@ -27,6 +28,7 @@ struct ChatComposerView: View {
     let onRemoveAttachment: (String) -> Void
 
     @FocusState private var isFocused: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
     @State private var showPhotoPicker = false
 
@@ -71,7 +73,7 @@ struct ChatComposerView: View {
                             systemImage: "atom",
                             selected: thinkingEnabled
                         ) {
-                            Self.lightImpact.impactOccurred()
+                            if hapticFeedbackEnabled { Self.lightImpact.impactOccurred() }
                             withAnimation(.easeInOut(duration: 0.16)) {
                                 thinkingEnabled.toggle()
                             }
@@ -82,7 +84,7 @@ struct ChatComposerView: View {
                             systemImage: "globe",
                             selected: searchEnabled
                         ) {
-                            Self.lightImpact.impactOccurred()
+                            if hapticFeedbackEnabled { Self.lightImpact.impactOccurred() }
                             withAnimation(.easeInOut(duration: 0.16)) {
                                 searchEnabled.toggle()
                             }
@@ -111,6 +113,16 @@ struct ChatComposerView: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
             .nuwaGlassCard(cornerRadius: 24, interactive: false)
+            .overlay {
+                let shape = RoundedRectangle(cornerRadius: 24)
+                shape
+                    .strokeBorder(Color.nuwaBrandText.opacity(isFocused ? 0.42 : 0), lineWidth: 1)
+                    .shadow(color: Color.nuwaBrandText.opacity(isFocused ? 0.48 : 0), radius: 5)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
+            .scaleEffect(isFocused && !reduceMotion ? 1.015 : 1, anchor: .bottom)
+            .animation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.65), value: isFocused)
         }
         .padding(.horizontal, 14)
         .padding(.top, 6)

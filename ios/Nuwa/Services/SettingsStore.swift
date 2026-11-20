@@ -47,6 +47,7 @@ final class SettingsStore: ObservableObject {
         static let thinkingEnabled = "nuwa.thinkingEnabled"
         static let searchEnabled = "nuwa.searchEnabled"
         static let ttsMuted = "nuwa.ttsMuted"
+        static let hapticFeedbackEnabled = "nuwa.hapticFeedbackEnabled"
         static let ttsVoice = "nuwa.ttsVoice"
         static let speechEngine = "nuwa.speechEngine"
         static let icloudAutoBackup = "nuwa.icloudAutoBackup"
@@ -108,6 +109,9 @@ final class SettingsStore: ObservableObject {
 
     @Published var ttsMuted: Bool {
         didSet { UserDefaults.standard.set(ttsMuted, forKey: Keys.ttsMuted) }
+    }
+    @Published var hapticFeedbackEnabled: Bool {
+        didSet { UserDefaults.standard.set(hapticFeedbackEnabled, forKey: Keys.hapticFeedbackEnabled) }
     }
 
     @Published var ttsVoice: TtsVoiceOption {
@@ -171,6 +175,7 @@ final class SettingsStore: ObservableObject {
         thinkingEnabled = defaults.object(forKey: Keys.thinkingEnabled) as? Bool ?? false
         searchEnabled = defaults.object(forKey: Keys.searchEnabled) as? Bool ?? false
         ttsMuted = defaults.object(forKey: Keys.ttsMuted) as? Bool ?? true
+        hapticFeedbackEnabled = defaults.bool(forKey: Keys.hapticFeedbackEnabled)
         ttsVoice = TtsVoiceOption(rawValue: defaults.string(forKey: Keys.ttsVoice) ?? "") ?? .stella
         speechEngine = SpeechEngineOption(rawValue: defaults.string(forKey: Keys.speechEngine) ?? "") ?? .auto
         icloudAutoBackup = defaults.bool(forKey: Keys.icloudAutoBackup)

@@ -15,7 +15,6 @@ struct ChatView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var drawerOpen = false
-    @GestureState private var drawerDrag: CGFloat? = nil
     @SceneStorage("chat.sidebarVisible") private var sidebarVisible = true
 
     @State private var showSettings = false
@@ -41,16 +40,22 @@ struct ChatView: View {
                 let wide = geo.size.width >= 680
                 let drawerWidth = wide ? min(geo.size.width * 0.31, 300) : min(geo.size.width * 0.82, 310)
                 let showSidebar = wide ? sidebarVisible : drawerOpen
-                let progress = drawerDrag ?? (drawerOpen ? 1 : 0)
-                let inset = wide && showSidebar ? drawerWidth : 0
-
                 ZStack(alignment: .leading) {
-                    if !wide || showSidebar {
+                    ChatDrawerLayout(
+                        size: geo.size,
+                        drawerWidth: drawerWidth,
+                        wide: wide,
+                        wideOpen: sidebarVisible,
+                        compactOpen: $drawerOpen,
+                        gestureEnabled: !settings.showMigrationPrompt && !showSettings &&
+                            editingMessageId == nil && previewImage == nil,
+                        dismissKeyboard: dismissKeyboard
+                    ) { visible in
                         SessionDrawerView(
                             listStore: listStore,
                             settings: settings,
                             activeSessionId: chatStore.activeSessionId,
-                            isOpen: showSidebar || progress > 0,
+                            isOpen: visible,
                             onSelectSession: { chatStore.selectSession($0) },
                             onCreateNewSession: { chatStore.createNewSession(silentIfAlreadyNew: true) },
                             onTogglePin: { chatStore.togglePin($0) },
@@ -62,41 +67,21 @@ struct ChatView: View {
                             onClose: { if !wide { closeDrawer() } },
                             onOpenSettings: { showSettings = true }
                         )
-                        .frame(width: drawerWidth)
-                        .opacity(showSidebar || progress > 0 ? 1 : 0)
-                        .allowsHitTesting(showSidebar)
-                        .accessibilityHidden(!showSidebar)
                         .task {
                             if wide { await settings.refreshBalance() }
                         }
-                    }
-
-                    mainSurface(sidebarShown: showSidebar, onToggleSidebar: {
-                        if wide {
-                            sidebarVisible.toggle()
-                        } else if drawerOpen {
-                            closeDrawer()
-                        } else {
-                            openDrawer()
-                        }
-                    })
-                        .overlay {
-                            if !wide && drawerOpen && drawerDrag == nil {
-                                Color.black.opacity(0.001)
-                                    .ignoresSafeArea(.container, edges: .vertical)
-                                    .onTapGesture { closeDrawer() }
-                                    .accessibilityHidden(true)
+                    } surface: {
+                        mainSurface(sidebarShown: showSidebar) {
+                            if wide {
+                                sidebarVisible.toggle()
+                            } else if drawerOpen {
+                                closeDrawer()
+                            } else {
+                                dismissKeyboard()
+                                drawerOpen = true
                             }
                         }
-                        .frame(width: max(0, geo.size.width - inset), height: geo.size.height)
-                        .background(Color.nuwaBgBase.ignoresSafeArea(.container, edges: .vertical))
-                        .accessibilityHidden(!wide && drawerOpen)
-                        .offset(x: wide ? 0 : drawerWidth * progress)
-                        .padding(.leading, inset)
-                        .animation(
-                            drawerDrag == nil && !reduceMotion ? .spring(response: 0.28, dampingFraction: 0.90) : nil,
-                            value: drawerOpen
-                        )
+                    }
 
                     if settings.showMigrationPrompt {
                         MigrationPromptModalView(
@@ -122,32 +107,6 @@ struct ChatView: View {
                         .zIndex(60)
                     }
                 }
-                .simultaneousGesture(
-                    DragGesture(minimumDistance: 20, coordinateSpace: .local)
-                        .updating($drawerDrag) { value, progress, _ in
-                            guard wide == false, !settings.showMigrationPrompt, !showSettings,
-                                  editingMessageId == nil, previewImage == nil else { return }
-                            let dx = value.translation.width
-                            if progress == nil {
-                                guard abs(dx) > abs(value.translation.height) * 1.6,
-                                      drawerOpen ? dx < 0 : (dx > 0 && value.startLocation.x < 32)
-                                else { return }
-                            }
-                            progress = max(0, min(1, (drawerOpen ? 1 : 0) + dx / drawerWidth))
-                        }
-                        .onEnded { value in
-                            guard !wide, let current = drawerDrag else { return }
-                            let predictedDx = value.predictedEndTranslation.width
-                            let predictedProgress = drawerOpen
-                                ? (1.0 + predictedDx / drawerWidth)
-                                : (predictedDx / drawerWidth)
-                            let open = drawerOpen
-                                ? !(current < 0.72 || predictedProgress < 0.55)
-                                : current > 0.28 || predictedProgress > 0.45
-                            if open { openDrawer() } else { closeDrawer() }
-                        },
-                    including: wide ? .subviews : .all
-                )
                 .onChange(of: wide) { _, _ in closeDrawer() }
             }
         }
@@ -197,14 +156,9 @@ struct ChatView: View {
             switch result {
             case .success(let urls):
                 guard let url = urls.first else { return }
-                let accessed = url.startAccessingSecurityScopedResource()
                 Task {
-                    defer { if accessed { url.stopAccessingSecurityScopedResource() } }
                     do {
-                        let data = try await Task.detached(priority: .userInitiated) {
-                            try Data(contentsOf: url)
-                        }.value
-                        let count = try await chatStore.importFromFileDataAsync(data)
+                        let count = try await chatStore.importFromFile(url)
                         chatStore.showToast(count == 1 ? "已导入 1 个对话" : "已导入 \(count) 个对话")
                     } catch {
                         chatStore.showToast("导入失败：\(error.localizedDescription)")
@@ -249,7 +203,8 @@ struct ChatView: View {
 
     private func mainSurface(sidebarShown: Bool, onToggleSidebar: @escaping () -> Void) -> some View {
         let session = chatStore.activeSession
-        let messages = session?.visibleMessages() ?? []
+        let timeline = chatStore.activeTimeline
+        let hasMessages = timeline?.messages.isEmpty == false
         return VStack(spacing: 0) {
             if chatStore.importingHistory {
                 HStack(spacing: 8) {
@@ -268,7 +223,7 @@ struct ChatView: View {
             ChatHeaderView(
                 speech: speech,
                 settings: settings,
-                hasMessages: !messages.isEmpty,
+                hasMessages: hasMessages,
                 sessionTitle: session?.title ?? "",
                 sidebarShown: sidebarShown,
                 onOpenDrawer: onToggleSidebar,
@@ -289,8 +244,8 @@ struct ChatView: View {
                 } else if !chatStore.historyLoaded {
                     ProgressView()
                         .frame(maxHeight: .infinity)
-                } else if let session, !messages.isEmpty {
-                    messageList(session: session, messages: messages)
+                } else if let session, let timeline, hasMessages {
+                    messageList(timeline)
                         .id(session.id)
                 } else {
                     welcomeView
@@ -309,8 +264,7 @@ struct ChatView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
+
             ChatComposerContainer(
                 draftStore: draftStore,
                 settings: settings,
@@ -355,13 +309,15 @@ struct ChatView: View {
         }
     }
 
-    private func messageList(session: ChatSession, messages: [ChatMessage]) -> some View {
-        let versions = session.messageVersions()
+    private func messageList(_ timeline: ChatStore.ActiveTimeline) -> some View {
+        let messages = timeline.messages
+        let versions = timeline.versions
         let last = messages.last
         return ChatTimeline(
             isAtBottom: $isAtBottom,
             last: last,
             topCommand: scrollToTopToken,
+            animateBoundaryJumps: messages.count <= 240,
             latestLabel: settings.locale == .enUS ? "Scroll to latest" : "跳到最新消息"
         ) { followLatest in
             ForEach(messages) { message in
@@ -691,9 +647,8 @@ struct ChatView: View {
         }
     }
 
-    private func openDrawer() {
+    private func dismissKeyboard() {
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-        drawerOpen = true
     }
 
     private func closeDrawer() {
@@ -713,6 +668,114 @@ struct ChatView: View {
     }
 }
 
+private struct ChatDrawerLayout<Sidebar: View, Surface: View>: View {
+    let size: CGSize
+    let drawerWidth: CGFloat
+    let wide: Bool
+    let wideOpen: Bool
+    @Binding var compactOpen: Bool
+    let gestureEnabled: Bool
+    let dismissKeyboard: () -> Void
+    @ViewBuilder let sidebar: (Bool) -> Sidebar
+    @ViewBuilder let surface: Surface
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @GestureState private var tracking = false
+    @State private var dragProgress: CGFloat?
+    @State private var rejectedDrag = false
+    @State private var retainDrawer = false
+
+    private var spring: Animation? {
+        reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.90)
+    }
+
+    var body: some View {
+        let open = wide ? wideOpen : compactOpen
+        let inset = wide && open ? drawerWidth : 0
+        let revealing = compactOpen || dragProgress != nil
+        let visible = wide ? open : revealing || retainDrawer
+
+        ZStack(alignment: .leading) {
+            if !wide || open {
+                sidebar(visible)
+                    .frame(width: drawerWidth)
+                    .opacity(visible ? 1 : 0)
+                    .allowsHitTesting(open)
+                    .accessibilityHidden(!open)
+            }
+
+            surface
+                .overlay {
+                    if !wide && compactOpen {
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .ignoresSafeArea(.container, edges: .vertical)
+                            .onTapGesture { compactOpen = false }
+                            .accessibilityHidden(true)
+                    }
+                }
+                .frame(width: max(0, size.width - inset), height: size.height)
+                .background(Color.nuwaBgBase.ignoresSafeArea(.container, edges: .vertical))
+                .accessibilityHidden(!wide && compactOpen)
+                .offset(x: wide ? 0 : drawerWidth * (dragProgress ?? (compactOpen ? 1 : 0)))
+                .padding(.leading, inset)
+                .animation(dragProgress == nil ? spring : nil, value: compactOpen)
+        }
+        .simultaneousGesture(pan, including: wide || !gestureEnabled ? .none : .all)
+        .onChange(of: tracking) { _, active in
+            guard !active else { return }
+            rejectedDrag = false
+            if dragProgress != nil { withAnimation(spring) { dragProgress = nil } }
+        }
+        .onChange(of: wide) { _, _ in
+            dragProgress = nil
+            rejectedDrag = false
+        }
+        .task(id: revealing) {
+            if revealing {
+                retainDrawer = true
+            } else {
+                if !reduceMotion {
+                    try? await Task.sleep(for: .milliseconds(400))
+                    guard !Task.isCancelled else { return }
+                }
+                retainDrawer = false
+            }
+        }
+    }
+
+    private var pan: some Gesture {
+        DragGesture(minimumDistance: 8)
+            .updating($tracking) { _, active, _ in active = true }
+            .onChanged { value in
+                guard !wide, gestureEnabled, !rejectedDrag else { return }
+                let dx = value.translation.width
+                if dragProgress == nil {
+                    let canBegin = compactOpen ? dx < 0 : dx > 0 && value.startLocation.x < 32
+                    guard canBegin, abs(dx) > abs(value.translation.height) * 1.35 else {
+                        rejectedDrag = true
+                        return
+                    }
+                }
+                let progress = (compactOpen ? 1.0 : 0) + dx / drawerWidth
+                dragProgress = min(1, max(0, progress))
+            }
+            .onEnded { value in
+                guard let current = dragProgress else { return }
+                let predicted = (compactOpen ? 1.0 : 0) + value.predictedEndTranslation.width / drawerWidth
+                let open = compactOpen
+                    ? !(current < 0.72 || (current < 0.86 && predicted < 0.55))
+                    : current > 0.28 || (current > 0.14 && predicted > 0.45)
+                if open && !compactOpen { dismissKeyboard() }
+                retainDrawer = true
+                withAnimation(spring) {
+                    compactOpen = open
+                    dragProgress = nil
+                }
+            }
+    }
+}
+
 private enum ChatScrollTarget: Hashable {
     case top, message(UUID), bottom
 }
@@ -721,6 +784,7 @@ private struct ChatTimeline<Rows: View>: View {
     @Binding var isAtBottom: Bool
     let last: ChatMessage?
     let topCommand: Int
+    let animateBoundaryJumps: Bool
     let latestLabel: String
     @ViewBuilder let rows: (@escaping () -> Void) -> Rows
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -760,9 +824,9 @@ private struct ChatTimeline<Rows: View>: View {
                     }
             }
             .scrollTargetLayout()
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
         }
-        .contentMargins(.horizontal, 16, for: .scrollContent)
-        .contentMargins(.top, 12, for: .scrollContent)
         .nuwaNoScrollEdgeEffect()
         .scrollDismissesKeyboard(.interactively)
     }
@@ -775,12 +839,12 @@ private struct ChatTimeline<Rows: View>: View {
                 }
                 .onChange(of: topCommand) { _, _ in
                     isAtBottom = false
-                    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.25)) { scrollTo(false) }
+                    jump(toBottom: false, using: scrollTo)
                 }
             if !isAtBottom {
                 Button {
                     isAtBottom = true
-                    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.22)) { scrollTo(true) }
+                    jump(toBottom: true, using: scrollTo)
                 } label: {
                     Image(systemName: "arrow.down")
                         .font(.system(size: 14, weight: .semibold))
@@ -793,6 +857,16 @@ private struct ChatTimeline<Rows: View>: View {
                 .padding(.trailing, 16)
                 .padding(.bottom, 12)
             }
+        }
+    }
+
+    private func jump(toBottom: Bool, using scrollTo: (Bool) -> Void) {
+        if reduceMotion || !animateBoundaryJumps {
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) { scrollTo(toBottom) }
+        } else {
+            withAnimation(.easeOut(duration: 0.22)) { scrollTo(toBottom) }
         }
     }
 }
@@ -865,7 +939,6 @@ private struct ChatHeaderView: View {
     let onCreateNewSession: () -> Void
     let onToast: (String) -> Void
 
-    @State private var lastTitleTapAt: Date?
 
     var body: some View {
         NuwaGlassGroup(spacing: 10) {
@@ -891,15 +964,8 @@ private struct ChatHeaderView: View {
                         .lineLimit(1)
                         .frame(maxWidth: .infinity, alignment: .center)
                         .contentShape(Rectangle())
-                        .onTapGesture {
-                            let now = Date()
-                            if let last = lastTitleTapAt, now.timeIntervalSince(last) <= 0.4 {
-                                lastTitleTapAt = nil
-                                onScrollToTop()
-                            } else {
-                                lastTitleTapAt = now
-                            }
-                        }
+                        .onTapGesture(count: 2, perform: onScrollToTop)
+                        .accessibilityAction(named: Text(settings.locale == .enUS ? "Scroll to top" : "回到顶部"), onScrollToTop)
                 } else {
                     Spacer(minLength: 0)
                 }
@@ -982,6 +1048,7 @@ private struct ChatComposerContainer: View {
             isTranscribing: speech.isTranscribing,
             recordingSeconds: speech.recordingSeconds,
             audioLevel: speech.audioLevel,
+            hapticFeedbackEnabled: UIDevice.current.userInterfaceIdiom == .phone && settings.hapticFeedbackEnabled,
             onSend: onSend,
             onStop: onStop,
             onToggleVoice: {
