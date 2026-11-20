@@ -34,6 +34,16 @@ struct ChatView: View {
     @State private var disclosureAnchorToken = 0
     @State private var headerHeight: CGFloat = 58
     @State private var composerHeight: CGFloat = 114
+    @State private var streamingCoordinator = TimelineStreamingCoordinator()
+
+    private var usesSystemSafeAreaBars: Bool {
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+            return true
+        }
+        #endif
+        return false
+    }
 
     private let topUpURL = URL(string: "https://platform.deepseek.com/top_up")!
 
@@ -212,59 +222,220 @@ struct ChatView: View {
         }
     }
 
+    @ViewBuilder
     private func mainSurface(sidebarShown: Bool, drawerModal: Bool, onToggleSidebar: @escaping () -> Void) -> some View {
         let session = chatStore.activeSession
         let timeline = chatStore.activeTimeline
         let hasMessages = timeline?.messages.isEmpty == false
         let allowComposerPress = !drawerModal && !settings.showMigrationPrompt && previewImage == nil && !showSettings
 
-        return ZStack {
-            Group {
-                if chatStore.historyLoadFailed {
-                    ContentUnavailableView(
-                        settings.locale == .enUS ? "Couldn’t load conversations" : "无法读取对话记录",
-                        systemImage: "exclamationmark.triangle",
-                        description: Text(settings.locale == .enUS
-                            ? "Your data hasn’t been changed. Reopen Nuwa to try again."
-                            : "数据未被修改，请重新打开 Nuwa 后重试。")
-                    )
-                    .padding(.top, headerHeight)
-                    .padding(.bottom, composerHeight)
-                } else if !chatStore.historyLoaded {
-                    ProgressView()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if let session, let timeline, hasMessages {
-                    messageList(timeline)
-                        .id(session.id)
-                } else {
-                    welcomeView
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+            mainContentLayer(
+                session: session,
+                timeline: timeline,
+                hasMessages: hasMessages,
+                drawerModal: drawerModal,
+                onToggleSidebar: onToggleSidebar
+            )
+            .scrollEdgeEffectStyle(.soft, for: .vertical)
+            .overlay(alignment: .top) {
+                if let toast = chatStore.toastMessage {
+                    toastPill(toast)
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .allowsHitTesting(!drawerModal)
-            .accessibilityHidden(drawerModal)
+            .safeAreaBar(edge: .top, spacing: 0) {
+                topHeaderBar(
+                    hasMessages: hasMessages,
+                    sessionTitle: session?.title ?? "",
+                    sidebarShown: sidebarShown,
+                    drawerModal: drawerModal,
+                    onToggleSidebar: onToggleSidebar
+                )
+            }
+            .safeAreaBar(edge: .bottom, spacing: 0) {
+                bottomComposerBar(
+                    drawerModal: drawerModal,
+                    allowComposerPress: allowComposerPress,
+                    onToggleSidebar: onToggleSidebar
+                )
+            }
+        } else {
+            legacyMainSurface(
+                session: session,
+                timeline: timeline,
+                hasMessages: hasMessages,
+                sidebarShown: sidebarShown,
+                drawerModal: drawerModal,
+                allowComposerPress: allowComposerPress,
+                onToggleSidebar: onToggleSidebar
+            )
+        }
+        #else
+        legacyMainSurface(
+            session: session,
+            timeline: timeline,
+            hasMessages: hasMessages,
+            sidebarShown: sidebarShown,
+            drawerModal: drawerModal,
+            allowComposerPress: allowComposerPress,
+            onToggleSidebar: onToggleSidebar
+        )
+        #endif
+    }
 
-            // Floating bottom composer with smooth progressive edge blur
+    private func mainContentLayer(
+        session: ChatSession?,
+        timeline: ChatStore.ActiveTimeline?,
+        hasMessages: Bool,
+        drawerModal: Bool,
+        onToggleSidebar: @escaping () -> Void
+    ) -> some View {
+        Group {
+            if chatStore.historyLoadFailed {
+                ContentUnavailableView(
+                    settings.locale == .enUS ? "Couldn’t load conversations" : "无法读取对话记录",
+                    systemImage: "exclamationmark.triangle",
+                    description: Text(settings.locale == .enUS
+                        ? "Your data hasn’t been changed. Reopen Nuwa to try again."
+                        : "数据未被修改，请重新打开 Nuwa 后重试。")
+                )
+                .padding(.top, usesSystemSafeAreaBars ? 0 : headerHeight)
+                .padding(.bottom, usesSystemSafeAreaBars ? 0 : composerHeight)
+            } else if !chatStore.historyLoaded {
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let session, let timeline, hasMessages {
+                messageList(timeline)
+                    .id(session.id)
+            } else {
+                welcomeView
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .allowsHitTesting(!drawerModal)
+        .accessibilityHidden(drawerModal)
+        .overlay {
+            if drawerModal && usesSystemSafeAreaBars {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture(perform: onToggleSidebar)
+                    .accessibilityHidden(true)
+            }
+        }
+    }
+
+    private func topHeaderBar(
+        hasMessages: Bool,
+        sessionTitle: String,
+        sidebarShown: Bool,
+        drawerModal: Bool,
+        onToggleSidebar: @escaping () -> Void
+    ) -> some View {
+        VStack(spacing: 0) {
+            if chatStore.importingHistory {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .tint(.white)
+                        .controlSize(.small)
+                    Text("正在导入并合并历史对话，请稍候...")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .background(Color.nuwaBrand)
+            }
+
+            ChatHeaderView(
+                speech: speech,
+                settings: settings,
+                hasMessages: hasMessages,
+                sessionTitle: sessionTitle,
+                sidebarShown: sidebarShown,
+                drawerModal: drawerModal,
+                onOpenDrawer: onToggleSidebar,
+                onScrollToTop: { scrollToTopToken += 1 },
+                onCreateNewSession: { chatStore.createNewSession() },
+                onToast: { chatStore.showToast($0) }
+            )
+        }
+    }
+
+    private func bottomComposerBar(
+        drawerModal: Bool,
+        allowComposerPress: Bool,
+        onToggleSidebar: @escaping () -> Void
+    ) -> some View {
+        ChatComposerContainer(
+            draftStore: draftStore,
+            settings: settings,
+            speech: speech,
+            sessionId: chatStore.activeSessionId,
+            isGenerating: chatStore.isGenerating,
+            isImporting: chatStore.importingHistory || !chatStore.historyLoaded,
+            allowPressEffect: allowComposerPress,
+            onSend: sendMessage,
+            onStop: {
+                speech.stopSpeaking()
+                chatStore.stopGenerating()
+            },
+            onPickFiles: { showAttachmentFilePicker = true },
+            onToast: { chatStore.showToast($0) }
+        )
+        .frame(maxWidth: 680)
+        .frame(maxWidth: .infinity)
+        .allowsHitTesting(!drawerModal)
+        .accessibilityHidden(drawerModal)
+        .overlay {
+            if drawerModal && usesSystemSafeAreaBars {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .ignoresSafeArea(.container, edges: .bottom)
+                    .onTapGesture(perform: onToggleSidebar)
+                    .accessibilityHidden(true)
+            }
+        }
+    }
+
+    private func toastPill(_ toast: String) -> some View {
+        Text(toast)
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(Color.nuwaLabelPrimary)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 9)
+            .nuwaGlass(in: Capsule())
+            .padding(.top, 8)
+            .allowsHitTesting(false)
+            .transition(.move(edge: .top).combined(with: .opacity))
+            .zIndex(10)
+    }
+
+    private func legacyMainSurface(
+        session: ChatSession?,
+        timeline: ChatStore.ActiveTimeline?,
+        hasMessages: Bool,
+        sidebarShown: Bool,
+        drawerModal: Bool,
+        allowComposerPress: Bool,
+        onToggleSidebar: @escaping () -> Void
+    ) -> some View {
+        ZStack {
+            mainContentLayer(
+                session: session,
+                timeline: timeline,
+                hasMessages: hasMessages,
+                drawerModal: drawerModal,
+                onToggleSidebar: onToggleSidebar
+            )
+
             VStack(spacing: 0) {
                 Spacer(minLength: 0)
-                ChatComposerContainer(
-                    draftStore: draftStore,
-                    settings: settings,
-                    speech: speech,
-                    sessionId: chatStore.activeSessionId,
-                    isGenerating: chatStore.isGenerating,
-                    isImporting: chatStore.importingHistory || !chatStore.historyLoaded,
-                    allowPressEffect: allowComposerPress,
-                    onSend: sendMessage,
-                    onStop: {
-                        speech.stopSpeaking()
-                        chatStore.stopGenerating()
-                    },
-                    onPickFiles: { showAttachmentFilePicker = true },
-                    onToast: { chatStore.showToast($0) }
+                bottomComposerBar(
+                    drawerModal: drawerModal,
+                    allowComposerPress: allowComposerPress,
+                    onToggleSidebar: onToggleSidebar
                 )
-                .frame(maxWidth: 680)
-                .frame(maxWidth: .infinity)
                 .background(heightReader { height in
                     if height > 0, abs(composerHeight - height) > 0.5 {
                         composerHeight = height
@@ -273,13 +444,11 @@ struct ChatView: View {
                 .background {
                     if hasMessages {
                         ProgressiveEdgeBlur(edge: .bottom, baseColor: .nuwaChatBackground)
-                            .padding(.top, -32)
+                            .padding(.top, -36)
                             .ignoresSafeArea(.container, edges: .bottom)
                     }
                 }
             }
-            .allowsHitTesting(!drawerModal)
-            .accessibilityHidden(drawerModal)
 
             if drawerModal {
                 Color.clear
@@ -290,36 +459,14 @@ struct ChatView: View {
                     .accessibilityHidden(true)
             }
 
-            // Floating top header + import banner + toast with smooth progressive edge blur
             VStack(spacing: 0) {
-                VStack(spacing: 0) {
-                    if chatStore.importingHistory {
-                        HStack(spacing: 8) {
-                            ProgressView()
-                                .tint(.white)
-                                .controlSize(.small)
-                            Text("正在导入并合并历史对话，请稍候...")
-                                .font(.system(size: 13, weight: .medium))
-                                .foregroundStyle(.white)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                        .background(Color.nuwaBrand)
-                    }
-
-                    ChatHeaderView(
-                        speech: speech,
-                        settings: settings,
-                        hasMessages: hasMessages,
-                        sessionTitle: session?.title ?? "",
-                        sidebarShown: sidebarShown,
-                        drawerModal: drawerModal,
-                        onOpenDrawer: onToggleSidebar,
-                        onScrollToTop: { scrollToTopToken += 1 },
-                        onCreateNewSession: { chatStore.createNewSession() },
-                        onToast: { chatStore.showToast($0) }
-                    )
-                }
+                topHeaderBar(
+                    hasMessages: hasMessages,
+                    sessionTitle: session?.title ?? "",
+                    sidebarShown: sidebarShown,
+                    drawerModal: drawerModal,
+                    onToggleSidebar: onToggleSidebar
+                )
                 .background(heightReader { height in
                     if height > 0, abs(headerHeight - height) > 0.5 {
                         headerHeight = height
@@ -328,22 +475,13 @@ struct ChatView: View {
                 .background {
                     if hasMessages {
                         ProgressiveEdgeBlur(edge: .top, baseColor: .nuwaChatBackground)
-                            .padding(.bottom, -28)
+                            .padding(.bottom, -32)
                             .ignoresSafeArea(.container, edges: .top)
                     }
                 }
 
                 if let toast = chatStore.toastMessage {
-                    Text(toast)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(Color.nuwaLabelPrimary)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 9)
-                        .nuwaGlass(in: Capsule())
-                        .padding(.top, 8)
-                        .allowsHitTesting(false)
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                        .zIndex(10)
+                    toastPill(toast)
                 }
 
                 Spacer(minLength: 0)
@@ -378,8 +516,8 @@ struct ChatView: View {
             Spacer()
         }
         .padding(.horizontal, 24)
-        .padding(.top, headerHeight)
-        .padding(.bottom, composerHeight)
+        .padding(.top, usesSystemSafeAreaBars ? 0 : headerHeight)
+        .padding(.bottom, usesSystemSafeAreaBars ? 0 : composerHeight)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
         .onTapGesture {
@@ -405,15 +543,21 @@ struct ChatView: View {
             ),
             topInset: headerHeight,
             bottomInset: composerHeight,
+            usesSystemSafeAreaBars: usesSystemSafeAreaBars,
             topCommand: scrollToTopToken,
             disclosureAnchorID: disclosureAnchorID,
             disclosureAnchorToken: disclosureAnchorToken,
+            streamingCoordinator: streamingCoordinator,
             animateBoundaryJumps: messages.count <= 240,
             latestLabel: settings.locale == .enUS ? "Scroll to latest" : "跳到最新消息"
         ) { message in
             Group {
                 if message.id == last?.id && message.isStreaming && chatStore.isGenerating {
-                    LiveReplyRow(store: chatStore.liveReply, fallback: message) { reply in
+                    LiveReplyRow(
+                        store: chatStore.liveReply,
+                        fallback: message,
+                        onUpdate: { streamingCoordinator.onLiveRowUpdated?() }
+                    ) { reply in
                         messageRow(message: reply, versionInfo: versions[reply.id], isLast: true)
                     }
                 } else {
@@ -968,10 +1112,15 @@ private struct ChatDrawerPan: UIGestureRecognizerRepresentable {
 private struct LiveReplyRow<Content: View>: View {
     @ObservedObject var store: LiveReplyStore
     let fallback: ChatMessage
+    let onUpdate: () -> Void
     @ViewBuilder let content: (ChatMessage) -> Content
 
     var body: some View {
         content(store.message?.id == fallback.id ? store.message ?? fallback : fallback)
+            .transaction { $0.animation = nil }
+            .onChange(of: store.revision) { _, _ in
+                onUpdate()
+            }
     }
 }
 // MARK: - Isolated Floating Liquid Glass Header
@@ -992,15 +1141,14 @@ private struct ChatHeaderView: View {
     var body: some View {
         HStack(spacing: 10) {
             Button(action: onOpenDrawer) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Capsule().frame(width: 17, height: 1.6)
-                    Capsule().frame(width: 10, height: 1.6)
+                VStack(alignment: .leading, spacing: 5.5) {
+                    Capsule().frame(width: 16, height: 1.7)
+                    Capsule().frame(width: 10, height: 1.7)
                 }
                 .foregroundStyle(Color.nuwaLabelPrimary)
-                .frame(width: 44, height: 44)
-                .background(Color.nuwaControlFill, in: Circle())
-                .overlay(Circle().strokeBorder(Color.nuwaControlBorder, lineWidth: 0.75))
-                .contentShape(Rectangle())
+                .frame(width: 42, height: 42)
+                .nuwaGlass(in: Circle(), interactive: true)
+                .contentShape(Circle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel(settings.locale == .enUS

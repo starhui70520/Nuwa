@@ -62,23 +62,25 @@ private enum MarkdownParseCache {
     }()
 
     static func parse(_ rawInput: String, isStreaming: Bool) -> [MarkdownBlock] {
-        if isStreaming { return parseBlocks(cleanCitationTags(rawInput)) }
+        if isStreaming { return parseBlocks(cleanCitationTags(rawInput), cacheInline: false) }
         let key = rawInput as NSString
         if let hit = cache.object(forKey: key) {
             return hit.blocks
         }
         let cleaned = cleanCitationTags(rawInput)
-        let parsed = parseBlocks(cleaned)
+        let parsed = parseBlocks(cleaned, cacheInline: true)
         cache.setObject(CachedMarkdownBlocks(parsed), forKey: key, cost: key.length * 4)
         return parsed
     }
 
-    static func inlineAttributed(_ raw: String) -> AttributedString {
+    static func inlineAttributed(_ raw: String, cacheable: Bool = true) -> AttributedString {
         let key = raw as NSString
         if let cached = inlineCache.object(forKey: key) { return cached.value }
         let parsed = (try? AttributedString(markdown: raw, options: inlineOptions)) ?? AttributedString(raw)
         let styled = styleInlineCodeRuns(parsed)
-        inlineCache.setObject(CachedInlineMarkdown(styled), forKey: key, cost: key.length * 4)
+        if cacheable {
+            inlineCache.setObject(CachedInlineMarkdown(styled), forKey: key, cost: key.length * 4)
+        }
         return styled
     }
 
@@ -163,7 +165,7 @@ private enum MarkdownParseCache {
         return trimmed.dropFirst(run.count).trimmingCharacters(in: .whitespaces).isEmpty
     }
 
-    private static func parseBlocks(_ input: String) -> [MarkdownBlock] {
+    private static func parseBlocks(_ input: String, cacheInline: Bool) -> [MarkdownBlock] {
         var result: [MarkdownBlock] = []
         let normalized = input
             .replacingOccurrences(of: "\r\n", with: "\n")
@@ -176,7 +178,7 @@ private enum MarkdownParseCache {
         func flushParagraph() {
             let joined = paraBuf.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
             if !joined.isEmpty {
-                result.append(.paragraph(id: nextId, attributed: inlineAttributed(joined)))
+                result.append(.paragraph(id: nextId, attributed: inlineAttributed(joined, cacheable: cacheInline)))
                 nextId += 1
             }
             paraBuf.removeAll(keepingCapacity: true)
@@ -304,7 +306,7 @@ private enum MarkdownParseCache {
                 if (1...4).contains(level), trimmed.dropFirst(level).hasPrefix(" ") {
                     flushParagraph()
                     let content = String(trimmed.dropFirst(level + 1)).trimmingCharacters(in: .whitespaces)
-                    result.append(.heading(id: nextId, level: level, attributed: inlineAttributed(content)))
+                    result.append(.heading(id: nextId, level: level, attributed: inlineAttributed(content, cacheable: cacheInline)))
                     nextId += 1
                     idx += 1
                     continue
@@ -326,7 +328,7 @@ private enum MarkdownParseCache {
                         break
                     }
                 }
-                result.append(.blockquote(id: nextId, attributed: inlineAttributed(quoteLines.joined(separator: "\n"))))
+                result.append(.blockquote(id: nextId, attributed: inlineAttributed(quoteLines.joined(separator: "\n"), cacheable: cacheInline)))
                 nextId += 1
                 continue
             }
@@ -334,7 +336,7 @@ private enum MarkdownParseCache {
             if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("• ") {
                 flushParagraph()
                 let content = String(trimmed.dropFirst(2))
-                result.append(.listItem(id: nextId, marker: "•", attributed: inlineAttributed(content)))
+                result.append(.listItem(id: nextId, marker: "•", attributed: inlineAttributed(content, cacheable: cacheInline)))
                 nextId += 1
                 idx += 1
                 continue
@@ -349,7 +351,7 @@ private enum MarkdownParseCache {
                 let marker = String(trimmed[...dotIdx])
                 let afterSpace = trimmed.index(dotIdx, offsetBy: 2)
                 let content = String(trimmed[afterSpace...])
-                result.append(.listItem(id: nextId, marker: marker, attributed: inlineAttributed(content)))
+                result.append(.listItem(id: nextId, marker: marker, attributed: inlineAttributed(content, cacheable: cacheInline)))
                 nextId += 1
                 idx += 1
                 continue
@@ -467,14 +469,14 @@ struct MarkdownMessageView: View, Equatable {
                         .font(.system(size: size, weight: level <= 3 ? .bold : .semibold))
                         .foregroundStyle(Color.nuwaLabelPrimary)
                         .padding(.top, 4)
-                        .textSelection(.enabled)
+                        .modifier(ConditionalTextSelection(enabled: !isStreaming))
 
                 case .paragraph(_, let attributed):
                     Text(attributed)
                         .font(.system(size: fontSize))
                         .foregroundStyle(Color.nuwaLabelPrimary)
                         .lineSpacing(6)
-                        .textSelection(.enabled)
+                        .modifier(ConditionalTextSelection(enabled: !isStreaming))
                         .fixedSize(horizontal: false, vertical: true)
 
                 case .listItem(_, let marker, let attributed):
@@ -487,7 +489,7 @@ struct MarkdownMessageView: View, Equatable {
                             .font(.system(size: fontSize))
                             .foregroundStyle(Color.nuwaLabelPrimary)
                             .lineSpacing(6)
-                            .textSelection(.enabled)
+                            .modifier(ConditionalTextSelection(enabled: !isStreaming))
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
@@ -500,7 +502,7 @@ struct MarkdownMessageView: View, Equatable {
                             .font(.system(size: fontSize - 0.5))
                             .foregroundStyle(Color.nuwaLabelSecondary)
                             .lineSpacing(4)
-                            .textSelection(.enabled)
+                            .modifier(ConditionalTextSelection(enabled: !isStreaming))
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     .padding(.vertical, 4)
@@ -565,6 +567,18 @@ struct MarkdownMessageView: View, Equatable {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct ConditionalTextSelection: ViewModifier {
+    let enabled: Bool
+
+    func body(content: Content) -> some View {
+        if enabled {
+            content.textSelection(.enabled)
+        } else {
+            content
+        }
     }
 }
 

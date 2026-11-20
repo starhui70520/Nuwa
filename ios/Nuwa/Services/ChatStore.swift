@@ -195,6 +195,7 @@ final class SessionListStore: ObservableObject {
 @MainActor
 final class LiveReplyStore: ObservableObject {
     @Published var message: ChatMessage?
+    var revision: Int = 0
 }
 
 @MainActor
@@ -772,6 +773,7 @@ final class ChatStore: ObservableObject {
                     @MainActor
                     func publishDraft() {
                         guard generationID == generation else { return }
+                        liveReply.revision &+= 1
                         liveReply.message = draft
                     }
 
@@ -856,7 +858,7 @@ final class ChatStore: ObservableObject {
                                 publishDraft()
                             } else if pendingFlush == nil {
                                 pendingFlush = Task { @MainActor in
-                                    try? await Task.sleep(for: .milliseconds(33))
+                                    try? await Task.sleep(for: .milliseconds(60))
                                     guard !Task.isCancelled else { return }
                                     pendingFlush = nil
                                     publishDraft()

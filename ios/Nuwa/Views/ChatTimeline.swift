@@ -2,6 +2,11 @@ import SwiftUI
 import UIKit
 import UIKit.UIGestureRecognizerSubclass
 
+@MainActor
+final class TimelineStreamingCoordinator {
+    var onLiveRowUpdated: (() -> Void)?
+}
+
 struct ChatTimelineAppearance {
     let fontSize: Double
     let locale: AppLocale
@@ -18,9 +23,11 @@ struct ChatTimeline<Row: View>: View {
     let appearance: ChatTimelineAppearance
     let topInset: CGFloat
     let bottomInset: CGFloat
+    let usesSystemSafeAreaBars: Bool
     let topCommand: Int
     let disclosureAnchorID: UUID?
     let disclosureAnchorToken: Int
+    let streamingCoordinator: TimelineStreamingCoordinator
     let animateBoundaryJumps: Bool
     let latestLabel: String
     @ViewBuilder let row: (ChatMessage) -> Row
@@ -30,23 +37,10 @@ struct ChatTimeline<Row: View>: View {
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        TimelineCollection(
-            isAtBottom: $isAtBottom,
-            messages: messages,
-            versions: versions,
-            appearance: appearance,
-            colorScheme: colorScheme,
-            topInset: topInset,
-            bottomInset: bottomInset,
-            topCommand: topCommand,
-            latestCommand: latestCommand,
-            disclosureAnchorID: disclosureAnchorID,
-            disclosureAnchorToken: disclosureAnchorToken,
-            animateBoundaryJumps: animateBoundaryJumps && !reduceMotion,
-            row: row
-        )
-        .ignoresSafeArea(.container, edges: .vertical)
-        .overlay(alignment: .bottomTrailing) {
+        ZStack(alignment: .bottomTrailing) {
+            collectionView
+                .ignoresSafeArea(.container, edges: .vertical)
+
             if !isAtBottom {
                 Button {
                     isAtBottom = true
@@ -61,9 +55,39 @@ struct ChatTimeline<Row: View>: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel(latestLabel)
                 .padding(.trailing, 16)
-                .padding(.bottom, bottomInset + 12)
+                .padding(.bottom, usesSystemSafeAreaBars ? 12 : bottomInset + 12)
             }
         }
+    }
+
+    @ViewBuilder
+    private var collectionView: some View {
+        let base = TimelineCollection(
+            isAtBottom: $isAtBottom,
+            messages: messages,
+            versions: versions,
+            appearance: appearance,
+            colorScheme: colorScheme,
+            topInset: topInset,
+            bottomInset: bottomInset,
+            usesSystemSafeAreaBars: usesSystemSafeAreaBars,
+            topCommand: topCommand,
+            latestCommand: latestCommand,
+            disclosureAnchorID: disclosureAnchorID,
+            disclosureAnchorToken: disclosureAnchorToken,
+            streamingCoordinator: streamingCoordinator,
+            animateBoundaryJumps: animateBoundaryJumps && !reduceMotion,
+            row: row
+        )
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *), usesSystemSafeAreaBars {
+            base.scrollEdgeEffectStyle(.soft, for: .vertical)
+        } else {
+            base
+        }
+        #else
+        base
+        #endif
     }
 }
 
@@ -75,17 +99,19 @@ private struct TimelineCollection<Row: View>: UIViewRepresentable {
     let colorScheme: ColorScheme
     let topInset: CGFloat
     let bottomInset: CGFloat
+    let usesSystemSafeAreaBars: Bool
     let topCommand: Int
     let latestCommand: Int
     let disclosureAnchorID: UUID?
     let disclosureAnchorToken: Int
+    let streamingCoordinator: TimelineStreamingCoordinator
     let animateBoundaryJumps: Bool
     let row: (ChatMessage) -> Row
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeUIView(context: Context) -> TimelineCollectionView {
-        let layout = UICollectionViewCompositionalLayout { _, _ in
+        let layout = TimelineLayout { _, _ in
             let size = NSCollectionLayoutSize(widthDimension: .fractionalWidth(1), heightDimension: .estimated(120))
             let item = NSCollectionLayoutItem(layoutSize: size)
             let group = NSCollectionLayoutGroup.vertical(layoutSize: size, subitems: [item])
@@ -94,23 +120,40 @@ private struct TimelineCollection<Row: View>: UIViewRepresentable {
             section.contentInsets = NSDirectionalEdgeInsets(top: 14, leading: 0, bottom: 16, trailing: 0)
             return section
         }
-        let view = TimelineCollectionView(frame: .zero, collectionViewLayout: layout)
+        let view = TimelineCollectionView(frame: .zero, timelineLayout: layout)
         view.backgroundColor = .clear
         view.alwaysBounceVertical = true
         view.keyboardDismissMode = .interactive
-        view.contentInsetAdjustmentBehavior = .never
         view.selfSizingInvalidation = .enabledIncludingConstraints
         view.allowsSelection = false
-        if #available(iOS 26, *) {
-            view.topEdgeEffect.isHidden = true
-            view.bottomEdgeEffect.isHidden = true
+        view.usesSystemSafeAreaBars = usesSystemSafeAreaBars
+
+        if #available(iOS 26, *), usesSystemSafeAreaBars {
+            view.contentInsetAdjustmentBehavior = .scrollableAxes
+            view.topEdgeEffect.isHidden = false
+            view.topEdgeEffect.style = .soft
+            view.bottomEdgeEffect.isHidden = false
+            view.bottomEdgeEffect.style = .soft
+        } else {
+            view.contentInsetAdjustmentBehavior = .never
+            if #available(iOS 26, *) {
+                view.topEdgeEffect.isHidden = true
+                view.bottomEdgeEffect.isHidden = true
+            }
+            view.applyInsets(top: topInset, bottom: bottomInset)
         }
-        view.applyInsets(top: topInset, bottom: bottomInset)
+
+        streamingCoordinator.onLiveRowUpdated = { [weak view] in
+            view?.syncStreamingLayout()
+        }
         context.coordinator.connect(view)
         return view
     }
 
     func updateUIView(_ view: TimelineCollectionView, context: Context) {
+        streamingCoordinator.onLiveRowUpdated = { [weak view] in
+            view?.syncStreamingLayout()
+        }
         context.coordinator.update(self, view: view)
     }
 
@@ -143,7 +186,12 @@ private struct TimelineCollection<Row: View>: UIViewRepresentable {
             input = updated
             guard let dataSource else { return }
 
-            view.applyInsets(top: updated.topInset, bottom: updated.bottomInset)
+            if !updated.usesSystemSafeAreaBars {
+                view.applyInsets(top: updated.topInset, bottom: updated.bottomInset)
+            }
+
+            let isStreamingReply = updated.appearance.isGenerating && updated.messages.last?.isStreaming == true
+            view.setStreamingState(active: isStreamingReply, lastIndex: updated.messages.count - 1)
 
             // When user taps a disclosure (已思考), pin that cell's top edge BEFORE reconfiguring so it NEVER jumps!
             let disclosureToggled = previous.disclosureAnchorToken != updated.disclosureAnchorToken
@@ -255,6 +303,29 @@ private struct TimelineCollection<Row: View>: UIViewRepresentable {
     }
 }
 
+/// Suppresses UIKit's automatic self-sizing `contentOffsetAdjustment` on the live streaming cell
+/// so UIKit never fights our lock-to-bottom offset or shoves scrolled-up reading position.
+private final class TimelineLayout: UICollectionViewCompositionalLayout {
+    var suppressLastItemOffsetAdjustment = false
+    var lastItemIndex = -1
+
+    override func invalidationContext(
+        forPreferredLayoutAttributes preferredAttributes: UICollectionViewLayoutAttributes,
+        withOriginalAttributes originalAttributes: UICollectionViewLayoutAttributes
+    ) -> UICollectionViewLayoutInvalidationContext {
+        let context = super.invalidationContext(
+            forPreferredLayoutAttributes: preferredAttributes,
+            withOriginalAttributes: originalAttributes
+        )
+        if suppressLastItemOffsetAdjustment,
+           preferredAttributes.representedElementCategory == .cell,
+           preferredAttributes.indexPath.item == lastItemIndex {
+            context.contentOffsetAdjustment = .zero
+        }
+        return context
+    }
+}
+
 private struct TimelineCellKey: Equatable {
     let message: ChatMessage
     let version: MessageVersionInfo?
@@ -278,7 +349,7 @@ private final class TimelineCell<Row: View>: UICollectionViewCell {
 
     func update(key: TimelineCellKey, row: Row) {
         self.key = key
-        contentView.clipsToBounds = true
+        contentView.clipsToBounds = false
         contentConfiguration = UIHostingConfiguration {
             row
                 .environment(\.colorScheme, key.colorScheme)
@@ -289,11 +360,18 @@ private final class TimelineCell<Row: View>: UICollectionViewCell {
 }
 
 private final class TimelineCollectionView: UICollectionView {
+    private let timelineLayout: TimelineLayout
+
     var followsLatest = true
+    var usesSystemSafeAreaBars = false
     var onDisclosureSettled: ((Bool) -> Void)?
+    private var isStreaming = false
+    private var lastItemIndex = -1
+    private var isSyncingStreaming = false
     private var pinnedToTop = false
     private var animatingBoundary = false
     private var laidOutSize = CGSize.zero
+    private var lastAdjustedInset = UIEdgeInsets.zero
     private var chromeTopInset: CGFloat = 0
     private var chromeBottomInset: CGFloat = 0
     private var focusAnchor: (IndexPath, CGFloat)?
@@ -307,30 +385,88 @@ private final class TimelineCollectionView: UICollectionView {
         touchedInput = input
     }
 
-    private var topOffset: CGFloat { -contentInset.top }
-    private var bottomOffset: CGFloat { max(topOffset, contentSize.height + contentInset.bottom - bounds.height) }
+    init(frame: CGRect, timelineLayout: TimelineLayout) {
+        self.timelineLayout = timelineLayout
+        super.init(frame: frame, collectionViewLayout: timelineLayout)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    private var effectiveInset: UIEdgeInsets { adjustedContentInset }
+    private var topOffset: CGFloat { -effectiveInset.top }
+    private var bottomOffset: CGFloat { max(topOffset, contentSize.height + effectiveInset.bottom - bounds.height) }
     private var visibleViewport: CGRect {
         CGRect(
             x: contentOffset.x,
-            y: contentOffset.y + contentInset.top,
+            y: contentOffset.y + effectiveInset.top,
             width: bounds.width,
-            height: max(0, bounds.height - contentInset.top - contentInset.bottom)
+            height: max(0, bounds.height - effectiveInset.top - effectiveInset.bottom)
         )
     }
     var isNearBottom: Bool { contentOffset.y >= bottomOffset - 40 }
 
+    func setStreamingState(active: Bool, lastIndex: Int) {
+        isStreaming = active
+        lastItemIndex = lastIndex
+        timelineLayout.suppressLastItemOffsetAdjustment = active
+        timelineLayout.lastItemIndex = lastIndex
+    }
+
+    /// Synchronously resolves self-sizing + bottom offset in a single non-animated CATransaction
+    /// so live streaming text NEVER shakes or flashes up/down by half a line.
+    func syncStreamingLayout() {
+        guard !isSyncingStreaming,
+              disclosureAnchor == nil,
+              !isDragging, !isTracking, !isDecelerating
+        else { return }
+        isSyncingStreaming = true
+        defer { isSyncingStreaming = false }
+
+        UIView.performWithoutAnimation {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            if lastItemIndex >= 0,
+               let cell = cellForItem(at: IndexPath(item: lastItemIndex, section: 0)) {
+                cell.invalidateIntrinsicContentSize()
+            }
+            setNeedsLayout()
+            layoutIfNeeded()
+            if followsLatest && !animatingBoundary {
+                setOffsetImmediate(bottomOffset)
+            }
+            CATransaction.commit()
+        }
+    }
+
     func applyInsets(top: CGFloat, bottom: CGFloat) {
+        guard !usesSystemSafeAreaBars else { return }
         chromeTopInset = max(0, top)
         chromeBottomInset = max(0, bottom)
-        refreshInsets()
+        refreshManualInsets()
     }
 
     override func safeAreaInsetsDidChange() {
         super.safeAreaInsetsDidChange()
-        refreshInsets()
+        if !usesSystemSafeAreaBars {
+            refreshManualInsets()
+        }
     }
 
-    private func refreshInsets() {
+    override func adjustedContentInsetDidChange() {
+        super.adjustedContentInsetDidChange()
+        guard usesSystemSafeAreaBars else { return }
+        if disclosureAnchor == nil && !isDragging && !isTracking && !isDecelerating {
+            if followsLatest {
+                setOffsetImmediate(bottomOffset)
+            } else if pinnedToTop {
+                setOffsetImmediate(topOffset)
+            }
+        }
+    }
+
+    private func refreshManualInsets() {
         let next = UIEdgeInsets(
             top: safeAreaInsets.top + chromeTopInset,
             left: 0,
@@ -347,12 +483,12 @@ private final class TimelineCollectionView: UICollectionView {
         verticalScrollIndicatorInsets = next
         if disclosureAnchor == nil {
             if followsLatest && !isDragging && !isTracking && !isDecelerating {
-                setOffset(bottomOffset)
+                setOffsetImmediate(bottomOffset)
             } else if pinnedToTop && !isDragging && !isTracking && !isDecelerating {
-                setOffset(topOffset)
+                setOffsetImmediate(topOffset)
             } else if let (ip, relativeY) = anchor,
                       let frame = collectionViewLayout.layoutAttributesForItem(at: ip)?.frame {
-                setOffset(max(topOffset, min(bottomOffset, frame.minY - contentInset.top - relativeY)))
+                setOffsetImmediate(max(topOffset, min(bottomOffset, frame.minY - effectiveInset.top - relativeY)))
             }
         }
     }
@@ -409,14 +545,15 @@ private final class TimelineCollectionView: UICollectionView {
 
     override func layoutSubviews() {
         let previousSize = laidOutSize
+        let previousInset = lastAdjustedInset
         let sizeChanged = previousSize != bounds.size
         var readingAnchor: (IndexPath, CGFloat)?
         if disclosureAnchor == nil, sizeChanged, !followsLatest, !pinnedToTop, !isDragging, previousSize.height > 0 {
             let oldViewport = CGRect(
                 x: contentOffset.x,
-                y: contentOffset.y + contentInset.top,
+                y: contentOffset.y + previousInset.top,
                 width: previousSize.width,
-                height: max(0, previousSize.height - contentInset.top - contentInset.bottom)
+                height: max(0, previousSize.height - previousInset.top - previousInset.bottom)
             )
             if previousSize.width == bounds.width, previousSize.height > bounds.height,
                touchedInput?.isFirstResponder == true, let focusAnchor {
@@ -427,18 +564,33 @@ private final class TimelineCollectionView: UICollectionView {
         }
         if sizeChanged { clearFocusAnchor() }
         laidOutSize = bounds.size
+        lastAdjustedInset = effectiveInset
+
+        if isStreaming && disclosureAnchor == nil && !sizeChanged && !isDragging && !isTracking && !isDecelerating {
+            UIView.performWithoutAnimation {
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                super.layoutSubviews()
+                if (followsLatest || pinnedToTop) && !animatingBoundary {
+                    setOffsetImmediate(pinnedToTop ? topOffset : bottomOffset)
+                }
+                CATransaction.commit()
+            }
+            return
+        }
+
         super.layoutSubviews()
 
         if let (anchorIP, relativeToOffset) = disclosureAnchor, !isDragging && !isTracking {
             if let frame = collectionViewLayout.layoutAttributesForItem(at: anchorIP)?.frame {
-                setOffset(max(topOffset, min(bottomOffset, frame.minY - relativeToOffset)))
+                setOffsetImmediate(max(topOffset, min(bottomOffset, frame.minY - relativeToOffset)))
             }
         } else if (followsLatest || pinnedToTop) && !isDragging && !isTracking && !isDecelerating && (!animatingBoundary || sizeChanged) {
             animatingBoundary = false
-            setOffset(pinnedToTop ? topOffset : bottomOffset)
+            setOffsetImmediate(pinnedToTop ? topOffset : bottomOffset)
         } else if let (indexPath, relativeY) = readingAnchor,
                   let frame = collectionViewLayout.layoutAttributesForItem(at: indexPath)?.frame {
-            setOffset(max(topOffset, min(bottomOffset, frame.minY - contentInset.top - relativeY)))
+            setOffsetImmediate(max(topOffset, min(bottomOffset, frame.minY - effectiveInset.top - relativeY)))
         }
     }
 
@@ -455,9 +607,12 @@ private final class TimelineCollectionView: UICollectionView {
         setNeedsLayout()
     }
 
-    private func setOffset(_ y: CGFloat) {
+    private func setOffsetImmediate(_ y: CGFloat) {
         guard abs(contentOffset.y - y) > 0.5 else { return }
-        setContentOffset(CGPoint(x: 0, y: y), animated: false)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        contentOffset = CGPoint(x: 0, y: y)
+        CATransaction.commit()
     }
 
     private func readingPosition(in viewport: CGRect) -> (IndexPath, CGFloat)? {
