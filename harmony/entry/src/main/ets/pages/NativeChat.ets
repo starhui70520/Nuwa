@@ -210,7 +210,9 @@ struct NativeChat {
   @State private selectedIds: string[] = [];
   @State private selecting: boolean = false;
   @State private settingsVisible: boolean = false;
+  @State private settingsDragOffset: number = 0;
   private readonly settingsScroll = new Scroller();
+  private settingsTouchDownAt: number = 0;
   private settingsDragStartedAt: number = 0;
   @State private migrationPromptVisible: boolean = false;
   @State private migrationChoice: NativeMigrationChoiceModel | null = null;
@@ -3934,6 +3936,7 @@ struct NativeChat {
     }
     void this.refreshBalance();
     this.settingsSection = section;
+    this.settingsDragOffset = 0;
     this.settingsVisible = true;
   }
 
@@ -3949,32 +3952,64 @@ struct NativeChat {
     this.settingsVisible = false;
   }
 
-  private startSettingsDrag(fromHeader: boolean): void {
-    this.settingsDragStartedAt = !this.wide() && this.settingsVisible &&
-      (fromHeader || this.settingsScroll.currentOffset().yOffset <= 1) ? Date.now() : 0;
+  private canDragSettings(): boolean {
+    return !this.wide() && this.settingsVisible && !this.signingOut && !this.deletingSessions && !this.authorizing;
   }
 
-  private finishSettingsDrag(event: GestureEvent): void {
+  private trackSettingsTouch(event: TouchEvent, fromHeader: boolean): void {
+    if (event.type === TouchType.Cancel || event.touches.length > 1) {
+      this.settingsTouchDownAt = 0;
+      this.finishSettingsDrag();
+    } else if (event.type === TouchType.Down) {
+      this.settingsTouchDownAt = this.canDragSettings() && event.touches.length === 1 &&
+        (fromHeader || this.settingsScroll.currentOffset().yOffset <= 1) ? Date.now() : 0;
+    }
+  }
+
+  private startSettingsDrag(event: GestureEvent, fromHeader: boolean): void {
+    const eligible = fromHeader || (event.offsetY > Math.abs(event.offsetX) * 1.15 &&
+      this.settingsScroll.currentOffset().yOffset <= 1);
+    this.settingsDragStartedAt = this.canDragSettings() && eligible ? this.settingsTouchDownAt : 0;
+  }
+
+  private updateSettingsDrag(event: GestureEvent): void {
+    if (this.settingsDragStartedAt && this.canDragSettings()) {
+      this.settingsDragOffset = Math.max(0, event.offsetY);
+    }
+  }
+
+  private finishSettingsDrag(event?: GestureEvent): void {
     const startedAt = this.settingsDragStartedAt;
+    this.settingsTouchDownAt = 0;
     this.settingsDragStartedAt = 0;
-    if (startedAt && this.settingsVisible &&
+    if (event && startedAt && this.canDragSettings() &&
       (event.offsetY > 96 || event.offsetY / Math.max(1, Date.now() - startedAt) > 0.45)) {
       this.closeSettings();
+    } else if (this.settingsDragOffset > 0) {
+      this.getUIContext().animateTo({ duration: 260, curve: Curve.EaseOut }, () => { this.settingsDragOffset = 0; });
     }
   }
 
   private settingsSheetOptions(): SheetOptions {
     const wide = this.wide();
+    const mobileHeight = this.viewportHeight - (this.compact() ? 0 : 48);
+    const opacity = 1 - Math.min(1, this.settingsDragOffset / Math.max(240, mobileHeight * 0.65));
     return {
       preferType: wide ? SheetType.CENTER : SheetType.BOTTOM,
       width: wide ? 480 : undefined,
       height: wide ? Math.min(660, Math.max(320, this.viewportHeight - 32)) :
-        Math.max(1, this.viewportHeight - (this.compact() ? 0 : 48)),
+        Math.max(1, mobileHeight - this.settingsDragOffset),
+      maskColor: wide ? undefined : Math.round(92 * opacity) * 0x1000000,
       blurStyle: BlurStyle.Thick,
       backgroundColor: $r('app.color.native_chat_sidebar'),
       dragBar: false,
       showClose: false,
       title: (): void => { this.settingsHeader(); },
+      onDisappear: (): void => {
+        this.settingsTouchDownAt = 0;
+        this.settingsDragStartedAt = 0;
+        this.settingsDragOffset = 0;
+      },
       onWillDismiss: (action: DismissSheetAction): void => {
         if (this.signingOut || this.deletingSessions || this.authorizing) return;
         if (action.reason === DismissReason.PRESS_BACK && this.settingsSection !== 'root') {
@@ -4822,10 +4857,13 @@ struct NativeChat {
       })
     }
     .width('100%').enabled(!this.signingOut)
+    .onTouch((event: TouchEvent) => { this.trackSettingsTouch(event, true); })
     .parallelGesture(
       PanGesture({ direction: PanDirection.Down, distance: 3 })
-        .onActionStart(() => { this.startSettingsDrag(true); })
+        .onActionStart((event: GestureEvent) => { this.startSettingsDrag(event, true); })
+        .onActionUpdate((event: GestureEvent) => { this.updateSettingsDrag(event); })
         .onActionEnd((event: GestureEvent) => { this.finishSettingsDrag(event); })
+        .onActionCancel(() => { this.finishSettingsDrag(); })
     )
   }
 
@@ -4865,12 +4903,15 @@ struct NativeChat {
       }).alignItems(HorizontalAlign.Start)
     }
     .width('100%').height('100%').scrollBar(BarState.Off)
-    .nestedScroll({ scrollForward: NestedScrollMode.SELF_FIRST, scrollBackward: NestedScrollMode.SELF_FIRST })
+    .nestedScroll({ scrollForward: NestedScrollMode.SELF_ONLY, scrollBackward: NestedScrollMode.SELF_ONLY })
     .enabled(!this.signingOut)
+    .onTouch((event: TouchEvent) => { this.trackSettingsTouch(event, false); })
     .parallelGesture(
       PanGesture({ direction: PanDirection.Down, distance: 5 })
-        .onActionStart(() => { this.startSettingsDrag(false); })
+        .onActionStart((event: GestureEvent) => { this.startSettingsDrag(event, false); })
+        .onActionUpdate((event: GestureEvent) => { this.updateSettingsDrag(event); })
         .onActionEnd((event: GestureEvent) => { this.finishSettingsDrag(event); })
+        .onActionCancel(() => { this.finishSettingsDrag(); })
     )
   }
 
