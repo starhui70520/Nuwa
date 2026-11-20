@@ -133,14 +133,12 @@ jobs:
           writeFileSync(profilePath, `${JSON.stringify(profile, null, 2)}\n`)
           NODE
 
-      - name: Check and build Nuwa web assets
+      - name: Check dependencies and stage native Markdown runtimes
         working-directory: chat-demo
         run: |
           pnpm install --frozen-lockfile
           pnpm type
           pnpm lint
-          pnpm build
-          cp -R dist/. ../harmony/entry/src/main/resources/rawfile/web/
           node ../harmony/scripts/stage-mermaid.mjs
           node ../harmony/scripts/stage-katex.mjs
           node ../harmony/scripts/stage-prism.mjs

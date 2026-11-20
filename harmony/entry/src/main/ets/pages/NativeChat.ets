@@ -595,7 +595,7 @@ struct NativeChat {
   }
 
   private async save(context: common.UIAbilityContext = this.host(), checkpoint: boolean = false): Promise<void> {
-    if (this.deletingSessions || this.committingHistoryImport || this.migrationNavigationStarted) return;
+    if (!this.loaded || this.deletingSessions || this.committingHistoryImport || this.migrationNavigationStarted) return;
     const sequence = ++this.historySaveSequence;
     let full = !checkpoint || this.hasPendingHistorySave();
     try {
@@ -1476,6 +1476,7 @@ struct NativeChat {
   }
 
   private async removeConversations(ids: string[], deleteAll: boolean): Promise<void> {
+    if (!this.loaded) return;
     const context = this.host();
     const deleted = new Set<string>(ids);
     this.deletingSessions = true;
@@ -1680,7 +1681,7 @@ struct NativeChat {
   }
 
   private async persistDrafts(): Promise<void> {
-    if (this.deletingSessions || !this.draftStorageReady || this.draftSaving || !this.draftDirty ||
+    if (!this.loaded || this.deletingSessions || !this.draftStorageReady || this.draftSaving || !this.draftDirty ||
       this.draftHistoryWrites.size > 0) return;
     this.rememberCurrentDraft();
     const rows: NativeStoredDraft[] = [];
@@ -3656,6 +3657,7 @@ struct NativeChat {
   }
 
   private async importChatHistory(fromPrompt: boolean = false, importedUri?: string): Promise<boolean> {
+    if (!this.loaded) return false;
     if (this.backupBusy || this.signingOut || this.migrationInProgress) {
       this.toast(this.label('请等待当前操作结束后再导入', 'Wait for the current operation to finish before importing'));
       return false;
@@ -3735,7 +3737,7 @@ struct NativeChat {
   }
 
   private async exportChatHistory(): Promise<void> {
-    if (this.backupBusy) {
+    if (!this.loaded || this.backupBusy) {
       return;
     }
     this.backupBusy = true;
@@ -3774,7 +3776,7 @@ struct NativeChat {
   }
 
   private chooseHistoryMigration(): void {
-    if (this.migrationInProgress || this.migrationChoice || this.deleteNotice || this.updateNotice) return;
+    if (!this.loaded || this.migrationInProgress || this.migrationChoice || this.deleteNotice || this.updateNotice) return;
     if (this.backupBusy || this.replies.length > 0) {
       this.toast(this.label('请在回复结束后迁移', 'Migration is available after the reply finishes'));
       return;
@@ -3805,7 +3807,7 @@ struct NativeChat {
   }
 
   private async openHistoryMigration(intent: NativeMigrationIntent = { clearSession: false, forceReExport: false }): Promise<void> {
-    if (this.migrationInProgress) return;
+    if (!this.loaded || this.migrationInProgress) return;
     if (this.backupBusy || this.replies.length > 0) {
       this.restoreAuthorizationSettings();
       this.toast(this.label('请在回复结束后迁移', 'Migration is available after the reply finishes'));
@@ -3825,8 +3827,8 @@ struct NativeChat {
       await this.markMigrationUsed();
       this.migrationNavigationStarted = true;
       await this.getUIContext().getRouter().pushUrl({
-        url: 'pages/Index',
-        params: { migrate: true, clearSession: intent.clearSession, forceReExport: intent.forceReExport },
+        url: 'pages/HistoryMigration',
+        params: { clearSession: intent.clearSession, forceReExport: intent.forceReExport },
       });
     } catch {
       this.migrationNavigationStarted = false;
@@ -4079,7 +4081,7 @@ struct NativeChat {
   }
 
   @Builder
-  private settingsRow(title: () => string, value: () => string, click: () => void) {
+  private settingsRow(title: () => string, value: () => string, click: () => void, enabled: () => boolean = () => true) {
     Button({ type: ButtonType.Normal }) {
       Row({ space: 10 }) {
         Text(title()).layoutWeight(1).fontSize(this.appFontSize(15)).fontColor($r('app.color.native_chat_primary'))
@@ -4091,7 +4093,7 @@ struct NativeChat {
       }
       .width('100%').constraintSize({ minHeight: 48 }).padding({ left: 15, right: 12, top: 6, bottom: 6 })
     }
-    .width('100%').padding(0).borderRadius(0).backgroundColor(Color.Transparent).onClick(click)
+    .width('100%').padding(0).borderRadius(0).backgroundColor(Color.Transparent).enabled(enabled()).onClick(click)
   }
 
   private setLocation(location: NativeUserLocation | null): void {
@@ -4163,9 +4165,9 @@ struct NativeChat {
         () => { void this.openLink('https://platform.deepseek.com/top_up'); })
       Divider().color($r('app.color.native_chat_stroke')).margin({ left: 14 })
       this.settingsRow(() => this.label('数据管理', 'Data management'),
-        () => this.label(`${this.history.sessions.length} 条对话`,
-          this.history.sessions.length === 1 ? '1 chat' : `${this.history.sessions.length} chats`),
-        () => { this.settingsSection = 'data'; })
+        () => this.loaded ? this.label(`${this.history.sessions.length} 条对话`,
+          this.history.sessions.length === 1 ? '1 chat' : `${this.history.sessions.length} chats`) : '',
+        () => { this.settingsSection = 'data'; }, () => this.loaded)
     }
     .width('100%').borderRadius(16).clip(true).backgroundColor($r('app.color.native_chat_surface'))
     this.settingsLabel(() => this.label('应用', 'App'))
@@ -4586,7 +4588,7 @@ struct NativeChat {
   }
 
   private canModifyHistory(): boolean {
-    return !this.backupBusy && !this.migrationInProgress && !this.signingOut;
+    return this.loaded && !this.backupBusy && !this.migrationInProgress && !this.signingOut;
   }
 
   private pinSidebarSession(id: string): void {

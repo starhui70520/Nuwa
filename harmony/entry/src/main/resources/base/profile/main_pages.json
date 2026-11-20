@@ -1,6 +1,6 @@
 {
   "src": [
     "pages/NativeChat",
-    "pages/Index"
+    "pages/HistoryMigration"
   ]
 }
