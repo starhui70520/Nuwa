@@ -7,19 +7,17 @@ import { NativeChatSource, safeNativeSourceUrl } from './NativeChatSources';
 import { NativeHighlightedCode } from './NativeHighlightedCode';
 import { NativeLocale } from './NativeLocation';
 import { NativeMathEquation } from './NativeMathEquation';
+import { NativeMathPictureFiles, NativeStoredMathPicture } from './NativeMathPictureFiles';
 import { NativeMessageSelection } from './NativeMessageSelection';
 import {
-  NativeMathPicture, NativeMathPictureRequest, nativeMathPictureKey, requestNativeMathPicture,
+  NativeMathPictureRequest, nativeMathPictureKey, requestNativeMathPicture,
 } from './NativeMathRenderQueue';
 import { NativeMermaidPreview } from './NativeMermaidPreview';
 import { NativeMathSpan, parseNativeMath } from './NativeMarkdownMath';
 import { nativeMarkdownBlocks, NativeMarkdownBlock, NativeMarkdownPart } from './NativeMarkdownStructure';
 import { NativeTheme } from './NativeSettings';
 
-interface NativeRenderedFormula {
-  key: string;
-  picture: NativeMathPicture;
-}
+const MATH_PICTURE_PAINT_BATCH = 6;
 
 interface NativeCitationAnchor {
   paragraph: string;
@@ -46,7 +44,7 @@ export struct NativeMarkdown {
   onCitation: (number: number) => void = () => {};
   @State private copiedCodeKey: string = '';
   @State private mermaidCodeBlocks: string[] = [];
-  @State private mathPictures: NativeRenderedFormula[] = [];
+  @State private mathPictures: Map<string, NativeStoredMathPicture> = new Map<string, NativeStoredMathPicture>();
   @State private contentWidth: number = 0;
   @State private citationAnchor: NativeCitationAnchor | undefined = undefined;
   @State private citationPreviewVisible: boolean = false;
@@ -59,6 +57,8 @@ export struct NativeMarkdown {
   private streamTimer: number = -1;
   private codeCopyTimer: number = -1;
   private mathMounted: boolean = false;
+  private mathPictureFiles?: NativeMathPictureFiles;
+  private mathWork: Promise<void> = Promise.resolve();
   private mathTimer: number = -1;
   private mathGeneration: number = 0;
   private mathColor: string = '#0F1115';
@@ -78,6 +78,7 @@ export struct NativeMarkdown {
     this.mathMounted = false;
     this.mathGeneration++;
     clearTimeout(this.mathTimer);
+    this.clearMathPictures();
     clearTimeout(this.codeCopyTimer);
     clearTimeout(this.streamTimer);
     this.streamTimer = -1;
@@ -161,40 +162,86 @@ export struct NativeMarkdown {
     const generation = ++this.mathGeneration;
     clearTimeout(this.mathTimer);
     if (!this.mathMounted || this.loading) {
-      if (this.mathPictures.length) this.mathPictures = [];
+      this.clearMathPictures();
       return;
     }
-    this.mathTimer = setTimeout(() => { this.prepareMathPictures(generation); }, 40);
+    this.mathTimer = setTimeout(() => {
+      this.mathWork = this.mathWork.then((): Promise<void> => this.prepareMathPictures(generation)).catch(() => {});
+    }, 40);
   }
 
-  private prepareMathPictures(generation: number): void {
-    if (this.mathGeneration !== generation || this.loading || !this.mathMounted) return;
+  private clearMathPictures(): void {
+    if (this.mathPictures.size) this.mathPictures.clear();
+    const files = this.mathPictureFiles;
+    this.mathPictureFiles = undefined;
+    if (files) void files.dispose();
+  }
+
+  private mathGenerationIsCurrent(generation: number): boolean {
+    return this.mathMounted && !this.loading && this.mathGeneration === generation;
+  }
+
+  private publishMathPictures(additions: Map<string, NativeStoredMathPicture>): void {
+    const next = new Map<string, NativeStoredMathPicture>(this.mathPictures);
+    additions.forEach((picture: NativeStoredMathPicture, key: string): void => { next.set(key, picture); });
+    this.mathPictures = next;
+    additions.clear();
+  }
+
+  private async prepareMathPictures(generation: number): Promise<void> {
+    if (!this.mathGenerationIsCurrent(generation)) return;
     this.prepareMathPresentation();
     const requests = new Map<string, NativeMathPictureRequest>();
     this.collectMathRequests(requests, this.blocks());
-    this.mathPictures = this.mathPictures.filter((item: NativeRenderedFormula): boolean => requests.has(item.key));
-    let count = 0;
-    for (const key of requests.keys()) {
-      if (count++ >= 48) break;
-      const request = requests.get(key);
-      if (request && !this.mathPictures.some((item: NativeRenderedFormula): boolean => item.key === key)) {
-        void requestNativeMathPicture(request).then((picture: NativeMathPicture | null): void => {
-          if (picture && this.mathMounted && this.mathGeneration === generation) {
-            const received: NativeRenderedFormula = { key, picture };
-            this.mathPictures = [...this.mathPictures, received];
-          }
-        });
+    if (!requests.size) {
+      this.clearMathPictures();
+      return;
+    }
+    const context = this.getUIContext().getHostContext();
+    const directory = context?.tempDir || context?.cacheDir;
+    if (!directory) return;
+    const files = this.mathPictureFiles ?? new NativeMathPictureFiles(directory);
+    this.mathPictureFiles = files;
+    const retained = new Map<string, NativeStoredMathPicture>();
+    this.mathPictures.forEach((picture: NativeStoredMathPicture, key: string): void => {
+      if (requests.has(key)) {
+        retained.set(key, picture);
+      } else {
+        void files.release(picture.source);
       }
+    });
+    if (retained.size !== this.mathPictures.size) this.mathPictures = retained;
+    const additions = new Map<string, NativeStoredMathPicture>();
+    try {
+      // The shared renderer handles one formula at a time. Keep only one request
+      // in flight from this message so long replies cannot fill its queue.
+      for (const entry of requests.entries()) {
+        const key = entry[0];
+        if (retained.has(key)) continue;
+        const picture = await requestNativeMathPicture(entry[1]);
+        if (!this.mathGenerationIsCurrent(generation)) return;
+        if (!picture) continue;
+        const stored = await files.store(picture);
+        if (stored) additions.set(key, stored);
+        if (!this.mathGenerationIsCurrent(generation)) return;
+        if (additions.size >= MATH_PICTURE_PAINT_BATCH || (additions.size > 0 && !this.mathPictures.size)) {
+          this.publishMathPictures(additions);
+        }
+      }
+      if (additions.size) this.publishMathPictures(additions);
+    } finally {
+      additions.forEach((picture: NativeStoredMathPicture): void => { void files.release(picture.source); });
     }
   }
 
-  private mathPicture(source: string, size: number, display: boolean, bold: boolean = false): NativeMathPicture | null {
-    if (!this.mathPictures.length) return null;
+  private mathPicture(source: string, size: number, display: boolean,
+    bold: boolean = false): NativeStoredMathPicture | null {
+    if (!this.mathPictures.size) return null;
     const key = nativeMathPictureKey(this.mathRequest(source, size, display, bold));
-    return this.mathPictures.find((item: NativeRenderedFormula): boolean => item.key === key)?.picture ?? null;
+    return this.mathPictures.get(key) ?? null;
   }
 
-  private inlinePictureScale(picture: NativeMathPicture, maxWidth: number): number {
+  private inlinePictureScale(picture: NativeStoredMathPicture, maxWidth: number): number {
     const available = maxWidth > 0 ? maxWidth : this.contentWidth || 320;
     return Math.min(1, available / picture.width);
   }
@@ -215,7 +262,7 @@ export struct NativeMarkdown {
   }
 
   private inlineAccessibilityText(parts: NativeMarkdownPart[]): string {
-    if (!this.mathPictures.length || !parts.some((part: NativeMarkdownPart): boolean => !!part.formula) ||
+    if (!this.mathPictures.size || !parts.some((part: NativeMarkdownPart): boolean => !!part.formula) ||
       parts.some((part: NativeMarkdownPart): boolean => !!part.target || part.citation !== undefined)) return '';
     return parts.map<string>((part: NativeMarkdownPart): string => part.formula ?? part.text).join('');
   }
@@ -301,9 +348,9 @@ export struct NativeMarkdown {
   }
 
   @Builder
-  private displayedFormula(picture: NativeMathPicture, source: string) {
+  private displayedFormula(picture: NativeStoredMathPicture, source: string) {
     Scroll() {
-      Image(picture.png)
+      Image(picture.source)
         .width(picture.width)
         .height(picture.height)
         .objectFit(ImageFit.Contain)
@@ -369,7 +416,7 @@ export struct NativeMarkdown {
             .textBackgroundStyle({ color: $r('app.color.native_chat_citation_bg'), radius: 6 })
             .onClick(() => { this.activateCitation(part.citation ?? 0); })
         } else if (part.formula && this.mathPicture(part.formula, size, false, part.strong)) {
-          ImageSpan(this.mathPicture(part.formula, size, false, part.strong)?.png ?? '')
+          ImageSpan(this.mathPicture(part.formula, size, false, part.strong)?.source ?? '')
             .width(this.inlineWidth(part.formula, size, part.strong, maxWidth))
             .height(this.inlineHeight(part.formula, size, part.strong, maxWidth))
             .objectFit(ImageFit.Contain)
