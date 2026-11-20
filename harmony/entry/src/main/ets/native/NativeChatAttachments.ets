@@ -857,10 +857,10 @@ export class NativeChatAttachments {
       try {
         payload = JSON.parse(typeof response.result === 'string' ? response.result : '') as UploadData;
       } catch {
-        throw new NativeAttachmentUploadError('附件服务返回的响应格式无效。', false);
+        throw new NativeAttachmentUploadError('附件服务返回的响应格式无效。', true);
       }
       if (typeof payload?.id !== 'string' || !payload.id) {
-        throw new NativeAttachmentUploadError('附件服务未返回文件 ID。', false);
+        throw new NativeAttachmentUploadError('附件服务未返回文件 ID。', true);
       }
       return payload.id;
     } catch (error) {
