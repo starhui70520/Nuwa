@@ -3525,14 +3525,15 @@ struct NativeChat {
   @Builder
   private branchControls(message: NativeConversationMessage) {
     if (this.versions(message).length > 1) {
-      Row() {
+      Row({ space: 2 }) {
         this.iconButton($r('app.media.native_chevron_left'), this.label('上一个版本', "Previous version"), () => { this.changeVersion(message, -1); },
-          26, 14, $r('app.color.native_chat_secondary'), Color.Transparent,
+          28, 14, $r('app.color.native_chat_action'), Color.Transparent,
           () => this.canChangeVersion() && this.version(message) > 0)
-        Text(`${this.version(message) + 1}/${this.versions(message).length}`)
-          .fontSize(this.appFontSize(12)).fontColor($r('app.color.native_chat_secondary'))
+        Text(`${this.version(message) + 1} / ${this.versions(message).length}`)
+          .fontSize(this.appFontSize(15)).lineHeight(18).fontWeight(FontWeight.Medium)
+          .fontFeature('"tnum" 1').fontColor($r('app.color.native_chat_action'))
         this.iconButton($r('app.media.native_chevron_right'), this.label('下一个版本', "Next version"), () => { this.changeVersion(message, 1); },
-          26, 14, $r('app.color.native_chat_secondary'), Color.Transparent,
+          28, 14, $r('app.color.native_chat_action'), Color.Transparent,
           () => this.canChangeVersion() && this.version(message) + 1 < this.versions(message).length)
       }
       .id(nativeBranchControlsId(message.id))
