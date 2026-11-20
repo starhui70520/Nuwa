@@ -3051,12 +3051,15 @@ struct NativeChat {
         .height(this.compact() ? 34 : this.wide() && this.viewportHeight <= 500 ? 42 : 52)
         .borderRadius(this.compact() ? 10 : 14).shadow({ radius: 14, color: '#14000000', offsetY: 4 })
         .draggable(false).accessibilityText('Nuwa')
-        Text(this.label('你好，让我们开始聊天吧', "Hi, let's start chatting"))
-          .fontSize(this.appFontSize(this.wide() && this.viewportHeight <= 500 ? 18 : 20))
-          .fontWeight(FontWeight.Medium)
+      Text(this.label('你好，让我们开始聊天吧', "Hi, let's start chatting"))
+        .fontSize(this.appFontSize(this.compact() ? 14 : this.wide() && this.viewportHeight <= 500 ? 18 : 20))
+        .lineHeight(this.compact() ? 18 : this.wide() && this.viewportHeight <= 500 ? 24 : 28)
+        .fontWeight(600).textAlign(TextAlign.Center)
         .fontColor($r('app.color.native_chat_primary'))
     }
-    .width('100%').layoutWeight(flex ? 1 : 0).justifyContent(FlexAlign.Center)
+    .width('100%').layoutWeight(flex ? 1 : 0)
+    .justifyContent(this.compact() ? FlexAlign.End : FlexAlign.Center)
+    .padding({ bottom: this.compact() ? 6 : 0 })
   }
 
   @Builder
