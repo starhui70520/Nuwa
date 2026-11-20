@@ -38,7 +38,7 @@ const PREFERENCES_NAME: string = 'nuwa_native_settings';
 const API_KEY_ALIAS: string = 'nuwa_native_api_key';
 const DEFAULT_BASE_URL: string = 'https://api.deepseek.com';
 const DEFAULT_MODEL: string = 'deepseek-chat';
-const CREDENTIAL_BINDING_TAG: asset.Tag = asset.Tag.DATA_LABEL_CRITICAL_1;
+const CREDENTIAL_BINDING_TAG: asset.Tag = asset.Tag.DATA_LABEL_NORMAL_1;
 
 interface StoredCredential {
   apiKey: string;
@@ -76,7 +76,7 @@ const readCredential = async (): Promise<StoredCredential | null> => {
     return null;
   }
   const secret = matches[0].get(asset.Tag.SECRET);
-  const binding = matches[0].get(CREDENTIAL_BINDING_TAG);
+  const binding = matches[0].get(CREDENTIAL_BINDING_TAG) ?? matches[0].get(asset.Tag.DATA_LABEL_CRITICAL_1);
   if (!(secret instanceof Uint8Array) || !(binding instanceof Uint8Array)) {
     return null;
   }

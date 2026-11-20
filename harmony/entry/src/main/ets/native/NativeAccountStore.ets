@@ -5,7 +5,7 @@ import { NativeDeepSeekAccount } from './NativeDeepSeekAccount';
 
 const ACCOUNT_ALIAS = 'nuwa_native_deepseek_account';
 const ASSET_NOT_FOUND = 24000002;
-const FORMAT_TAG: asset.Tag = asset.Tag.DATA_LABEL_CRITICAL_1;
+const FORMAT_TAG: asset.Tag = asset.Tag.DATA_LABEL_NORMAL_1;
 const MAX_SECRET_BYTES = 1024;
 const encoder = new util.TextEncoder();
 const decoder = util.TextDecoder.create('utf-8');
@@ -22,7 +22,7 @@ export async function loadNativeAccount(): Promise<NativeDeepSeekAccount | null>
   try {
     const records = await asset.query(query);
     const secret = records[0]?.get(asset.Tag.SECRET);
-    const format = records[0]?.get(FORMAT_TAG);
+    const format = records[0]?.get(FORMAT_TAG) ?? records[0]?.get(asset.Tag.DATA_LABEL_CRITICAL_1);
     if (secret instanceof Uint8Array && secret.length > 0) {
       const value = decoder.decodeToString(secret);
       if (format instanceof Uint8Array && decoder.decodeToString(format) === 'token') {
