@@ -1,3 +1,4 @@
+import { LengthMetrics } from '@kit.ArkUI';
 import { NativeApiProtocol } from './NativeSettings';
 import { allowsKeylessNativeApi, NativeApiCredential, verifyNativeApiCredential } from './NativeApiCredential';
 import { NativeLocale } from './NativeLocation';
@@ -35,6 +36,7 @@ export function nativeCredentialError(error: Error, locale: NativeLocale): strin
 export struct NativeOnboarding {
   @Prop locale: NativeLocale = 'zh-CN';
   @Prop compact: boolean = false;
+  @Prop fontScale: number = 1;
   @Prop busy: boolean = false;
   @Prop initialUrl: string = DEEPSEEK_BASE;
   @Prop initialModel: string = 'deepseek-chat';
@@ -56,8 +58,8 @@ export struct NativeOnboarding {
   }
 
   private fontSize(size: number, compactSize: number = size): number {
-    // Android uses a 13px root instead of 16px on compact screens.
-    return this.compact ? compactSize * 13 / 16 : size;
+    // Match the web root's 13px compact base, then apply the selected chat scale.
+    return (this.compact ? compactSize * 13 / 16 : size) * this.fontScale;
   }
 
   private keylessApiAllowed(): boolean {
@@ -136,14 +138,15 @@ export struct NativeOnboarding {
   private form() {
     Column({ space: this.compact ? 8 : 10 }) {
       if (this.view === 'third-party') {
-        Row() {
+        Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween, alignItems: ItemAlign.Center,
+          space: { main: LengthMetrics.vp(8), cross: LengthMetrics.vp(6) } }) {
           Text(this.text('接口协议', 'API Protocol')).fontSize(this.fontSize(12))
-            .fontColor($r('app.color.native_chat_secondary')).layoutWeight(1)
+            .fontColor($r('app.color.native_chat_secondary'))
           Select([{ value: this.text('OpenAI 兼容', 'OpenAI Compatible') },
             { value: this.text('Anthropic 兼容', 'Anthropic Compatible') }])
-            .font({ size: this.compact ? this.fontSize(14) : -1 })
-            .optionFont({ size: this.compact ? this.fontSize(14) : -1 })
-            .selectedOptionFont({ size: this.compact ? this.fontSize(14) : -1 })
+            .font({ size: this.fontSize(14) })
+            .optionFont({ size: this.fontSize(14) })
+            .selectedOptionFont({ size: this.fontSize(14) })
             .selected(this.protocol === 'anthropic' ? 1 : 0)
             .value(this.protocol === 'anthropic' ? this.text('Anthropic 兼容', 'Anthropic Compatible') :
               this.text('OpenAI 兼容', 'OpenAI Compatible'))

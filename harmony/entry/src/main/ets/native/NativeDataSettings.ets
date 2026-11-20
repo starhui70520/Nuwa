@@ -4,6 +4,7 @@ import { NativeMigrationIntent } from './NativeMigrationStrategy';
 
 @Component
 export struct NativeDataSettings {
+  @Prop fontScale: number = 1;
   @Prop locale: NativeLocale = 'zh-CN';
   @Prop busy: boolean = false;
   @Prop sessionCount: number = 0;
@@ -26,7 +27,7 @@ export struct NativeDataSettings {
     Button(label(), { type: ButtonType.Capsule })
       .height(36)
       .padding({ left: 14, right: 14 })
-      .fontSize(14)
+      .fontSize(14 * this.fontScale)
       .fontWeight(FontWeight.Medium)
       .fontColor(variant === 'primary' ? Color.White :
         (variant === 'danger' ? $r('app.color.native_chat_error') : $r('app.color.native_chat_primary')))
@@ -46,12 +47,12 @@ export struct NativeDataSettings {
     Row({ space: 8 }) {
       Column({ space: 4 }) {
         Text(label())
-          .fontSize(14)
-          .lineHeight(22)
+          .fontSize(14 * this.fontScale)
+          .lineHeight(22 * this.fontScale)
           .fontColor($r('app.color.native_chat_primary'))
         Text(description())
-          .fontSize(12)
-          .lineHeight(18)
+          .fontSize(12 * this.fontScale)
+          .lineHeight(18 * this.fontScale)
           .fontColor(error() ? $r('app.color.native_chat_error') : $r('app.color.native_chat_secondary'))
           .maxLines(error() ? 8 : 3)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -136,6 +137,7 @@ export struct NativeDataSettings {
 
 @Component
 export struct NativeMigrationChoices {
+  @Prop fontScale: number = 1;
   @Prop locale: NativeLocale = 'zh-CN';
   @Prop compact: boolean = false;
   onChoose: (intent: NativeMigrationIntent) => void = (_intent: NativeMigrationIntent) => {};
@@ -149,7 +151,7 @@ export struct NativeMigrationChoices {
   private choice(title: string, primary: boolean, intent: NativeMigrationIntent) {
     Button({ type: ButtonType.Capsule }) {
       Text(title)
-        .fontSize(14)
+        .fontSize(14 * this.fontScale)
         .fontWeight(FontWeight.Medium)
         .textAlign(TextAlign.Center)
         .fontColor(primary ? Color.White : $r('app.color.native_chat_primary'))
@@ -167,7 +169,7 @@ export struct NativeMigrationChoices {
       Row({ space: 6 }) {
         Text(this.label('选择导入方式', 'Choose Import Mode'))
           .layoutWeight(1)
-          .fontSize(this.compact ? 16 : 18)
+          .fontSize((this.compact ? 16 : 18) * this.fontScale)
           .fontWeight(FontWeight.Medium)
           .fontColor($r('app.color.native_chat_primary'))
         Button('×', { buttonStyle: ButtonStyleMode.TEXTUAL })
@@ -181,8 +183,8 @@ export struct NativeMigrationChoices {
         '如果当前账号在 DeepSeek 又有新对话，请选择「重新导出并更新」；如需导入其他账号记录，请选择「切换其他账号」。',
         'Choose "Re-export & Update" if you have new chats in DeepSeek on this account, or switch to another DeepSeek account.'))
         .width('100%')
-        .fontSize(this.compact ? 12 : 13)
-        .lineHeight(this.compact ? 16 : 20)
+        .fontSize((this.compact ? 12 : 13) * this.fontScale)
+        .lineHeight((this.compact ? 16 : 20) * this.fontScale)
         .fontColor($r('app.color.native_chat_secondary'))
       Column({ space: this.compact ? 7 : 10 }) {
         this.choice(this.label('重新导出并更新（当前账号）', 'Re-export & Update (Current Account)'), true,

@@ -2385,13 +2385,21 @@ struct NativeChat {
     return this.viewportWidth >= 768;
   }
 
-  private composerFontScale(): number {
+  private fontPreferenceScale(): number {
     return this.settings.chatFontSize / 16;
   }
 
+  private appFontScale(): number {
+    return this.fontPreferenceScale() * (this.compact() ? 13 / 16 : 1);
+  }
+
+  private appFontSize(size: number): number {
+    return size * this.appFontScale();
+  }
+
   private composerFieldMinHeight(inline: boolean): number {
-    if (inline) return 10 + 16.25 * this.composerFontScale();
-    return 12 + (this.viewportWidth < 440 ? 30 : 48) * this.composerFontScale();
+    if (inline) return 10 + this.appFontSize(20);
+    return 12 + this.appFontSize(this.viewportWidth < 440 ? 30 : 48);
   }
 
   private composerFieldMaxHeight(inline: boolean): number {
@@ -2412,9 +2420,9 @@ struct NativeChat {
     const ui = this.getUIContext();
     const measure = ui.getMeasureUtils();
     const thinkingWidth = measure.measureText({ textContent: this.label('深度思考', 'DeepThink'),
-      fontSize: 13 * this.composerFontScale(), fontWeight: FontWeight.Medium });
+      fontSize: this.appFontSize(13), fontWeight: FontWeight.Medium });
     const searchWidth = measure.measureText({ textContent: this.label('智能搜索', 'Search'),
-      fontSize: 13 * this.composerFontScale(), fontWeight: FontWeight.Medium });
+      fontSize: this.appFontSize(13), fontWeight: FontWeight.Medium });
     const controlsWidth = 2 * (14 + 5 + 22 + 2) + 10;
     return ui.px2vp(thinkingWidth + searchWidth) + controlsWidth <= this.composerToggleWidth;
   }
@@ -2464,7 +2472,7 @@ struct NativeChat {
       }
       if (this.history.activeId !== null) {
         Text(this.session()?.title || this.label('新对话', 'New chat'))
-          .fontSize(14).fontWeight(FontWeight.Medium).fontColor($r('app.color.native_chat_primary'))
+          .fontSize(this.appFontSize(14)).fontWeight(FontWeight.Medium).fontColor($r('app.color.native_chat_primary'))
           .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).constraintSize({ maxWidth: 480 })
           .padding({ left: 12, right: 12, top: 8, bottom: 8 }).onClick(() => { this.titlePressed(); })
       }
@@ -2481,7 +2489,7 @@ struct NativeChat {
       .borderRadius(999).border({ width: 1, color: $r('app.color.native_chat_stroke') })
       .backgroundBlurStyle(BlurStyle.COMPONENT_THIN).shadow({ radius: 10, color: '#10000000', offsetY: 2 })
       if (this.history.activeId !== null) {
-        Text(this.session()?.title || this.label('新对话', "New chat")).fontSize(this.compact() ? 13 : 14).fontWeight(FontWeight.Medium)
+        Text(this.session()?.title || this.label('新对话', "New chat")).fontSize(this.appFontSize(this.compact() ? 13 : 14)).fontWeight(FontWeight.Medium)
           .fontColor($r('app.color.native_chat_primary')).textAlign(TextAlign.Center)
           .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
           .onClick(() => { this.titlePressed(); })
@@ -2510,7 +2518,7 @@ struct NativeChat {
         .borderRadius(this.compact() ? 10 : 14).shadow({ radius: 14, color: '#14000000', offsetY: 4 })
         .draggable(false).accessibilityText('Nuwa')
         Text(this.label('你好，让我们开始聊天吧', "Hi, let's start chatting"))
-          .fontSize(this.compact() ? 14 : this.wide() && this.viewportHeight <= 500 ? 18 : 20)
+          .fontSize(this.appFontSize(this.wide() && this.viewportHeight <= 500 ? 18 : 20))
           .fontWeight(FontWeight.Medium)
         .fontColor($r('app.color.native_chat_primary'))
     }
@@ -2524,7 +2532,7 @@ struct NativeChat {
         Image(icon).width(14).height(14).colorFilter(nativeIconTint(active() ? $r('app.color.native_chat_blue_text') :
           $r('app.color.native_chat_primary'))).draggable(false)
         if (this.composerToggleLabelsFit()) {
-          Text(label()).fontSize(13 * this.composerFontScale()).fontWeight(FontWeight.Medium).fontColor(active() ?
+          Text(label()).fontSize(this.appFontSize(13)).fontWeight(FontWeight.Medium).fontColor(active() ?
             $r('app.color.native_chat_blue_text') : $r('app.color.native_chat_primary'))
         }
       }
@@ -2539,7 +2547,7 @@ struct NativeChat {
   private voiceButton() {
     if (this.wide() && this.voiceInputPhase === 'recording') {
       Text(this.label(`录音中 ${this.recordingSeconds}s`, `Recording ${this.recordingSeconds}s`))
-        .fontSize(12).lineHeight(17).fontColor($r('app.color.native_chat_caption'))
+        .fontSize(this.appFontSize(12)).lineHeight(17).fontColor($r('app.color.native_chat_caption'))
     }
     Button({ type: ButtonType.Circle, buttonStyle: ButtonStyleMode.TEXTUAL }) {
       if (this.voiceInputPhase === 'recording') {
@@ -2640,9 +2648,9 @@ struct NativeChat {
       Row({ space: 8 }) {
         Image($r('app.media.native_file')).width(20).height(20).colorFilter(nativeIconTint($r('app.color.native_chat_secondary')))
         Column({ space: 3 }) {
-          Text(item.name).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).fontSize(12)
+          Text(item.name).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).fontSize(this.appFontSize(12))
             .fontColor($r('app.color.native_chat_primary'))
-          Text(this.attachmentSize(item.size)).fontSize(11).fontColor($r('app.color.native_chat_secondary'))
+          Text(this.attachmentSize(item.size)).fontSize(this.appFontSize(11)).fontColor($r('app.color.native_chat_secondary'))
         }
         .layoutWeight(1).alignItems(HorizontalAlign.Start)
       }
@@ -2665,7 +2673,7 @@ struct NativeChat {
           Button({ type: ButtonType.Normal }) {
             Column({ space: 2 }) {
               Image($r('app.media.native_retry')).width(18).height(18).colorFilter(nativeIconTint(Color.White))
-              Text(this.label('重试上传', "Retry upload")).fontSize(11).fontColor(Color.White).maxLines(1)
+              Text(this.label('重试上传', "Retry upload")).fontSize(this.appFontSize(11)).fontColor(Color.White).maxLines(1)
             }
           }
           .width('100%').height('100%').padding(0).backgroundColor('#88000000')
@@ -2675,7 +2683,7 @@ struct NativeChat {
           .onClick(() => { this.retryMessageUpload(prompt, item); })
         } else {
           Text(this.messageUploadFailure(prompt, item)?.detail || this.label('上传失败', "Upload failed"))
-            .width('100%').height('100%').textAlign(TextAlign.Center).fontSize(11).maxLines(2)
+            .width('100%').height('100%').textAlign(TextAlign.Center).fontSize(this.appFontSize(11)).maxLines(2)
             .textOverflow({ overflow: TextOverflow.Ellipsis }).fontColor(Color.White).padding(6)
             .backgroundColor('#88000000').borderRadius(12)
         }
@@ -2695,11 +2703,11 @@ struct NativeChat {
           .width(20).height(20).colorFilter(nativeIconTint($r('app.color.native_chat_secondary')))
       }
       Column({ space: 3 }) {
-        Text(file.item.name).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).fontSize(12)
+        Text(file.item.name).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).fontSize(this.appFontSize(12))
           .fontColor($r('app.color.native_chat_primary'))
         Text(file.state === 'failed' ? file.error : file.state === 'uploading' ? this.label('正在上传', 'Uploading…') :
           this.attachmentSize(file.item.size))
-          .fontSize(11).fontColor($r('app.color.native_chat_secondary')).maxLines(2)
+          .fontSize(this.appFontSize(11)).fontColor($r('app.color.native_chat_secondary')).maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
       }
       .layoutWeight(1).alignItems(HorizontalAlign.Start)
@@ -2730,7 +2738,7 @@ struct NativeChat {
             }, 24, 16, Color.White)
           }
           if (!file.retryable || file.error !== this.label('上传失败', 'Upload failed')) {
-            Text(file.error).fontSize(10).fontColor(Color.White).textAlign(TextAlign.Center).maxLines(2)
+            Text(file.error).fontSize(this.appFontSize(10)).fontColor(Color.White).textAlign(TextAlign.Center).maxLines(2)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
           }
         }
@@ -2780,8 +2788,8 @@ struct NativeChat {
         .width('100%').constraintSize({ minHeight: this.composerFieldMinHeight(inline),
           maxHeight: this.composerFieldMaxHeight(inline) })
         .padding({ top: inline ? 5 : 12, bottom: inline ? 5 : 0, left: inline ? 4 : 16, right: inline ? 4 : 12 })
-        .borderRadius(0).fontSize((inline ? 11.375 : 16) * this.composerFontScale())
-        .lineHeight((inline ? 16.25 : 24) * this.composerFontScale())
+        .borderRadius(0).fontSize(this.appFontSize(inline ? 14 : 16))
+        .lineHeight(this.appFontSize(inline ? 20 : 24))
         .placeholderColor($r('app.color.native_chat_caption'))
         .fontColor($r('app.color.native_chat_primary')).caretColor($r('app.color.native_chat_blue_text'))
         .backgroundColor(Color.Transparent).enterKeyType(EnterKeyType.NEW_LINE)
@@ -2942,7 +2950,7 @@ struct NativeChat {
           26, 14, $r('app.color.native_chat_secondary'), Color.Transparent,
           () => !this.reply() && this.version(message) > 0)
         Text(`${this.version(message) + 1}/${this.versions(message).length}`)
-          .fontSize(12).fontColor($r('app.color.native_chat_secondary'))
+          .fontSize(this.appFontSize(12)).fontColor($r('app.color.native_chat_secondary'))
         this.iconButton($r('app.media.native_chevron_right'), this.label('下一个版本', "Next version"), () => { this.changeVersion(message, 1); },
           26, 14, $r('app.color.native_chat_secondary'), Color.Transparent,
           () => !this.reply() && this.version(message) + 1 < this.versions(message).length)
@@ -2979,7 +2987,7 @@ struct NativeChat {
           TextArea({ text: this.editText, controller: this.messageEditor })
             .id('nuwa-message-editor').width('100%').constraintSize({ minHeight: 44, maxHeight: 202 })
             .padding({ left: 16, right: 16, top: 10, bottom: 10 }).borderRadius(0)
-            .fontSize(this.settings.chatFontSize).lineHeight(this.settings.chatFontSize * 1.5)
+            .fontSize(this.appFontSize(16)).lineHeight(this.appFontSize(24))
             .fontColor($r('app.color.native_chat_primary')).caretColor($r('app.color.native_chat_blue_text'))
             .backgroundColor(Color.Transparent).enterKeyType(EnterKeyType.NEW_LINE)
             .accessibilityText(this.label('编辑消息', 'Edit message')).enabled(!this.reply() && !this.backupBusy)
@@ -2991,11 +2999,11 @@ struct NativeChat {
             .onAppear(() => { this.focusMessageEditor(message.id); })
           Row({ space: 8 }) {
             Button(this.label('取消', 'Cancel'), { type: ButtonType.Capsule })
-              .height(32).fontSize(13).fontColor($r('app.color.native_chat_primary'))
+              .height(32).fontSize(this.appFontSize(13)).fontColor($r('app.color.native_chat_primary'))
               .border({ width: 1, color: $r('app.color.native_chat_stroke') }).backgroundColor(Color.Transparent)
               .onClick(() => { this.closeMessageEditor(); })
             Button(this.label('发送', 'Send'), { type: ButtonType.Capsule })
-              .height(32).fontSize(13).backgroundColor($r('app.color.native_chat_blue'))
+              .height(32).fontSize(this.appFontSize(13)).backgroundColor($r('app.color.native_chat_blue'))
               .enabled(this.canSendMessageEdit(message)).onClick(() => { this.edit(message); })
           }
           .width('100%').justifyContent(FlexAlign.End).padding({ top: 6, bottom: 10, left: 10, right: 10 })
@@ -3004,7 +3012,7 @@ struct NativeChat {
         .clip(true).backgroundColor($r('app.color.native_chat_bg'))
       } else {
         if (message.content) {
-          Text(message.content).fontSize(this.settings.chatFontSize).lineHeight(this.settings.chatFontSize * 1.5).fontColor($r('app.color.native_chat_primary'))
+          Text(message.content).fontSize(this.appFontSize(16)).lineHeight(this.appFontSize(24)).fontColor($r('app.color.native_chat_primary'))
           .constraintSize({ maxWidth: Math.max(140, Math.min(this.viewportWidth - 40, 752) - 68) })
           .padding({ left: 16, right: 16, top: 10, bottom: 10 }).borderRadius(22)
             .backgroundColor($r('app.color.native_chat_bubble')).copyOption(CopyOptions.LocalDevice)
@@ -3059,7 +3067,7 @@ struct NativeChat {
         Row({ space: 6 }) {
           Image($r('app.media.native_web_search')).width(14).height(14).colorFilter(nativeIconTint($r('app.color.native_chat_blue_text')))
           Text(this.label(`${sources.length} 个网页`, sources.length === 1 ? '1 web page' : `${sources.length} web pages`))
-            .fontSize(13).fontColor($r('app.color.native_chat_secondary'))
+            .fontSize(this.appFontSize(13)).fontColor($r('app.color.native_chat_secondary'))
           Image($r('app.media.native_chevron_right')).width(14).height(14).colorFilter(nativeIconTint($r('app.color.native_chat_secondary')))
         }
       }
@@ -3089,7 +3097,7 @@ struct NativeChat {
     if (message().toolTimeline || (thinking() && !!message().thinking && !message().reasoning)) {
       NativeToolTimelinePanel({
         view: message().toolTimeline ?? EMPTY_TIMELINE, sources: message().sources ?? [],
-        citations: message().citations ?? [], fontScale: this.settings.chatFontSize / 16, locale: this.settings.locale,
+        citations: message().citations ?? [], fontScale: this.appFontScale(), locale: this.settings.locale,
         streaming: message().status === 'pending' || message().status === 'streaming',
         thinking: message().thinking || undefined, stopped: message().status === 'stopped',
         hasResponse: !!this.assistantResponseText(message()),
@@ -3101,7 +3109,7 @@ struct NativeChat {
         Row({ space: 6 }) {
           Image($r('app.media.native_think')).width(16).height(16).colorFilter(nativeIconTint($r('app.color.native_chat_blue_text')))
           Text(thinking() ? this.label('正在思考', 'Thinking') : this.label('已思考', 'Thought'))
-            .fontSize(15).fontColor($r('app.color.native_chat_secondary'))
+            .fontSize(this.appFontSize(15)).fontColor($r('app.color.native_chat_secondary'))
           Image(this.collapsedThoughts.includes(message().id) ? $r('app.media.native_chevron_right') :
             $r('app.media.native_chevron_down')).width(14).height(14).colorFilter(nativeIconTint($r('app.color.native_chat_secondary')))
         }
@@ -3115,7 +3123,7 @@ struct NativeChat {
       if (!this.collapsedThoughts.includes(message().id)) {
         Column() {
           NativeMarkdown({
-            content: message().reasoning, fontScale: this.settings.chatFontSize / 16,
+            content: message().reasoning, fontScale: this.appFontScale(),
             locale: this.settings.locale, theme: this.settings.theme, muted: true, disableLinks: true, loading: thinking(),
           })
         }
@@ -3126,7 +3134,7 @@ struct NativeChat {
     if (message().content.length > (message().toolTimeline?.answerOffset ?? 0)) {
       NativeMarkdown({
         content: this.withCitationMarkers(message().content, message().citations ?? [], message().toolTimeline?.answerOffset ?? 0),
-        fontScale: this.settings.chatFontSize / 16, viewportWidth: this.viewportWidth, hasCitations: true,
+        fontScale: this.appFontScale(), viewportWidth: this.viewportWidth, hasCitations: true,
         citationSources: message().sources ?? [], citationHoverEnabled: this.wide(),
         locale: this.settings.locale, theme: this.settings.theme,
         loading: message().status === 'pending' || message().status === 'streaming',
@@ -3160,13 +3168,13 @@ struct NativeChat {
   @Builder
   private replyErrorNotice(message: NativeConversationMessage) {
     Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
-      Text(this.replyNotice(message).text).fontSize(14).fontColor($r('app.color.native_chat_error'))
+      Text(this.replyNotice(message).text).fontSize(this.appFontSize(14)).fontColor($r('app.color.native_chat_error'))
       if (this.replyNotice(message).action === 'api-key') {
         Button(this.label('更换 API Key', 'Change API Key'), { buttonStyle: ButtonStyleMode.TEXTUAL })
-          .height(32).fontSize(13).onClick(() => { this.openSettings('account'); })
+          .height(32).fontSize(this.appFontSize(13)).onClick(() => { this.openSettings('account'); })
       } else if (this.replyNotice(message).action === 'top-up') {
         Button(this.label('前往充值', 'Top up'), { buttonStyle: ButtonStyleMode.TEXTUAL })
-          .height(32).fontSize(13).onClick(() => { void this.openLink('https://platform.deepseek.com/top_up'); })
+          .height(32).fontSize(this.appFontSize(13)).onClick(() => { void this.openLink('https://platform.deepseek.com/top_up'); })
       }
     }
     .width('100%')
@@ -3189,12 +3197,12 @@ struct NativeChat {
         }
       } else {
         if (message.stopReason === 'refusal') {
-          NativeMarkdown({ content: this.copyableReply(message), fontScale: this.settings.chatFontSize / 16,
+          NativeMarkdown({ content: this.copyableReply(message), fontScale: this.appFontScale(),
             locale: this.settings.locale, theme: this.settings.theme })
         } else {
           this.replyContent(() => message, () => false)
           if (message.status !== 'error' && this.archivedReplyTemplate(message)) {
-            NativeMarkdown({ content: this.archivedReplyTemplate(message), fontScale: this.settings.chatFontSize / 16,
+            NativeMarkdown({ content: this.archivedReplyTemplate(message), fontScale: this.appFontScale(),
               locale: this.settings.locale, theme: this.settings.theme })
           }
           this.sourcesSummary(message.id + ':summary', nativeSearchResults(message.sources ?? []))
@@ -3223,7 +3231,7 @@ struct NativeChat {
           if (this.canContinue(message)) {
             Blank().layoutWeight(1)
             Button(this.label('继续生成', 'Continue'), { type: ButtonType.Capsule, buttonStyle: ButtonStyleMode.TEXTUAL })
-              .height(28).fontSize(13).border({ width: 1, color: $r('app.color.native_chat_stroke') })
+              .height(28).fontSize(this.appFontSize(13)).border({ width: 1, color: $r('app.color.native_chat_stroke') })
               .enabled(!this.reply()).onClick(() => { this.continueReply(message); })
           }
         }
@@ -3512,21 +3520,23 @@ struct NativeChat {
   @Builder
   private shareImportDialog() {
     Column({ space: 14 }) {
-      Text(this.label('通过 DeepSeek 分享链接导入', "Import from a DeepSeek share link")).fontSize(18).fontWeight(FontWeight.Medium).width('100%')
+      Text(this.label('通过 DeepSeek 分享链接导入', "Import from a DeepSeek share link")).fontSize(this.appFontSize(18)).fontWeight(FontWeight.Medium).width('100%')
         .fontColor($r('app.color.native_chat_primary'))
       TextArea({ text: this.shareInput, placeholder: this.label(
         '粘贴分享链接或包含链接的完整分享文案，例如：https://chat.deepseek.com/share/...',
         'Paste a link or text containing a link, such as https://chat.deepseek.com/share/…') })
-        .height(96).width('100%').fontSize(14).enabled(!this.backupBusy).maxLength(4096).borderRadius(14)
+        .height(96).width('100%').fontSize(this.appFontSize(14)).enabled(!this.backupBusy).maxLength(4096).borderRadius(14)
         .backgroundColor($r('app.color.native_chat_field')).fontColor($r('app.color.native_chat_primary'))
         .onChange((text: string) => { this.shareInput = text; this.shareImportError = ''; })
       if (this.shareImportError) {
-        Text(this.shareImportError).width('100%').fontColor($r('app.color.native_chat_error')).fontSize(13)
+        Text(this.shareImportError).width('100%').fontColor($r('app.color.native_chat_error')).fontSize(this.appFontSize(13))
       }
       Row({ space: 8 }) {
-        Button(this.label('取消', "Cancel"), { buttonStyle: ButtonStyleMode.TEXTUAL }).enabled(!this.backupBusy)
+        Button(this.label('取消', "Cancel"), { buttonStyle: ButtonStyleMode.TEXTUAL })
+          .fontSize(this.appFontSize(14)).enabled(!this.backupBusy)
           .onClick(() => { this.closeShareImport(); })
-        Button(this.backupBusy ? this.label('导入中…', "Importing…") : this.label('确认导入', "Import")).enabled(!this.backupBusy && !!this.shareInput.trim())
+        Button(this.backupBusy ? this.label('导入中…', "Importing…") : this.label('确认导入', "Import"))
+          .fontSize(this.appFontSize(14)).enabled(!this.backupBusy && !!this.shareInput.trim())
           .backgroundColor($r('app.color.native_chat_blue')).onClick(() => { void this.acceptShareImport(); })
       }
       .width('100%').justifyContent(FlexAlign.End)
@@ -3640,20 +3650,21 @@ struct NativeChat {
       LoadingProgress().width(26).height(26).color($r('app.color.native_chat_blue'))
     } else if (this.notesError) {
       Text(this.label('加载更新日志失败，请稍后重试', "Unable to load release notes. Please try again later.")).width('100%').fontColor($r('app.color.native_chat_secondary'))
-      Button(this.label('重试', "Retry"), { buttonStyle: ButtonStyleMode.TEXTUAL }).onClick(() => { void this.loadReleaseNotes(); })
+      Button(this.label('重试', "Retry"), { buttonStyle: ButtonStyleMode.TEXTUAL })
+        .fontSize(this.appFontSize(14)).onClick(() => { void this.loadReleaseNotes(); })
     } else if (!this.releaseNotes.length) {
       Text(this.label('暂无历史版本记录', "No release history")).width('100%').fontColor($r('app.color.native_chat_secondary'))
     } else {
       ForEach(this.releaseNotes, (release: NativeReleaseHistoryItem) => {
         Column({ space: 10 }) {
           Row() {
-            Text(`v${release.version}`).fontSize(16).fontWeight(FontWeight.Medium)
+            Text(`v${release.version}`).fontSize(this.appFontSize(16)).fontWeight(FontWeight.Medium)
               .fontColor($r('app.color.native_chat_primary')).layoutWeight(1)
-            Text(release.createdAt.slice(0, 10)).fontSize(12).fontColor($r('app.color.native_chat_secondary'))
+            Text(release.createdAt.slice(0, 10)).fontSize(this.appFontSize(12)).fontColor($r('app.color.native_chat_secondary'))
           }
           .width('100%')
           Text(release.changelog || this.label('包含体验优化与问题修复。', 'Includes improvements and bug fixes.'))
-            .width('100%').fontSize(14).lineHeight(22)
+            .width('100%').fontSize(this.appFontSize(14)).lineHeight(22)
             .fontColor($r('app.color.native_chat_secondary')).copyOption(CopyOptions.LocalDevice)
         }
         .width('100%').padding(16).borderRadius(16).backgroundColor($r('app.color.native_chat_surface'))
@@ -3673,23 +3684,23 @@ struct NativeChat {
 
   @Builder
   private settingsLabel(title: () => string) {
-    Text(title()).width('100%').fontSize(12).fontColor($r('app.color.native_chat_secondary')).padding({ left: 9, bottom: 4 })
+    Text(title()).width('100%').fontSize(this.appFontSize(12)).fontColor($r('app.color.native_chat_secondary')).padding({ left: 9, bottom: 4 })
   }
 
   @Builder
   private settingsRow(title: () => string, value: () => string, click: () => void) {
     Button({ type: ButtonType.Normal }) {
       Row({ space: 10 }) {
-        Text(title()).layoutWeight(1).fontSize(15).fontColor($r('app.color.native_chat_primary'))
+        Text(title()).layoutWeight(1).fontSize(this.appFontSize(15)).fontColor($r('app.color.native_chat_primary'))
         if (value()) {
-          Text(value()).fontSize(13).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+          Text(value()).fontSize(this.appFontSize(13)).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
             .constraintSize({ maxWidth: '45%' }).fontColor($r('app.color.native_chat_secondary'))
         }
         Image($r('app.media.native_chevron_right')).width(14).height(14).colorFilter(nativeIconTint($r('app.color.native_chat_caption')))
       }
-      .width('100%').padding({ left: 15, right: 12 })
+      .width('100%').constraintSize({ minHeight: 48 }).padding({ left: 15, right: 12, top: 6, bottom: 6 })
     }
-    .height(48).width('100%').padding(0).borderRadius(0).backgroundColor(Color.Transparent).onClick(click)
+    .width('100%').padding(0).borderRadius(0).backgroundColor(Color.Transparent).onClick(click)
   }
 
   private setLocation(location: NativeUserLocation | null): void {
@@ -3703,6 +3714,9 @@ struct NativeChat {
     Select(options().length > 0 ?
       options().map<SelectOption>((option: NativeLocationOption): SelectOption => ({ value: option.name })) :
       [{ value: placeholder() }])
+      .font({ size: this.appFontSize(14) })
+      .optionFont({ size: this.appFontSize(14) })
+      .selectedOptionFont({ size: this.appFontSize(14) })
       .selected(options().findIndex((option: NativeLocationOption): boolean => option.code === current()))
       .value(options().find((option: NativeLocationOption): boolean => option.code === current())?.name ?? placeholder())
       .enabled(options().length > 0)
@@ -3714,11 +3728,11 @@ struct NativeChat {
   private locationRows() {
     Column({ space: 8 }) {
       Row({ space: 8 }) {
-        Text(this.label('位置', 'Location')).layoutWeight(1).fontSize(15)
+        Text(this.label('位置', 'Location')).layoutWeight(1).fontSize(this.appFontSize(15))
           .fontColor($r('app.color.native_chat_primary'))
         if (this.settings.location) {
           Button(this.label('清除', 'Clear'), { buttonStyle: ButtonStyleMode.TEXTUAL })
-            .fontSize(13).onClick(() => { this.setLocation(null); })
+            .fontSize(this.appFontSize(13)).onClick(() => { this.setLocation(null); })
         }
       }
       .width('100%')
@@ -3741,7 +3755,7 @@ struct NativeChat {
         }
       }
       Text(this.label('用于让回答参考你选择的位置。', 'Replies can use the location you select.'))
-        .width('100%').fontSize(12).fontColor($r('app.color.native_chat_secondary'))
+        .width('100%').fontSize(this.appFontSize(12)).fontColor($r('app.color.native_chat_secondary'))
     }
     .width('100%').alignItems(HorizontalAlign.Start).padding({ top: 12, bottom: 12, left: 15, right: 12 })
   }
@@ -3766,8 +3780,11 @@ struct NativeChat {
     this.settingsLabel(() => this.label('应用', 'App'))
     Column() {
       Row() {
-        Text(this.label('外观', "Theme")).layoutWeight(1).fontSize(15).fontColor($r('app.color.native_chat_primary'))
+        Text(this.label('外观', "Theme")).layoutWeight(1).fontSize(this.appFontSize(15)).fontColor($r('app.color.native_chat_primary'))
         Select([{ value: this.label('系统', "System") }, { value: this.label('浅色', "Light") }, { value: this.label('深色', "Dark") }])
+          .font({ size: this.appFontSize(14) })
+          .optionFont({ size: this.appFontSize(14) })
+          .selectedOptionFont({ size: this.appFontSize(14) })
           .selected(this.settings.theme === 'dark' ? 2 : this.settings.theme === 'light' ? 1 : 0)
           .value(this.settings.theme === 'dark' ? this.label('深色', "Dark") : this.settings.theme === 'light' ? this.label('浅色', "Light") : this.label('系统', "System"))
           .onSelect((index: number) => {
@@ -3776,12 +3793,15 @@ struct NativeChat {
             void this.saveSettings();
           })
       }
-      .width('100%').height(48).padding({ left: 15, right: 12 })
+      .width('100%').constraintSize({ minHeight: 48 }).padding({ left: 15, right: 12, top: 4, bottom: 4 })
       Divider().color($r('app.color.native_chat_stroke')).margin({ left: 14 })
       Row() {
-        Text(this.label('字体大小', "Font size")).layoutWeight(1).fontSize(15).fontColor($r('app.color.native_chat_primary'))
+        Text(this.label('字体大小', "Font size")).layoutWeight(1).fontSize(this.appFontSize(15)).fontColor($r('app.color.native_chat_primary'))
         Select([{ value: '12px' }, { value: '14px' }, { value: this.label('16px（默认）', "16px (default)") },
           { value: '18px' }, { value: '20px' }, { value: '22px' }])
+          .font({ size: this.appFontSize(14) })
+          .optionFont({ size: this.appFontSize(14) })
+          .selectedOptionFont({ size: this.appFontSize(14) })
           .selected(NATIVE_CHAT_FONT_SIZES.indexOf(this.settings.chatFontSize))
           .value(this.settings.chatFontSize === 16 ? this.label('16px（默认）', "16px (default)") : `${this.settings.chatFontSize}px`)
           .onSelect((index: number) => {
@@ -3789,11 +3809,14 @@ struct NativeChat {
             void this.saveSettings();
           })
       }
-      .width('100%').height(48).padding({ left: 15, right: 12 })
+      .width('100%').constraintSize({ minHeight: 48 }).padding({ left: 15, right: 12, top: 4, bottom: 4 })
       Divider().color($r('app.color.native_chat_stroke')).margin({ left: 14 })
       Row() {
-        Text(this.label('语言', 'Language')).layoutWeight(1).fontSize(15).fontColor($r('app.color.native_chat_primary'))
+        Text(this.label('语言', 'Language')).layoutWeight(1).fontSize(this.appFontSize(15)).fontColor($r('app.color.native_chat_primary'))
         Select([{ value: '简体中文' }, { value: 'English' }])
+          .font({ size: this.appFontSize(14) })
+          .optionFont({ size: this.appFontSize(14) })
+          .selectedOptionFont({ size: this.appFontSize(14) })
           .selected(this.settings.locale === 'en-US' ? 1 : 0)
           .value(this.settings.locale === 'en-US' ? 'English' : '简体中文')
           .onSelect((index: number) => {
@@ -3802,14 +3825,14 @@ struct NativeChat {
             void this.saveSettings('locale');
           })
       }
-      .width('100%').height(48).padding({ left: 15, right: 12 })
+      .width('100%').constraintSize({ minHeight: 48 }).padding({ left: 15, right: 12, top: 4, bottom: 4 })
       Divider().color($r('app.color.native_chat_stroke')).margin({ left: 14 })
       this.locationRows()
     }
     .width('100%').borderRadius(16).clip(true).backgroundColor($r('app.color.native_chat_surface'))
     this.settingsLabel(() => this.label('语音', 'Speech'))
     NativeSpeechSettings({
-      locale: this.settings.locale, engine: this.settings.speechEngine, voice: this.settings.speechVoice,
+      locale: this.settings.locale, fontScale: this.appFontScale(), engine: this.settings.speechEngine, voice: this.settings.speechVoice,
       cloudRecognition: isCloudAsrAvailable(this.speechOptions()), cloudSynthesis: isCloudTtsAvailable(this.speechOptions()),
       onEngine: (engine: HarmonySpeechEngine): void => {
         this.stopVoice();
@@ -3824,10 +3847,10 @@ struct NativeChat {
     this.settingsLabel(() => this.label('关于', 'About'))
     Column() {
       Row() {
-        Text(this.label('当前版本', "Current version")).layoutWeight(1).fontSize(15).fontColor($r('app.color.native_chat_primary'))
-        Text(this.appVersion).fontSize(13).fontColor($r('app.color.native_chat_secondary'))
+        Text(this.label('当前版本', "Current version")).layoutWeight(1).fontSize(this.appFontSize(15)).fontColor($r('app.color.native_chat_primary'))
+        Text(this.appVersion).fontSize(this.appFontSize(13)).fontColor($r('app.color.native_chat_secondary'))
       }
-      .width('100%').height(48).padding({ left: 15, right: 12 })
+      .width('100%').constraintSize({ minHeight: 48 }).padding({ left: 15, right: 12, top: 4, bottom: 4 })
       Divider().color($r('app.color.native_chat_stroke')).margin({ left: 14 })
       this.settingsRow(() => this.checkingUpdate ? this.label('检查中...', 'Checking…') : this.label('检查更新', 'Check for updates'),
         () => '', () => { void this.checkUpdate(); })
@@ -3850,7 +3873,7 @@ struct NativeChat {
     .width('100%').borderRadius(16).clip(true).backgroundColor($r('app.color.native_chat_surface'))
     Button({ type: ButtonType.Normal }) {
       Text(this.label('退出登录', 'Sign Out')).width('100%').textAlign(TextAlign.Start)
-        .fontSize(15).fontColor($r('app.color.native_chat_primary')).padding({ left: 15, right: 12 })
+        .fontSize(this.appFontSize(15)).fontColor($r('app.color.native_chat_primary')).padding({ left: 15, right: 12 })
     }
     .width('100%').height(48).borderRadius(16).padding(0).backgroundColor($r('app.color.native_chat_surface'))
     .enabled(!this.signingOut).onClick(() => { void this.signOutAll(); })
@@ -3861,17 +3884,17 @@ struct NativeChat {
     Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween, alignItems: ItemAlign.Center,
       space: { main: LengthMetrics.vp(10), cross: LengthMetrics.vp(10) } }) {
       Column({ space: 6 }) {
-        Text(this.label('DeepSeek API 账号', 'DeepSeek API Account')).fontSize(14)
+        Text(this.label('DeepSeek API 账号', 'DeepSeek API Account')).fontSize(this.appFontSize(14))
           .fontWeight(FontWeight.Medium).fontColor($r('app.color.native_chat_primary'))
         if (this.account) {
           Text(this.accountToken() ? this.label(`当前生效：${this.account.label}`, `Active: ${this.account.label}`) :
             this.label(`已登录：${this.account.label}（当前使用自定义 API Key）`,
               `Signed in: ${this.account.label} (using custom API Key)`))
-            .fontSize(12).fontColor($r('app.color.native_chat_secondary'))
+            .fontSize(this.appFontSize(12)).fontColor($r('app.color.native_chat_secondary'))
         } else {
           Text(this.label('通过 DeepSeek 开放平台授权登录，免手动复制 API Key',
             'Authorize via DeepSeek Platform without pasting an API Key'))
-            .fontSize(12).fontColor($r('app.color.native_chat_secondary'))
+            .fontSize(this.appFontSize(12)).fontColor($r('app.color.native_chat_secondary'))
         }
       }
       .constraintSize({ maxWidth: this.compact() ? '100%' : '70%' }).alignItems(HorizontalAlign.Start)
@@ -3879,15 +3902,15 @@ struct NativeChat {
         if (this.account) {
           if (!this.accountToken()) {
             Button(this.label('切换为此账号', 'Use Account'), { buttonStyle: ButtonStyleMode.TEXTUAL })
-              .height(34).fontSize(13).fontColor($r('app.color.native_chat_blue_text'))
+              .height(34).fontSize(this.appFontSize(13)).fontColor($r('app.color.native_chat_blue_text'))
               .enabled(!this.settingsVerifying).onClick(() => { void this.enableAccount(); })
           }
           Button(this.label('退出登录', 'Sign Out'), { buttonStyle: ButtonStyleMode.TEXTUAL })
-            .height(34).fontSize(13).fontColor($r('app.color.native_chat_error'))
+            .height(34).fontSize(this.appFontSize(13)).fontColor($r('app.color.native_chat_error'))
             .enabled(!this.settingsVerifying).onClick(() => { void this.logoutAccount(); })
         } else {
           Button(this.label('账号登录', 'Sign In'), { type: ButtonType.Capsule })
-            .height(34).fontSize(13).backgroundColor($r('app.color.native_chat_blue'))
+            .height(34).fontSize(this.appFontSize(13)).backgroundColor($r('app.color.native_chat_blue'))
             .enabled(!this.authorizing && !this.settingsVerifying)
             .onClick(() => {
               this.finishCredentialSettings();
@@ -3898,10 +3921,14 @@ struct NativeChat {
       }
     }
     .width('100%').padding(14).borderRadius(16).backgroundColor($r('app.color.native_chat_surface'))
-    Row({ space: 10 }) {
-      Text(this.label('接口协议', 'API Protocol')).fontSize(14).fontWeight(FontWeight.Medium)
-        .fontColor($r('app.color.native_chat_primary')).layoutWeight(1)
+    Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween, alignItems: ItemAlign.Center,
+      space: { main: LengthMetrics.vp(10), cross: LengthMetrics.vp(8) } }) {
+      Text(this.label('接口协议', 'API Protocol')).fontSize(this.appFontSize(14)).fontWeight(FontWeight.Medium)
+        .fontColor($r('app.color.native_chat_primary'))
       Select([{ value: this.label('OpenAI 兼容', 'OpenAI Compatible') }, { value: this.label('Anthropic 兼容', 'Anthropic Compatible') }])
+        .font({ size: this.appFontSize(14) })
+        .optionFont({ size: this.appFontSize(14) })
+        .selectedOptionFont({ size: this.appFontSize(14) })
         .selected(this.settingsProtocol === 'anthropic' ? 1 : 0)
         .value(this.settingsProtocol === 'anthropic' ? this.label('Anthropic 兼容', 'Anthropic Compatible') :
           this.label('OpenAI 兼容', 'OpenAI Compatible'))
@@ -3923,7 +3950,8 @@ struct NativeChat {
     this.apiKeySettings()
     if (!this.wide() && this.canVerifySettings()) {
       Button(this.settingsVerifying ? this.label('正在验证...', 'Verifying...') : this.label('确定', 'Confirm'))
-        .width('100%').height(42).backgroundColor($r('app.color.native_chat_blue')).enabled(!this.settingsVerifying)
+        .width('100%').height(42).fontSize(this.appFontSize(14))
+        .backgroundColor($r('app.color.native_chat_blue')).enabled(!this.settingsVerifying)
         .onClick(() => { void this.verifySettingsKey(); })
     }
   }
@@ -3931,9 +3959,9 @@ struct NativeChat {
   @Builder
   private credentialField(title: () => string, value: () => string, placeholder: () => string, change: (text: string) => void) {
     Column({ space: 8 }) {
-      Text(title()).width('100%').fontSize(14).fontWeight(FontWeight.Medium)
+      Text(title()).width('100%').fontSize(this.appFontSize(14)).fontWeight(FontWeight.Medium)
         .fontColor($r('app.color.native_chat_primary'))
-      TextInput({ text: value(), placeholder: placeholder() }).width('100%').height(42).fontSize(14)
+      TextInput({ text: value(), placeholder: placeholder() }).width('100%').height(42).fontSize(this.appFontSize(14))
         .backgroundColor($r('app.color.native_chat_field')).fontColor($r('app.color.native_chat_primary'))
         .placeholderColor($r('app.color.native_chat_caption')).enabled(!this.settingsVerifying)
         .onChange(change).onBlur(() => { this.commitSettingsModel(); })
@@ -3947,10 +3975,10 @@ struct NativeChat {
   private apiKeySettings() {
     Column({ space: 8 }) {
       Text(this.label('输入 API Key 开始使用', 'Enter an API Key to get started'))
-        .width('100%').fontSize(14).fontWeight(FontWeight.Medium).fontColor($r('app.color.native_chat_primary'))
+        .width('100%').fontSize(this.appFontSize(14)).fontWeight(FontWeight.Medium).fontColor($r('app.color.native_chat_primary'))
       if (this.settings.apiKey && !this.settingsKeyEditing && this.settingsEndpointMatches()) {
         Row({ space: 8 }) {
-          Text('*'.repeat(this.settings.apiKey.length)).layoutWeight(1).fontSize(14).maxLines(1)
+          Text('*'.repeat(this.settings.apiKey.length)).layoutWeight(1).fontSize(this.appFontSize(14)).maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis }).fontColor($r('app.color.native_chat_secondary'))
           this.iconButton($r('app.media.native_edit'), this.label('修改 API Key', 'Edit API Key'),
             () => { this.editSettingsKey(); }, 32, 16, $r('app.color.native_chat_blue_text'))
@@ -3962,7 +3990,7 @@ struct NativeChat {
           TextInput({ text: this.settingsKey, placeholder: allowsKeylessNativeApi(this.settingsBase, this.settingsProtocol) ?
             this.label('局域网服务可留空', 'Optional for local services') : this.label('请输入 API Key', 'Enter API Key') })
             .id('nuwa-account-api-key').defaultFocus(this.wide()).layoutWeight(1).height(42)
-            .fontSize(14).type(InputType.Password).showPasswordIcon(false).enterKeyType(EnterKeyType.Done)
+            .fontSize(this.appFontSize(14)).type(InputType.Password).showPasswordIcon(false).enterKeyType(EnterKeyType.Done)
             .backgroundColor(Color.Transparent).fontColor($r('app.color.native_chat_primary'))
             .placeholderColor($r('app.color.native_chat_caption')).enabled(!this.settingsVerifying)
             .onChange((value: string) => { this.settingsKey = value; this.settingsError = ''; })
@@ -3971,13 +3999,13 @@ struct NativeChat {
           if (this.wide() && this.canVerifySettings()) {
             Button(this.settingsVerifying ? this.label('正在验证...', 'Verifying...') : this.label('确定', 'Confirm'),
               { buttonStyle: ButtonStyleMode.TEXTUAL })
-              .height(34).fontSize(13).fontColor($r('app.color.native_chat_blue_text'))
+              .height(34).fontSize(this.appFontSize(13)).fontColor($r('app.color.native_chat_blue_text'))
               .enabled(!this.settingsVerifying).onClick(() => { void this.verifySettingsKey(); })
           }
         }
         .width('100%').height(42).borderRadius(21).backgroundColor($r('app.color.native_chat_field'))
         if (this.settingsError) {
-          Text(this.settingsError).width('100%').fontSize(13).fontColor($r('app.color.native_chat_error'))
+          Text(this.settingsError).width('100%').fontSize(this.appFontSize(13)).fontColor($r('app.color.native_chat_error'))
         }
       }
     }
@@ -4000,7 +4028,7 @@ struct NativeChat {
             $r('app.color.native_chat_primary'), $r('app.color.native_chat_surface'))
         }
         Text(this.settingsTitle()).layoutWeight(1).textAlign(TextAlign.Center)
-          .fontSize(this.compact() ? 12 : 17).lineHeight(this.compact() ? 20 : 24).fontWeight(600)
+          .fontSize(this.appFontSize(this.compact() ? 15 : 17)).lineHeight(this.compact() ? 20 : 24).fontWeight(600)
           .fontColor($r('app.color.native_chat_primary'))
         this.iconButton($r('app.media.native_close'), this.label('关闭', "Close"),
           () => { this.closeSettings(); }, this.compact() ? 30 : 36, 16,
@@ -4028,6 +4056,7 @@ struct NativeChat {
         } else if (this.settingsSection === 'data') {
           NativeDataSettings({
             busy: this.backupBusy, sessionCount: this.history.sessions.length, locale: this.settings.locale,
+            fontScale: this.appFontScale(),
             historyImportProgress: this.historyImportProgress, historyImportResult: this.historyImportResult,
             historyImportFailed: this.historyImportFailed,
             onMigration: () => { this.chooseHistoryMigration(); },
@@ -4042,6 +4071,7 @@ struct NativeChat {
         } else if (this.settingsSection === 'feedback') {
           NativeFeedbackReport({
             locale: this.settings.locale, appVersion: this.appVersion, apiProtocol: this.settings.protocol,
+            fontScale: this.appFontScale(),
             authMode: this.settings.authMode, viewportWidth: this.viewportWidth, viewportHeight: this.viewportHeight,
           })
         } else {
@@ -4070,14 +4100,16 @@ struct NativeChat {
         if (this.authorizationInBrowser) {
           Blank().layoutWeight(1)
         } else {
-          Text(this.authorizationStatus).fontSize(13).fontColor($r('app.color.native_chat_secondary')).layoutWeight(1)
+          Text(this.authorizationStatus).fontSize(this.appFontSize(13)).fontColor($r('app.color.native_chat_secondary')).layoutWeight(1)
             .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
         }
         if (this.authorizationUrl && !this.authorizationInBrowser) {
           Button(this.label('使用浏览器', 'Use browser'), { buttonStyle: ButtonStyleMode.TEXTUAL })
+            .fontSize(this.appFontSize(14))
             .enabled(!this.storingAccount).onClick(() => { this.switchAuthorizationToBrowser(); })
         }
-        Button(this.label('关闭', "Close"), { buttonStyle: ButtonStyleMode.TEXTUAL }).enabled(!this.storingAccount)
+        Button(this.label('关闭', "Close"), { buttonStyle: ButtonStyleMode.TEXTUAL })
+          .fontSize(this.appFontSize(14)).enabled(!this.storingAccount)
           .onClick(() => { this.cancelAuthorization(); })
       }
       .width('100%').padding({ left: 14, right: 8, top: 6, bottom: 6 })
@@ -4093,10 +4125,11 @@ struct NativeChat {
       } else if (this.authorizationRetry) {
         Column({ space: 12 }) {
           if (this.authorizationInBrowser) {
-            Text(this.authorizationStatus).fontSize(15).fontColor($r('app.color.native_chat_secondary'))
+            Text(this.authorizationStatus).fontSize(this.appFontSize(15)).fontColor($r('app.color.native_chat_secondary'))
               .textAlign(TextAlign.Center)
           }
           Button(this.label('重试', 'Try again'), { buttonStyle: ButtonStyleMode.TEXTUAL })
+            .fontSize(this.appFontSize(14))
             .onClick(() => { void this.loadAuthorization(this.authorizationInBrowser); })
         }
         .width('100%').layoutWeight(1).justifyContent(FlexAlign.Center).padding(24)
@@ -4105,7 +4138,7 @@ struct NativeChat {
         .width('100%').layoutWeight(1).justifyContent(FlexAlign.Center)
       } else {
         Column() {
-          Text(this.authorizationStatus).fontSize(15).fontColor($r('app.color.native_chat_secondary'))
+          Text(this.authorizationStatus).fontSize(this.appFontSize(15)).fontColor($r('app.color.native_chat_secondary'))
             .textAlign(TextAlign.Center)
         }
         .width('100%').layoutWeight(1).justifyContent(FlexAlign.Center).padding(24)
@@ -4178,6 +4211,7 @@ struct NativeChat {
       MenuItem({ content: this.label('删除', "Delete") }).contentFontColor($r('app.color.native_chat_error'))
         .onClick(() => { void this.deleteSessions([session.id]); })
     }
+    .font({ size: this.appFontSize(14) })
   }
 
   @Builder
@@ -4187,7 +4221,7 @@ struct NativeChat {
         .id('nuwa-sidebar-rename-' + session.id)
         .width('100%').height(this.wide() ? 40 : 44)
         .padding({ left: this.wide() ? 10 : 12, right: this.wide() ? 10 : 12 })
-        .fontSize(this.wide() ? 14 : 16).fontColor($r('app.color.native_chat_primary'))
+        .fontSize(this.appFontSize(this.wide() ? 14 : 16)).fontColor($r('app.color.native_chat_primary'))
         .borderRadius(this.wide() ? 12 : 16)
         .border({ width: 1, color: $r('app.color.native_chat_blue') })
         .backgroundColor($r('app.color.native_chat_field'))
@@ -4213,7 +4247,7 @@ struct NativeChat {
             Image($r('app.media.native_pin')).width(13).height(13).margin({ right: 5 }).opacity(0.85)
               .colorFilter(nativeIconTint($r('app.color.native_chat_blue_text'))).draggable(false).accessibilityLevel('no')
           }
-          Text(this.sidebarSessionTitle(session.title)).fontSize(this.wide() ? 14 : 16).layoutWeight(1).maxLines(1)
+          Text(this.sidebarSessionTitle(session.title)).fontSize(this.appFontSize(this.wide() ? 14 : 16)).layoutWeight(1).maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis }).fontColor($r('app.color.native_chat_primary'))
         }
         .height('100%').layoutWeight(1).focusable(true)
@@ -4240,7 +4274,7 @@ struct NativeChat {
 
   @Builder
   private sidebarGroupHeader(key: string, label: string) {
-    Text(this.historyGroupLabel(key, label)).fontSize((this.compact() ? 9.75 : 12) * this.settings.chatFontSize / 16)
+    Text(this.historyGroupLabel(key, label)).fontSize(this.appFontSize(12))
       .lineHeight(18).fontWeight(FontWeight.Medium).width('100%')
       .fontColor($r('app.color.native_chat_action')).backgroundColor($r('app.color.native_chat_sidebar'))
       .padding({ top: 2, right: 10, bottom: 2, left: 10 })
@@ -4252,7 +4286,7 @@ struct NativeChat {
       if (desktop && !this.selecting) {
         Row({ space: 9 }) {
           Image($r('app.media.native_welcome_logo')).width(28).height(28).borderRadius(8).draggable(false)
-          Text('Nuwa').fontSize(16).fontWeight(FontWeight.Medium).layoutWeight(1)
+          Text('Nuwa').fontSize(this.appFontSize(20)).fontWeight(FontWeight.Medium).layoutWeight(1)
             .fontColor($r('app.color.native_chat_primary'))
           this.iconButton($r('app.media.native_menu'), this.label('收起侧边栏', 'Close sidebar'),
             () => { this.setDesktopSidebar(true); }, 34)
@@ -4262,7 +4296,7 @@ struct NativeChat {
           Row({ space: 10 }) {
             Image($r('app.media.native_new_chat')).width(17).height(17)
               .colorFilter(nativeIconTint($r('app.color.native_chat_blue_text')))
-            Text(this.label('开启新对话', 'New chat')).fontSize(14).fontWeight(FontWeight.Medium)
+            Text(this.label('开启新对话', 'New chat')).fontSize(this.appFontSize(14)).fontWeight(FontWeight.Medium)
               .fontColor($r('app.color.native_chat_blue_text'))
           }
         }
@@ -4271,11 +4305,13 @@ struct NativeChat {
       }
       if (this.selecting) {
         Row() {
-          Button(this.label('取消', "Cancel"), { buttonStyle: ButtonStyleMode.TEXTUAL }).onClick(() => { this.resetSelection(); })
+          Button(this.label('取消', "Cancel"), { buttonStyle: ButtonStyleMode.TEXTUAL })
+            .fontSize(this.appFontSize(14)).onClick(() => { this.resetSelection(); })
           Text(this.label(`已选择 ${this.selectedIds.length} 项`, `${this.selectedIds.length} selected`))
-            .fontSize(15).fontWeight(FontWeight.Medium).layoutWeight(1)
+            .fontSize(this.appFontSize(15)).fontWeight(FontWeight.Medium).layoutWeight(1)
             .textAlign(TextAlign.Center).fontColor($r('app.color.native_chat_primary'))
-          Button(this.label('全选', "Select all"), { buttonStyle: ButtonStyleMode.TEXTUAL }).onClick(() => {
+          Button(this.label('全选', "Select all"), { buttonStyle: ButtonStyleMode.TEXTUAL })
+            .fontSize(this.appFontSize(14)).onClick(() => {
             this.selectedIds = this.filteredSidebarGroups.flatMap<string>((group: NativeConversationGroup): string[] =>
               group.sessions.map<string>((session: NativeConversation): string => session.id));
           })
@@ -4284,7 +4320,7 @@ struct NativeChat {
       } else {
         Row({ space: 8 }) {
           Image($r('app.media.native_search')).height(16).width(16).colorFilter(nativeIconTint($r('app.color.native_chat_secondary')))
-          TextInput({ text: this.searchText, placeholder: this.label('搜索对话内容...', "Search chats…") }).fontSize(15).height(44).layoutWeight(1)
+          TextInput({ text: this.searchText, placeholder: this.label('搜索对话内容...', "Search chats…") }).fontSize(this.appFontSize(15)).height(44).layoutWeight(1)
             .backgroundColor(Color.Transparent).padding(0).cancelButton({ style: CancelButtonStyle.INPUT })
             .onChange((value: string) => { this.changeSidebarQuery(value); })
         }
@@ -4294,17 +4330,18 @@ struct NativeChat {
         if (this.history.sessions.length === 0) {
           ListItem() {
             Column({ space: 8 }) {
-              Text(this.label('暂无对话', "No chats yet")).fontSize(15).fontWeight(FontWeight.Medium).fontColor($r('app.color.native_chat_primary'))
+              Text(this.label('暂无对话', "No chats yet")).fontSize(this.appFontSize(15)).fontWeight(FontWeight.Medium).fontColor($r('app.color.native_chat_primary'))
               Text(this.label('你与 Nuwa 的对话\n将展示在这里', 'Your chats with Nuwa will appear here'))
-                .textAlign(TextAlign.Center).fontSize(13)
+                .textAlign(TextAlign.Center).fontSize(this.appFontSize(13))
                 .fontColor($r('app.color.native_chat_secondary'))
-              Button(this.label('开启新对话', "New chat"), { buttonStyle: ButtonStyleMode.TEXTUAL }).onClick(() => { this.activate(null); })
+              Button(this.label('开启新对话', "New chat"), { buttonStyle: ButtonStyleMode.TEXTUAL })
+                .fontSize(this.appFontSize(14)).onClick(() => { this.activate(null); })
             }
             .width('100%').padding({ top: 28 })
           }
         } else if (!this.sidebarRows.length) {
           ListItem() {
-            Text(this.label('未找到匹配的对话', "No matching chats")).fontSize(14).fontColor($r('app.color.native_chat_secondary')).padding(14)
+            Text(this.label('未找到匹配的对话', "No matching chats")).fontSize(this.appFontSize(14)).fontColor($r('app.color.native_chat_secondary')).padding(14)
           }
         }
         ForEach(this.sidebarSections, (section: NativeSidebarSection) => {
@@ -4327,12 +4364,14 @@ struct NativeChat {
       if (this.selecting) {
         Row() {
           Button(this.allPinned() ? this.label('取消置顶', "Unpin") : this.label('置顶', "Pin"), { buttonStyle: ButtonStyleMode.TEXTUAL })
+            .fontSize(this.appFontSize(14))
             .enabled(this.selectedIds.length > 0).layoutWeight(1).onClick(() => {
               this.history = setConversationsPinned(this.history, this.selectedIds, !this.allPinned());
               this.resetSelection();
               void this.save();
             })
-          Button(this.label('删除', "Delete"), { buttonStyle: ButtonStyleMode.TEXTUAL }).fontColor($r('app.color.native_chat_error'))
+          Button(this.label('删除', "Delete"), { buttonStyle: ButtonStyleMode.TEXTUAL })
+            .fontSize(this.appFontSize(14)).fontColor($r('app.color.native_chat_error'))
             .enabled(this.selectedIds.length > 0).layoutWeight(1).onClick(() => { void this.deleteSessions(this.selectedIds); })
         }
         .height(52).width('100%')
@@ -4341,10 +4380,10 @@ struct NativeChat {
           Row({ space: 10 }) {
             Image($r('app.media.native_welcome_logo')).width(31).height(31).borderRadius(10).draggable(false)
             Text(this.accountToken() ? this.account?.label ?? this.label('DeepSeek API 账号', "DeepSeek API account") : this.label('设置', "Settings"))
-              .fontSize(15).layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+              .fontSize(this.appFontSize(15)).layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
               .fontColor($r('app.color.native_chat_primary'))
             if (this.balance) {
-              Text(this.balance.formatted).fontSize(12).fontColor($r('app.color.native_chat_blue_text'))
+              Text(this.balance.formatted).fontSize(this.appFontSize(12)).fontColor($r('app.color.native_chat_blue_text'))
                 .onClick(() => { void this.openLink('https://platform.deepseek.com/top_up'); })
             }
             Text('⋯').fontSize(18).fontColor($r('app.color.native_chat_secondary'))
@@ -4365,11 +4404,11 @@ struct NativeChat {
         `Load earlier messages (${this.earlierCount} more)`) :
         this.label(`加载后续消息（还有 ${this.laterCount} 条）`, `Load later messages (${this.laterCount} more)`),
         { type: ButtonType.Capsule, buttonStyle: ButtonStyleMode.TEXTUAL })
-        .height(32).fontSize(12).border({ width: 1, color: $r('app.color.native_chat_stroke') })
+        .height(32).fontSize(this.appFontSize(12)).border({ width: 1, color: $r('app.color.native_chat_stroke') })
         .fontColor($r('app.color.native_chat_secondary')).onClick(() => { this.loadMoreMessages(earlier); })
       if (!earlier) {
         Button(this.label('回到底部', 'Back to bottom'), { type: ButtonType.Capsule, buttonStyle: ButtonStyleMode.TEXTUAL })
-          .height(32).fontSize(12).border({ width: 1, color: $r('app.color.native_chat_blue') })
+          .height(32).fontSize(this.appFontSize(12)).border({ width: 1, color: $r('app.color.native_chat_blue') })
           .fontColor($r('app.color.native_chat_blue_text')).onClick(() => { this.jumpToNewestMessages(); })
       }
     }
@@ -4403,9 +4442,9 @@ struct NativeChat {
         Row({ space: 12 }) {
           Text(this.label('对话或附件尚未保存到本机，关闭页面可能丢失，请重试',
             'Chats or attachments have not been saved locally. Closing this page may lose them. Please retry.'))
-            .fontSize(14).fontColor($r('app.color.native_chat_primary')).layoutWeight(1)
+            .fontSize(this.appFontSize(14)).fontColor($r('app.color.native_chat_primary')).layoutWeight(1)
           Button(this.label('重试', 'Retry'), { type: ButtonType.Capsule })
-            .fontSize(13).fontColor($r('app.color.native_chat_primary')).height(30)
+            .fontSize(this.appFontSize(13)).fontColor($r('app.color.native_chat_primary')).height(30)
             .backgroundColor($r('app.color.native_chat_surface'))
             .border({ width: 1, color: $r('app.color.native_chat_stroke') })
             .enabled(!this.backupBusy).onClick(() => { this.retryHistorySave(); })
@@ -4416,7 +4455,7 @@ struct NativeChat {
         Column({ space: 8 }) {
           if (this.status) {
             Text(this.status).fontColor($r('app.color.native_chat_secondary'))
-            Button(this.label('重试', "Retry")).onClick(() => { void this.load(); })
+            Button(this.label('重试', "Retry")).fontSize(this.appFontSize(14)).onClick(() => { void this.load(); })
           } else {
             LoadingProgress().width(28).height(28).color($r('app.color.native_chat_blue'))
           }
@@ -4464,7 +4503,7 @@ struct NativeChat {
         .padding({ left: this.compact() ? 10 : 20, right: this.compact() ? 10 : 20, bottom: 16 })
       }
       if (this.loaded && this.status) {
-        Text(this.status).fontSize(13).fontColor($r('app.color.native_chat_error'))
+        Text(this.status).fontSize(this.appFontSize(13)).fontColor($r('app.color.native_chat_error'))
           .width('100%').padding({ left: 16, right: 16, bottom: 4 })
       }
       if (!this.centeredComposer()) {
@@ -4479,6 +4518,7 @@ struct NativeChat {
   private sourcesSheet() {
     NativeSourcesPanel({
       sources: this.panelSources, title: this.label('搜索结果', 'Search results'), locale: this.settings.locale,
+      fontScale: this.appFontScale(),
       onClose: () => { this.closeSources(); },
     })
   }
@@ -4501,7 +4541,7 @@ struct NativeChat {
             void this.openLink(DELETE_FILE_DOCS_URL);
           })
         }
-        .fontSize(14).lineHeight(22).fontColor('#F5F5F5').layoutWeight(1)
+        .fontSize(this.appFontSize(14)).lineHeight(22).fontColor('#F5F5F5').layoutWeight(1)
         .hitTestBehavior(HitTestMode.Transparent)
       }
       .alignItems(VerticalAlign.Top).width('100%').constraintSize({ maxWidth: 480 })
@@ -4519,9 +4559,9 @@ struct NativeChat {
     Column({ space: 16 }) {
       Image($r('app.media.native_drag_upload')).width(115).height(84).draggable(false)
       Text(this.label('文件拖动到此处即可上传', 'Drop files here to upload'))
-        .fontSize(20).lineHeight(28).fontColor($r('app.color.native_chat_primary')).textAlign(TextAlign.Center)
+        .fontSize(this.appFontSize(20)).lineHeight(28).fontColor($r('app.color.native_chat_primary')).textAlign(TextAlign.Center)
       Text(this.label('最多 50 个，每个 64MB', 'Up to 50 files, 64 MB each'))
-        .fontSize(14).lineHeight(22).fontColor($r('app.color.native_chat_caption')).textAlign(TextAlign.Center)
+        .fontSize(this.appFontSize(14)).lineHeight(22).fontColor($r('app.color.native_chat_caption')).textAlign(TextAlign.Center)
     }
     .width('100%').height('100%').justifyContent(FlexAlign.Center)
     .padding({ left: 40, right: 40, bottom: this.viewportWidth * 0.03 })
@@ -4533,7 +4573,7 @@ struct NativeChat {
   private historyDragMask() {
     Column() {
       Text(this.label('松开鼠标即可增量导入 DeepSeek 历史对话', 'Drop to merge DeepSeek chat history'))
-        .fontSize(16).fontWeight(FontWeight.Medium).textAlign(TextAlign.Center)
+        .fontSize(this.appFontSize(16)).fontWeight(FontWeight.Medium).textAlign(TextAlign.Center)
         .fontColor($r('app.color.native_chat_primary'))
         .padding({ left: 36, right: 36, top: 24, bottom: 24 })
         .backgroundColor($r('app.color.native_chat_surface'))
@@ -4558,6 +4598,7 @@ struct NativeChat {
             NativeOnboarding({
               locale: this.settings.locale,
               compact: this.compact(), busy: this.authorizing || this.signingOut, view: this.$onboardingView,
+              fontScale: this.fontPreferenceScale(),
               initialUrl: this.settings.baseUrl, initialModel: this.settings.model, initialProtocol: this.settings.protocol,
               onAccount: () => { void this.startAuthorization(); },
               onConnect: (credential: NativeApiCredential): Promise<void> => this.connectKey(credential),
@@ -4617,7 +4658,8 @@ struct NativeChat {
             if (!this.backupBusy) this.dismissMigrationPrompt();
           })
           NativeMigrationPrompt({
-            locale: this.settings.locale, compact: this.compact() || this.viewportHeight < 500, importing: this.backupBusy,
+            locale: this.settings.locale, compact: this.compact() || this.viewportHeight < 500,
+            fontScale: this.appFontScale(), importing: this.backupBusy,
             onMigrate: () => { this.dismissMigrationPrompt(); void this.openHistoryMigration(); },
             onImport: () => { void this.importChatHistory(true); },
             onDismiss: () => { this.dismissMigrationPrompt(); },
@@ -4631,6 +4673,7 @@ struct NativeChat {
             .onClick(() => { this.migrationChoiceVisible = false; })
           NativeMigrationChoices({
             locale: this.settings.locale, compact: this.compact() || this.viewportHeight < 500,
+            fontScale: this.appFontScale(),
             onChoose: (intent: NativeMigrationIntent) => { void this.openHistoryMigration(intent); },
             onDismiss: () => { this.migrationChoiceVisible = false; },
           })

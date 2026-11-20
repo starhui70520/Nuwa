@@ -15,6 +15,7 @@ interface NativeDiagnosticsPreview {
 
 @Component
 export struct NativeFeedbackReport {
+  @Prop fontScale: number = 1;
   @Prop locale: NativeLocale = 'zh-CN';
   @Prop appVersion: string = '';
   @Prop apiProtocol: NativeApiProtocol = 'openai';
@@ -106,7 +107,7 @@ export struct NativeFeedbackReport {
 
   @Builder
   private fieldLabel(title: string) {
-    Text(title).fontSize(13).fontWeight(FontWeight.Medium).fontColor($r('app.color.native_chat_primary')).width('100%')
+    Text(title).fontSize(13 * this.fontScale).fontWeight(FontWeight.Medium).fontColor($r('app.color.native_chat_primary')).width('100%')
   }
 
   @Builder
@@ -115,7 +116,7 @@ export struct NativeFeedbackReport {
     Flex({ wrap: FlexWrap.Wrap, space: { main: LengthMetrics.vp(8), cross: LengthMetrics.vp(8) } }) {
       ForEach(NATIVE_FEEDBACK_ISSUES, (option: NativeFeedbackIssue) => {
         Button(this.label(option.zh, option.en), { type: ButtonType.Capsule })
-          .height(32).fontSize(12).padding({ left: 12, right: 12 })
+          .constraintSize({ minHeight: 32 }).fontSize(12 * this.fontScale).padding({ left: 12, right: 12 })
           .fontColor(this.issue === option.zh ? $r('app.color.native_chat_blue_text') : $r('app.color.native_chat_primary'))
           .fontWeight(this.issue === option.zh ? FontWeight.Medium : FontWeight.Regular)
           .backgroundColor(this.issue === option.zh ? $r('app.color.native_chat_selected') : Color.Transparent)
@@ -130,7 +131,7 @@ export struct NativeFeedbackReport {
     TextArea({ text: this.description, placeholder: this.label(
       '请描述遇到的问题、出现前进行了什么操作，方便我们复现与定位…',
       'Describe the issue and the steps leading up to it…') })
-      .width('100%').height(108).fontSize(13).lineHeight(20).maxLength(4000).borderRadius(12)
+      .width('100%').height(108).fontSize(13 * this.fontScale).lineHeight(20 * this.fontScale).maxLength(4000).borderRadius(12)
       .fontColor($r('app.color.native_chat_primary')).backgroundColor($r('app.color.native_chat_field'))
       .placeholderColor($r('app.color.native_chat_secondary')).enabled(!this.submitting)
       .onChange((value: string) => {
@@ -140,7 +141,7 @@ export struct NativeFeedbackReport {
     this.fieldLabel(this.label('联系方式（选填）', 'Contact details (optional)'))
     TextInput({ text: this.contact, placeholder: this.label(
       '微信号 / 邮箱，方便修复后通知您', 'WeChat ID or email for follow-up') })
-      .width('100%').height(42).fontSize(13).maxLength(120).borderRadius(10)
+      .width('100%').height(42).fontSize(13 * this.fontScale).maxLength(120).borderRadius(10)
       .fontColor($r('app.color.native_chat_primary')).backgroundColor($r('app.color.native_chat_field'))
       .placeholderColor($r('app.color.native_chat_secondary')).enabled(!this.submitting)
       .onChange((value: string) => { this.contact = value; })
@@ -151,16 +152,16 @@ export struct NativeFeedbackReport {
         .onChange((selected: boolean) => { this.includeLogs = selected; })
       Text(this.label(`附带最近 ${this.logs.length} 条脱敏错误日志（不含 API Key）`,
         `Include ${this.logs.length} recent redacted error logs (API keys excluded)`))
-        .layoutWeight(1).fontSize(12).fontColor($r('app.color.native_chat_secondary'))
+        .layoutWeight(1).fontSize(12 * this.fontScale).fontColor($r('app.color.native_chat_secondary'))
         .onClick(() => { if (!this.submitting) this.includeLogs = !this.includeLogs; })
     }
     .width('100%')
     Row({ space: 8 }) {
       Text(this.label('上报包含设备信息', 'Reports include device information'))
-        .layoutWeight(1).fontSize(12).fontColor($r('app.color.native_chat_secondary'))
+        .layoutWeight(1).fontSize(12 * this.fontScale).fontColor($r('app.color.native_chat_secondary'))
       Button(this.showPreview ? this.label('收起预览', 'Hide preview') : this.label('预览附带信息', 'Preview diagnostics'),
         { buttonStyle: ButtonStyleMode.TEXTUAL })
-        .fontSize(12).fontColor($r('app.color.native_chat_blue_text'))
+        .fontSize(12 * this.fontScale).fontColor($r('app.color.native_chat_blue_text'))
         .onClick(() => {
           this.showPreview = !this.showPreview;
           if (this.showPreview) void this.refreshLogs();
@@ -169,36 +170,36 @@ export struct NativeFeedbackReport {
     .width('100%')
     if (this.showPreview) {
       Scroll() {
-        Text(this.preview()).width('100%').fontSize(11).lineHeight(16).fontFamily('monospace')
+        Text(this.preview()).width('100%').fontSize(11 * this.fontScale).lineHeight(16 * this.fontScale).fontFamily('monospace')
           .fontColor($r('app.color.native_chat_primary')).copyOption(CopyOptions.LocalDevice).padding(12)
       }
       .width('100%').height(160).borderRadius(10).backgroundColor($r('app.color.native_chat_field'))
     }
     if (this.submitError) {
-      Text(this.submitError).width('100%').fontSize(12).fontColor($r('app.color.native_chat_error'))
+      Text(this.submitError).width('100%').fontSize(12 * this.fontScale).fontColor($r('app.color.native_chat_error'))
     }
     Button(this.submitting ? this.label('正在提交…', 'Submitting…') : this.label('提交日志上报', 'Submit report'))
-      .width('100%').backgroundColor($r('app.color.native_chat_blue')).enabled(!this.submitting)
+      .width('100%').fontSize(14 * this.fontScale).backgroundColor($r('app.color.native_chat_blue')).enabled(!this.submitting)
       .onClick(() => { void this.submit(); })
   }
 
   @Builder
   private reportResult() {
-    Text(this.label('日志上报成功', 'Report submitted')).fontSize(16).fontWeight(FontWeight.Medium)
+    Text(this.label('日志上报成功', 'Report submitted')).fontSize(16 * this.fontScale).fontWeight(FontWeight.Medium)
       .width('100%').textAlign(TextAlign.Center).fontColor($r('app.color.native_chat_primary'))
     Text(this.label('请将下方记录码发给开发者，我们会根据记录码快速定位您遇到的问题。',
       'Send this report code to the developer so they can investigate the issue.'))
-      .width('100%').textAlign(TextAlign.Center).fontSize(13).lineHeight(20).fontColor($r('app.color.native_chat_secondary'))
-    Text(this.reportCode).width('100%').textAlign(TextAlign.Center).fontFamily('monospace').fontSize(22)
+      .width('100%').textAlign(TextAlign.Center).fontSize(13 * this.fontScale).lineHeight(20 * this.fontScale).fontColor($r('app.color.native_chat_secondary'))
+    Text(this.reportCode).width('100%').textAlign(TextAlign.Center).fontFamily('monospace').fontSize(22 * this.fontScale)
       .fontWeight(FontWeight.Bold).fontColor($r('app.color.native_chat_primary')).copyOption(CopyOptions.LocalDevice)
       .padding({ top: 14, bottom: 14, left: 16, right: 16 }).borderRadius(12)
       .backgroundColor($r('app.color.native_chat_field'))
     Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Center,
       space: { main: LengthMetrics.vp(10), cross: LengthMetrics.vp(10) } }) {
       Button(this.copied ? this.label('已复制记录码', 'Code copied') : this.label('复制记录码', 'Copy report code'))
-        .backgroundColor($r('app.color.native_chat_blue')).onClick(() => { void this.copyReportCode(); })
+        .fontSize(14 * this.fontScale).backgroundColor($r('app.color.native_chat_blue')).onClick(() => { void this.copyReportCode(); })
       Button(this.label('继续提交新反馈', 'Submit another report'), { buttonStyle: ButtonStyleMode.TEXTUAL })
-        .fontColor($r('app.color.native_chat_blue_text')).onClick(() => {
+        .fontSize(14 * this.fontScale).fontColor($r('app.color.native_chat_blue_text')).onClick(() => {
           this.reportCode = '';
           this.description = '';
           this.submitError = '';

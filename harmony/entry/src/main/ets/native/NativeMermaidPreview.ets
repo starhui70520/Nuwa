@@ -23,6 +23,7 @@ export struct NativeMermaidPreview {
   @Prop @Watch('startPreview') theme: NativeTheme = 'system';
   @Prop @Watch('startPreview') loading: boolean = false;
   @Prop locale: NativeLocale = 'zh-CN';
+  @Prop fontScale: number = 1;
 
   @State private phase: PreviewPhase = 'loading';
   @State private previewHeight: number = 1;
@@ -210,7 +211,7 @@ export struct NativeMermaidPreview {
           .width('100%')
           .height(160)
           .textAlign(TextAlign.Center)
-          .fontSize(14)
+          .fontSize(14 * this.fontScale)
           .fontColor($r('app.color.native_chat_secondary'))
       }
       if (this.phase === 'loading' || this.phase === 'ready') {

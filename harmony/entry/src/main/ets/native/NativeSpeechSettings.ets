@@ -3,6 +3,7 @@ import { NativeLocale } from './NativeLocation';
 
 @Component
 export struct NativeSpeechSettings {
+  @Prop fontScale: number = 1;
   @Prop locale: NativeLocale = 'zh-CN';
   @Prop engine: HarmonySpeechEngine = 'auto';
   @Prop voice: HarmonySpeechVoice = 'stella';
@@ -40,7 +41,7 @@ export struct NativeSpeechSettings {
     Column({ space: 10 }) {
       Column() {
         Row() {
-          Text(this.label('语音引擎', 'Speech engine')).layoutWeight(1).fontSize(15)
+          Text(this.label('语音引擎', 'Speech engine')).layoutWeight(1).fontSize(15 * this.fontScale)
             .fontColor($r('app.color.native_chat_primary'))
           if (this.canSelectEngine()) {
             Select([{ value: this.label('自动', 'Auto') }, { value: this.label('设备原生', 'On-device') },
@@ -48,23 +49,29 @@ export struct NativeSpeechSettings {
               .selected(this.engine === 'native' ? 1 : this.engine === 'cloud' ? 2 : 0)
               .value(this.engine === 'native' ? this.label('设备原生', 'On-device') :
                 this.engine === 'cloud' ? this.label('云端', 'Cloud') : this.label('自动', 'Auto'))
+              .font({ size: 14 * this.fontScale })
+              .optionFont({ size: 14 * this.fontScale })
+              .selectedOptionFont({ size: 14 * this.fontScale })
               .accessibilityText(this.label('语音引擎', 'Speech engine'))
               .onSelect((index: number) => { this.onEngine(index === 1 ? 'native' : index === 2 ? 'cloud' : 'auto'); })
           } else {
-            Text(this.label('设备原生', 'On-device')).fontSize(13).fontColor($r('app.color.native_chat_secondary'))
+            Text(this.label('设备原生', 'On-device')).fontSize(13 * this.fontScale).fontColor($r('app.color.native_chat_secondary'))
           }
         }
         .width('100%').height(48).padding({ left: 15, right: 12 })
         if (this.engine !== 'native') {
           Divider().color($r('app.color.native_chat_stroke')).margin({ left: 14 })
           Row() {
-            Text(this.label('朗读音色', 'Read-aloud voice')).layoutWeight(1).fontSize(15)
+            Text(this.label('朗读音色', 'Read-aloud voice')).layoutWeight(1).fontSize(15 * this.fontScale)
               .fontColor($r('app.color.native_chat_primary'))
             Select([{ value: this.label('海星（女声）', 'Stella (female)') },
               { value: this.label('暗潮（男声）', 'Tide (male)') }])
               .selected(this.voice === 'tide' ? 1 : 0)
               .value(this.voice === 'tide' ? this.label('暗潮（男声）', 'Tide (male)') :
                 this.label('海星（女声）', 'Stella (female)'))
+              .font({ size: 14 * this.fontScale })
+              .optionFont({ size: 14 * this.fontScale })
+              .selectedOptionFont({ size: 14 * this.fontScale })
               .accessibilityText(this.label('朗读音色', 'Read-aloud voice'))
               .onSelect((index: number) => { this.onVoice(index === 1 ? 'tide' : 'stella'); })
           }
@@ -72,7 +79,7 @@ export struct NativeSpeechSettings {
         }
       }
       .width('100%').borderRadius(16).clip(true).backgroundColor($r('app.color.native_chat_surface'))
-      Text(this.hint()).width('100%').fontSize(12).fontColor($r('app.color.native_chat_secondary')).padding({ left: 9 })
+      Text(this.hint()).width('100%').fontSize(12 * this.fontScale).fontColor($r('app.color.native_chat_secondary')).padding({ left: 9 })
     }
     .width('100%')
   }

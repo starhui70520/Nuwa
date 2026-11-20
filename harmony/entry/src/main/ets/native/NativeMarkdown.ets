@@ -505,17 +505,17 @@ export struct NativeMarkdown {
           Row({ space: 6 }) {
             Image(safeNativeSourceUrl(this.citationAnchor.source.siteIcon) || $r('app.media.native_web_search'))
               .alt($r('app.media.native_web_search')).width(16).height(16).borderRadius(4).draggable(false)
-            Text(this.citationAnchor.source.siteName).fontSize(12).fontColor($r('app.color.native_chat_secondary'))
+            Text(this.citationAnchor.source.siteName).fontSize(12 * this.fontScale).fontColor($r('app.color.native_chat_secondary'))
               .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).constraintSize({ maxWidth: '62%' })
             if (this.citationAnchor.source.publishedAt) {
-              Text(this.citationSourceDate(this.citationAnchor.source.publishedAt)).fontSize(12)
+              Text(this.citationSourceDate(this.citationAnchor.source.publishedAt)).fontSize(12 * this.fontScale)
                 .fontColor($r('app.color.native_chat_caption')).maxLines(1)
             }
           }
-          Text(this.citationAnchor.source.title).fontSize(15).fontWeight(FontWeight.Medium)
+          Text(this.citationAnchor.source.title).fontSize(15 * this.fontScale).fontWeight(FontWeight.Medium)
             .fontColor($r('app.color.native_chat_primary')).maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
           if (this.citationAnchor.source.snippet) {
-            Text(this.citationAnchor.source.snippet).fontSize(13).fontColor($r('app.color.native_chat_secondary'))
+            Text(this.citationAnchor.source.snippet).fontSize(13 * this.fontScale).fontColor($r('app.color.native_chat_secondary'))
               .maxLines(3).textOverflow({ overflow: TextOverflow.Ellipsis })
           }
         }
@@ -553,7 +553,7 @@ export struct NativeMarkdown {
       .height(28)
       .padding({ left: 9, right: 9 })
       .borderRadius(7)
-      .fontSize(13)
+      .fontSize(13 * this.fontScale)
       .fontColor($r('app.color.native_chat_primary'))
       .backgroundColor(this.mermaidCodeBlocks.includes(path) === code ?
         $r('app.color.native_chat_field') : Color.Transparent)
@@ -574,14 +574,14 @@ export struct NativeMarkdown {
           Blank().layoutWeight(1)
         } else {
           Text(block.lang || 'text')
-            .fontSize(12)
+            .fontSize(12 * this.fontScale)
             .fontColor($r('app.color.native_chat_secondary'))
             .layoutWeight(1)
         }
         Button(this.copiedCodeKey === path + ':' + this.currentBlock(block, path).key ?
           this.label('已复制', 'Copied') : this.label('复制', 'Copy'), { buttonStyle: ButtonStyleMode.TEXTUAL })
           .height(28)
-          .fontSize(13)
+          .fontSize(13 * this.fontScale)
           .onClick(() => {
             const current = this.currentBlock(block, path);
             void this.copyCode(current.text ?? '', path + ':' + current.key);
@@ -592,7 +592,7 @@ export struct NativeMarkdown {
       .backgroundColor($r('app.color.native_chat_sidebar'))
       if (this.isMermaid(block) && !this.mermaidCodeBlocks.includes(path)) {
         NativeMermaidPreview({ source: this.currentBlock(block, path).text ?? '', loading: this.loading,
-          locale: this.locale, theme: this.theme })
+          locale: this.locale, theme: this.theme, fontScale: this.fontScale })
       } else {
         NativeHighlightedCode({ language: block.lang || 'text', source: this.currentBlock(block, path).text ?? '',
           loading: this.loading, theme: this.theme, fontScale: this.fontScale })

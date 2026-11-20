@@ -18,6 +18,7 @@ function sourceDate(value: string | null): string {
 @Component
 export struct NativeSourcesPanel {
   @Prop locale: NativeLocale = 'zh-CN';
+  @Prop fontScale: number = 1;
   @Prop sources: NativeChatSource[] = [];
   @Prop title: string = '参考资料';
   onClose: () => void = () => {};
@@ -43,24 +44,24 @@ export struct NativeSourcesPanel {
   private card(source: NativeChatSource) {
     Button({ type: ButtonType.Normal }) {
       Row({ space: 12 }) {
-        Text(source.index.toString()).fontSize(11).fontWeight(FontWeight.Medium)
+        Text(source.index.toString()).fontSize(11 * this.fontScale).fontWeight(FontWeight.Medium)
           .fontColor($r('app.color.native_chat_blue_text')).textAlign(TextAlign.Center)
           .width(24).height(24).backgroundColor($r('app.color.native_chat_field')).borderRadius(8)
           .alignSelf(ItemAlign.Start)
         Column({ space: 5 }) {
           Row({ space: 7 }) {
-            Text(source.siteName).fontSize(12).fontColor($r('app.color.native_chat_secondary'))
+            Text(source.siteName).fontSize(13 * this.fontScale).fontColor($r('app.color.native_chat_secondary'))
               .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).constraintSize({ maxWidth: '65%' })
             if (source.publishedAt) {
-              Text(sourceDate(source.publishedAt)).fontSize(12).fontColor($r('app.color.native_chat_caption'))
+              Text(sourceDate(source.publishedAt)).fontSize(13 * this.fontScale).fontColor($r('app.color.native_chat_caption'))
                 .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
             }
           }
-          Text(source.title).fontSize(15).fontWeight(FontWeight.Medium)
+          Text(source.title).fontSize(14 * this.fontScale).fontWeight(FontWeight.Medium)
             .fontColor($r('app.color.native_chat_primary')).maxLines(2)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
           if (source.snippet) {
-            Text(source.snippet).fontSize(13).fontColor($r('app.color.native_chat_secondary')).maxLines(3)
+            Text(source.snippet).fontSize(13 * this.fontScale).fontColor($r('app.color.native_chat_secondary')).maxLines(3)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
           }
         }
@@ -79,7 +80,8 @@ export struct NativeSourcesPanel {
     Column({ space: 12 }) {
       Row() {
         Text(this.title === '参考资料' ? this.text('参考资料', 'Sources') : this.title)
-          .layoutWeight(1).fontSize(18).fontWeight(FontWeight.Medium)
+          .layoutWeight(1).fontSize(14 * this.fontScale).lineHeight(22).fontWeight(FontWeight.Medium)
+          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
           .fontColor($r('app.color.native_chat_primary'))
         Button('×', { type: ButtonType.Normal, buttonStyle: ButtonStyleMode.TEXTUAL }).width(38).height(36)
           .fontSize(24).fontColor($r('app.color.native_chat_secondary')).padding(0)
