@@ -172,6 +172,7 @@ struct WebFetchResultInfo: Codable, Equatable {
     let title: String?
     let publishedAt: String?
     let errorCode: String?
+    var documentText: String? = nil
 }
 
 struct ServerToolUseInfo: Codable, Equatable {

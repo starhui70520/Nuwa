@@ -1,5 +1,7 @@
 import Compression
+import CryptoKit
 import Foundation
+import zlib
 
 enum DeepSeekZipError: LocalizedError {
     case invalidArchive
@@ -16,7 +18,7 @@ enum DeepSeekZipError: LocalizedError {
 }
 
 /// Pure Foundation + Apple Compression ZIP reader for DeepSeek export archives (`deepseek_data-*.zip`).
-/// 1:1 port of chat-demo/src/services/chat/history/importArchive.ts + toLocal.ts:
+/// Reads chat-demo v3 archives and retains compatibility with earlier iOS backups.
 /// - Preserves full branching trees (rootMessageId / parentId / selectedChildId / current_message_id)
 /// - Parses all fragments: REQUEST, FILE, THINK (with elapsed_secs), RESPONSE, TEMPLATE_RESPONSE,
 ///   TOOL_SEARCH, TOOL_OPEN, TOOL_FIND, READ_LINK
@@ -26,36 +28,88 @@ enum DeepSeekZipImporter {
     struct ZipEntry {
         let path: String
         let compressionMethod: UInt16
-        let compressedSize: Int
-        let uncompressedSize: Int
+    let compressedSize: Int
+    let uncompressedSize: Int
+    let crc32: UInt32
         let localHeaderOffset: Int
     }
 
     static func parseZipData(_ data: Data) throws -> [ChatSession] {
         let entries = try readCentralDirectory(from: data)
+        let manifest = entries.filter { $0.path == "manifest.json" }
+        var isV3 = false
+        if !manifest.isEmpty {
+            guard manifest.count == 1, let first = manifest.first, first.localHeaderOffset == 0,
+                  let object = try JSONSerialization.jsonObject(with: extractEntry(first, from: data)) as? [String: Any]
+            else { throw DeepSeekZipError.invalidArchive }
+            if let version = object["export_format_version"] {
+                guard (version as? Int) == 3 else { throw DeepSeekZipError.invalidArchive }
+                isV3 = true
+            } else {
+                guard (object["format_version"] as? Int) == 2 else { throw DeepSeekZipError.invalidArchive }
+            }
+        }
         var entriesByNFCPath: [String: ZipEntry] = [:]
         for entry in entries {
-            entriesByNFCPath[entry.path.precomposedStringWithCanonicalMapping] = entry
+            let path = entry.path.precomposedStringWithCanonicalMapping
+            if entriesByNFCPath.updateValue(entry, forKey: path) != nil, isV3 {
+                throw DeepSeekZipError.invalidArchive
+            }
         }
 
+        let index = entriesByNFCPath["chat_session_index.json"]
+        // Keep accepting older unindexed session dumps; an indexed archive needs a manifest.
+        if manifest.isEmpty && index != nil { throw DeepSeekZipError.invalidArchive }
+
+        let staging = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: staging) }
+        var sessionIds = Set<String>()
         var sessions: [ChatSession] = []
 
         for entry in entries {
             let lower = entry.path.lowercased()
             if lower.hasPrefix("chat_sessions/") && lower.hasSuffix(".json") && !lower.contains("_files/") {
                 if let entryData = try? extractEntry(entry, from: data),
-                   let session = parseV2SessionFile(entryData, zipData: data, entriesByPath: entriesByNFCPath) {
+                   let session = parseSessionFile(
+                    entryData, path: entry.path, zipData: data, entriesByPath: entriesByNFCPath,
+                    staging: staging, strict: isV3
+                   ) {
                     sessions.append(session)
+                    sessionIds.insert(String(entry.path.dropFirst("chat_sessions/".count).dropLast(".json".count)))
+                } else if isV3 {
+                    throw DeepSeekZipError.invalidArchive
                 }
-            } else if lower == "conversations.json" || lower.hasSuffix("/conversations.json") {
+            } else if !isV3 && (lower == "conversations.json" || lower.hasSuffix("/conversations.json")) {
                 if let entryData = try? extractEntry(entry, from: data) {
                     sessions.append(contentsOf: parseLegacyConversations(entryData))
                 }
             }
         }
 
+        if isV3 {
+            guard let index,
+                  let rows = try JSONSerialization.jsonObject(with: extractEntry(index, from: data)) as? [[String: Any]]
+            else { throw DeepSeekZipError.invalidArchive }
+            let ids = Set(rows.compactMap { $0["id"] as? String })
+            guard ids == sessionIds, ids.count == rows.count else { throw DeepSeekZipError.invalidArchive }
+        }
         if sessions.isEmpty {
             throw DeepSeekZipError.noSessionsFound
+        }
+        if FileManager.default.fileExists(atPath: staging.path) {
+            let destination = AttachmentStore.filesDirectory
+            var moved: [URL] = []
+            do {
+                for image in try FileManager.default.contentsOfDirectory(at: staging, includingPropertiesForKeys: nil) {
+                    let target = destination.appendingPathComponent(image.lastPathComponent)
+                    if FileManager.default.fileExists(atPath: target.path) { continue }
+                    try FileManager.default.moveItem(at: image, to: target)
+                    moved.append(target)
+                }
+            } catch {
+                for image in moved { try? FileManager.default.removeItem(at: image) }
+                throw error
+            }
         }
         return sessions
     }
@@ -85,6 +139,7 @@ enum DeepSeekZipImporter {
         for _ in 0..<totalEntries {
             guard cursor + 46 <= count, readUInt32(data, at: cursor) == 0x02014b50 else { break }
             let method = readUInt16(data, at: cursor + 10)
+            let crc32 = readUInt32(data, at: cursor + 16)
             let compSize = Int(readUInt32(data, at: cursor + 20))
             let uncompSize = Int(readUInt32(data, at: cursor + 24))
             let nameLen = Int(readUInt16(data, at: cursor + 28))
@@ -102,11 +157,13 @@ enum DeepSeekZipImporter {
                     compressionMethod: method,
                     compressedSize: compSize,
                     uncompressedSize: uncompSize,
+                    crc32: crc32,
                     localHeaderOffset: localOffset
                 )
             )
             cursor = nameEnd + extraLen + commentLen
         }
+        guard entries.count == totalEntries else { throw DeepSeekZipError.invalidArchive }
         return entries
     }
 
@@ -117,18 +174,27 @@ enum DeepSeekZipImporter {
         }
         let nameLen = Int(readUInt16(data, at: base + 26))
         let extraLen = Int(readUInt16(data, at: base + 28))
+        let nameStart = base + 30
+        let nameEnd = nameStart + nameLen
+        guard nameEnd <= data.count, String(data: data[nameStart..<nameEnd], encoding: .utf8) == entry.path
+        else { throw DeepSeekZipError.invalidArchive }
         let payloadStart = base + 30 + nameLen + extraLen
         let payloadEnd = payloadStart + entry.compressedSize
         guard payloadEnd <= data.count else { throw DeepSeekZipError.invalidArchive }
 
         let compressed = data.subdata(in: payloadStart..<payloadEnd)
-        if entry.compressionMethod == 0 {
-            return compressed
+        let decoded: Data
+        switch entry.compressionMethod {
+        case 0: decoded = compressed
+        case 8: decoded = try inflateRawDeflate(compressed, expectedSize: max(entry.uncompressedSize, 4096))
+        default: throw DeepSeekZipError.invalidArchive
         }
-        if entry.compressionMethod == 8 {
-            return try inflateRawDeflate(compressed, expectedSize: max(entry.uncompressedSize, 4096))
-        }
-        throw DeepSeekZipError.invalidArchive
+        guard decoded.count == entry.uncompressedSize,
+              decoded.withUnsafeBytes({ bytes in
+                  crc32_z(0, bytes.bindMemory(to: UInt8.self).baseAddress, bytes.count)
+              }) == UInt(entry.crc32)
+        else { throw DeepSeekZipError.invalidArchive }
+        return decoded
     }
 
     private static func inflateRawDeflate(_ compressed: Data, expectedSize: Int) throws -> Data {
@@ -215,11 +281,11 @@ enum DeepSeekZipImporter {
     }
 
     private static func saveExtractedImage(
-        fileId: String,
         fileName: String,
         exportPath: String,
         zipData: Data,
-        entriesByPath: [String: ZipEntry]
+        entriesByPath: [String: ZipEntry],
+        staging: URL
     ) -> (localFileName: String, mimeType: String)? {
         let normalizedPath = exportPath.precomposedStringWithCanonicalMapping
         guard let entry = entriesByPath[normalizedPath],
@@ -236,20 +302,31 @@ enum DeepSeekZipImporter {
         case "image/jpeg": ext = "jpg"
         default:
             let origExt = AttachmentStore.fileExtension(of: fileName)
-            ext = origExt.isEmpty ? "jpg" : origExt
+            ext = origExt.range(of: #"^[A-Za-z0-9]{1,10}$"#, options: .regularExpression) != nil ? origExt : "jpg"
         }
-        let localName = "\(fileId).\(ext)"
-        let dest = AttachmentStore.filesDirectory.appendingPathComponent(localName)
-        if !FileManager.default.fileExists(atPath: dest.path) {
-            try? imgData.write(to: dest, options: [.atomic])
+        let digest = SHA256.hash(data: imgData).map { String(format: "%02x", $0) }.joined()
+        let localName = "\(digest).\(ext)"
+        let localURL = AttachmentStore.filesDirectory.appendingPathComponent(localName)
+        let stagedURL = staging.appendingPathComponent(localName)
+        do {
+            if !FileManager.default.fileExists(atPath: localURL.path),
+               !FileManager.default.fileExists(atPath: stagedURL.path) {
+                try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+                try imgData.write(to: stagedURL, options: [.atomic])
+            }
+        } catch {
+            return nil
         }
         return (localName, mime.isEmpty ? AttachmentStore.inferMimeType(fileName: fileName, isImage: true) : mime)
     }
 
-    private static func parseV2SessionFile(
+    private static func parseSessionFile(
         _ data: Data,
+        path: String,
         zipData: Data,
-        entriesByPath: [String: ZipEntry]
+        entriesByPath: [String: ZipEntry],
+        staging: URL,
+        strict: Bool
     ) -> ChatSession? {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let rawMessages = obj["messages"] as? [[String: Any]]
@@ -260,6 +337,13 @@ enum DeepSeekZipImporter {
         let updatedAt = parseDate(obj["updated_at"] as? String)
         let externalId = obj["id"] as? String
         let isPinned = (obj["pinned"] as? Bool) ?? false
+        if strict {
+            guard let externalId, !externalId.isEmpty, !externalId.contains("/"),
+                  path == "chat_sessions/\(externalId).json"
+            else { return nil }
+        }
+        let imagePrefix = String(path.dropLast(".json".count)) + "_files/"
+        var importedImages: [String: (localFileName: String, mimeType: String)] = [:]
 
         // Sort ascending by numeric id so parent_id always appears before child (1:1 toLocal.ts buildTree)
         let sortedRaw = rawMessages.sorted { ($0["id"] as? Int ?? 0) < ($1["id"] as? Int ?? 0) }
@@ -271,9 +355,22 @@ enum DeepSeekZipImporter {
         var lastTimestamp: (raw: String, date: Date)?
 
         for raw in sortedRaw {
-            guard let numId = raw["id"] as? Int else { continue }
+            guard let numId = raw["id"] as? Int else {
+                if strict { return nil }
+                continue
+            }
             let localId = UUID()
             let parentIndex = (raw["parent_id"] as? Int).flatMap { indexByNumId[$0] }
+            let roleStr = (raw["role"] as? String ?? "").uppercased()
+            if strict {
+                guard numId >= 0, indexByNumId[numId] == nil, roleStr == "USER" || roleStr == "ASSISTANT"
+                else { return nil }
+                if let parentIndex {
+                    guard (messages[parentIndex].role == .user) != (roleStr == "USER") else { return nil }
+                } else {
+                    guard raw["parent_id"] is NSNull, roleStr == "USER" else { return nil }
+                }
+            }
             let parentUUID = parentIndex.map { messages[$0].id }
             let insertedAt: Date
             if let rawDate = raw["inserted_at"] as? String {
@@ -286,7 +383,6 @@ enum DeepSeekZipImporter {
             } else {
                 insertedAt = Date()
             }
-            let roleStr = (raw["role"] as? String ?? "").uppercased()
             let fragments = raw["fragments"] as? [[String: Any]] ?? []
 
             let built: ChatMessage
@@ -305,16 +401,19 @@ enum DeepSeekZipImporter {
                             let isImg = (rf["is_image"] as? Bool) ?? AttachmentStore.isImageName(fname)
                             var localName: String? = nil
                             var mime = ""
-                            if isImg, let exportPath = rf["export_path"] as? String, !exportPath.isEmpty {
-                                if let saved = saveExtractedImage(
-                                    fileId: fid,
+                            if isImg, let exportPath = rf["export_path"] as? String, exportPath.hasPrefix(imagePrefix) {
+                                if let saved = importedImages[exportPath] ?? saveExtractedImage(
                                     fileName: fname,
                                     exportPath: exportPath,
                                     zipData: zipData,
-                                    entriesByPath: entriesByPath
+                                    entriesByPath: entriesByPath,
+                                    staging: staging
                                 ) {
+                                    importedImages[exportPath] = saved
                                     localName = saved.localFileName
                                     mime = saved.mimeType
+                                } else if strict && entriesByPath[exportPath.precomposedStringWithCanonicalMapping] != nil {
+                                    return nil
                                 }
                             }
                             files.append(
@@ -541,6 +640,8 @@ enum DeepSeekZipImporter {
                 cursorIdx = pIdx
             }
             rootId = messages[cursorIdx].id
+        } else if strict && !messages.isEmpty {
+            return nil
         }
 
         let sessionId = externalId.flatMap(UUID.init(uuidString:)) ?? stableUUID(for: externalId ?? UUID().uuidString)

@@ -16,6 +16,9 @@ enum AIClientError: LocalizedError {
     case invalidURL
     case httpError(Int, String)
     case streamError(String)
+    case interruptedStream
+    case unsupportedImage(historyFileId: String?)
+    case invalidatedFiles(Set<String>, message: String)
     case decodingError
 
     var errorDescription: String? {
@@ -32,42 +35,49 @@ enum AIClientError: LocalizedError {
             return clean.isEmpty ? "请求失败（HTTP \(code)）" : "请求失败（HTTP \(code)）：\(clean)"
         case .streamError(let message):
             return message
+        case .interruptedStream:
+            return "回复连接中断，请重试。"
+        case .unsupportedImage:
+            return "暂不支持解析该图片，请更换 JPG / PNG / WebP 图片后重试。"
+        case .invalidatedFiles(_, let message):
+            return AIClientError.httpError(400, message).errorDescription
         case .decodingError:
             return "解析服务端响应失败。"
         }
     }
 
     var is32kInputLimit: Bool {
-        if case .httpError(_, let msg) = self {
-            return msg.range(of: "user input too long.*exceeds max 32768 tokens", options: [.regularExpression, .caseInsensitive]) != nil
+        let message: String
+        switch self {
+        case .httpError(_, let text), .streamError(let text): message = text
+        default: return false
         }
-        return false
+        return message.range(of: "user input too long.*exceeds max 32768 tokens", options: [.regularExpression, .caseInsensitive]) != nil
     }
 
-    var isFileInvalidated: Bool {
-        if case .httpError(let code, let msg) = self {
-            guard code == 400 || code == 404 else { return false }
-            let lower = msg.lowercased()
-            return lower.contains("file_id")
-                || lower.contains("file not found")
-                || lower.contains("invalid file")
-                || lower.contains("expired file")
-        }
-        return false
+    fileprivate func invalidatedFiles(in messages: [[String: Any]]) -> AIClientError? {
+        guard case .httpError(400, let message) = self,
+              message.range(
+                of: #"file_ids do not exist or are not created under your account|file data not found for file_id|\.source\.file_id: invalid file_id"#,
+                options: [.regularExpression, .caseInsensitive]
+              ) != nil
+        else { return nil }
+        let sentIds = Set(messages.flatMap { payload -> [String] in
+            guard payload["role"] as? String == "user",
+                  let blocks = payload["content"] as? [[String: Any]] else { return [] }
+            return blocks.compactMap { ($0["source"] as? [String: Any])?["file_id"] as? String }
+        })
+        let regex = try? NSRegularExpression(pattern: #"file-api-[\w-]+"#)
+        let range = NSRange(message.startIndex..., in: message)
+        let mentioned = Set((regex?.matches(in: message, range: range) ?? []).compactMap {
+            Range($0.range, in: message).map { String(message[$0]) }
+        })
+        let target = mentioned.isEmpty ? sentIds : sentIds.intersection(mentioned)
+        return target.isEmpty ? nil : .invalidatedFiles(target, message: message)
     }
 
-    func mentionedFileIds() -> [String] {
-        guard case .httpError(_, let msg) = self,
-              let regex = try? NSRegularExpression(pattern: "file_[A-Za-z0-9_-]+")
-        else { return [] }
-        let range = NSRange(msg.startIndex..., in: msg)
-        return regex.matches(in: msg, range: range).compactMap { m in
-            Range(m.range, in: msg).map { String(msg[$0]) }
-        }
-    }
-
-    func unsupportedImageIndices() -> (messageIndex: Int, blockIndex: Int)? {
-        guard case .httpError(_, let msg) = self,
+    fileprivate func unsupportedImageIndices() -> (messageIndex: Int, blockIndex: Int)? {
+        guard case .httpError(400, let msg) = self,
               let regex = try? NSRegularExpression(pattern: "messages\\.(\\d+)\\.content\\.(\\d+):.*unsupported image", options: [.caseInsensitive])
         else { return nil }
         let range = NSRange(msg.startIndex..., in: msg)
@@ -394,6 +404,22 @@ enum AIClient {
         }
     }
 
+    static func contextRounds(_ history: [ChatMessage]) -> [(question: ChatMessage, reply: ChatMessage)] {
+        history.indices.dropLast().compactMap { index in
+            let question = history[index]
+            let reply = history[index + 1]
+            guard question.role == .user, reply.role == .assistant,
+                  reply.status == .done || reply.status == .stopped,
+                  reply.stopReason != "refusal", !reply.fullTextContent.isEmpty,
+                  !reply.blocks.contains(where: {
+                      if case .text(_, _, _, let isTemplate) = $0 { return isTemplate }
+                      return false
+                  })
+            else { return nil }
+            return (question, reply)
+        }
+    }
+
     private static func streamAnthropic(
         _ params: StreamParams,
         continuation: AsyncThrowingStream<AIStreamEvent, Error>.Continuation
@@ -402,54 +428,48 @@ enum AIClient {
             throw AIClientError.invalidURL
         }
 
-        let isDeepSeekTarget = params.useAccount || params.baseUrl.lowercased().contains("deepseek")
+        let host = url.host?.lowercased() ?? ""
+        let isDeepSeekTarget = params.useAccount || host == "deepseek.com" || host.hasSuffix(".deepseek.com")
         let systemPrompt = params.customSystemPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? (isDeepSeekTarget ? defaultSystemPrompt : "")
             : params.customSystemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
 
         var payloadMessages: [[String: Any]] = []
         var hasAnyFile = false
+        var previousReminder: String?
 
-        for msg in params.history {
-            if msg.role == .user {
-                let (obj, msgHasFile) = buildAnthropicUserMessage(msg, rejectedFileIds: params.rejectedFileIds)
-                hasAnyFile = hasAnyFile || msgHasFile
-                payloadMessages.append(obj)
-            } else if msg.role == .assistant && (msg.status == .done || msg.status == .stopped) && msg.stopReason != "refusal" {
-                let text = msg.fullTextContent
-                if !text.isEmpty {
-                    payloadMessages.append(["role": "assistant", "content": text])
-                }
-            }
+        func appendReminder(_ reminder: String?) {
+            guard isDeepSeekTarget, let reminder, !reminder.isEmpty else { return }
+            let normalized = LocationCatalog.normalizeLatestReminder(reminder)
+            guard normalized != previousReminder else { return }
+            payloadMessages.append(["role": "latest_reminder", "content": normalized])
+            previousReminder = normalized
         }
 
-        if isDeepSeekTarget, let reminder = params.latestReminder, !reminder.isEmpty {
-            payloadMessages.append(["role": "latest_reminder", "content": LocationCatalog.normalizeLatestReminder(reminder)])
+        for (question, reply) in contextRounds(params.history) {
+            guard let (message, hasFile) = buildAnthropicUserMessage(question, rejectedFileIds: params.rejectedFileIds)
+            else { continue }
+            let blocks = buildAnthropicAssistantBlocks(reply, includeReadLinks: isDeepSeekTarget)
+            guard !blocks.isEmpty else { continue }
+            hasAnyFile = hasAnyFile || hasFile
+            appendReminder(reply.latestReminder)
+            payloadMessages.append(message)
+            payloadMessages.append(["role": "assistant", "content": blocks])
         }
 
-        let (qObj, qHasFile) = buildAnthropicUserMessage(params.question, rejectedFileIds: params.rejectedFileIds)
+        appendReminder(params.latestReminder)
+        let questionIndex = payloadMessages.count
+        let (qObj, qHasFile) = buildAnthropicUserMessage(params.question, rejectedFileIds: [])
+            ?? (["role": "user", "content": params.question.content], false)
         hasAnyFile = hasAnyFile || qHasFile
         payloadMessages.append(qObj)
 
-        if let prefix = params.prefixReply {
-            var prefixBlocks: [[String: Any]] = []
-            for block in prefix.blocks {
-                switch block {
-                case .thinking(_, let t, let sig, _, _, _):
-                    if params.thinkingEnabled && !t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        var b: [String: Any] = ["type": "thinking", "thinking": t]
-                        if let sig { b["signature"] = sig }
-                        prefixBlocks.append(b)
-                    }
-                case .text(_, let t, _, _):
-                    if !t.isEmpty {
-                        prefixBlocks.append(["type": "text", "text": t])
-                    }
-                default:
-                    break
-                }
-            }
-            if !prefixBlocks.isEmpty {
+        if let prefix = params.prefixReply, prefix.canContinueReply {
+            let prefixBlocks = buildAnthropicAssistantBlocks(prefix, isPrefix: true, thinking: params.thinkingEnabled)
+            if prefixBlocks.contains(where: {
+                let text = ($0["text"] ?? $0["thinking"]) as? String ?? ""
+                return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }) {
                 payloadMessages.append(["role": "assistant", "content": prefixBlocks])
             }
         }
@@ -467,8 +487,7 @@ enum AIClient {
             body["thinking"] = ["type": params.thinkingEnabled ? "enabled" : "disabled"]
             let hasDocWithoutSearch = !params.searchEnabled
                 && params.question.files.contains(where: { !$0.isImage })
-                && !params.question.content.contains("http://")
-                && !params.question.content.contains("https://")
+                && params.question.content.range(of: #"https?://"#, options: [.regularExpression, .caseInsensitive]) == nil
             let omitExtended = params.omitExtendedFor1M || hasDocWithoutSearch
             body["safety_check"] = ["level": omitExtended ? "low" : "high"]
             if !omitExtended {
@@ -513,11 +532,23 @@ enum AIClient {
             throw AIClientError.decodingError
         }
         if !(200...299).contains(http.statusCode) {
-            let errText = try await collectErrorText(from: bytes)
-            throw AIClientError.httpError(http.statusCode, errText)
+            let error = AIClientError.httpError(http.statusCode, try await collectErrorText(from: bytes))
+            if let (messageIndex, blockIndex) = error.unsupportedImageIndices(),
+               messageIndex <= questionIndex,
+               let blocks = payloadMessages[messageIndex]["content"] as? [[String: Any]],
+               blocks.indices.contains(blockIndex), blocks[blockIndex]["type"] as? String == "image",
+               let source = blocks[blockIndex]["source"] as? [String: Any],
+               let fileId = source["file_id"] as? String {
+                throw AIClientError.unsupportedImage(historyFileId: messageIndex < questionIndex ? fileId : nil)
+            }
+            throw error.invalidatedFiles(in: payloadMessages) ?? error
+        }
+        guard isEventStream(http) else {
+            throw AIClientError.streamError("服务端没有返回流式回复。")
         }
 
         var currentEventName = ""
+        var sawStopReason = false
         for try await rawLine in bytes.lines {
             try Task.checkCancellation()
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -603,6 +634,7 @@ enum AIClient {
             case "message_delta":
                 if let delta = obj["delta"] as? [String: Any] {
                     let stopReason = delta["stop_reason"] as? String
+                    if let stopReason, !stopReason.isEmpty { sawStopReason = true }
                     let title = delta["title"] as? String
                     continuation.yield(.messageDelta(stopReason: stopReason, title: title))
                 }
@@ -614,19 +646,22 @@ enum AIClient {
                 break
             }
         }
+        if !sawStopReason { throw AIClientError.interruptedStream }
     }
 
-    private static func buildAnthropicUserMessage(_ message: ChatMessage, rejectedFileIds: Set<String>) -> ([String: Any], Bool) {
+    private static func buildAnthropicUserMessage(_ message: ChatMessage, rejectedFileIds: Set<String>) -> ([String: Any], Bool)? {
         let uploadedFiles = message.files.filter { file in
             guard let fid = file.serverId else { return false }
             return !(file.isImage && rejectedFileIds.contains(fid))
         }
         guard !uploadedFiles.isEmpty else {
-            let hadRejectedImage = message.files.contains { file in
-                file.isImage && file.serverId != nil && rejectedFileIds.contains(file.serverId!)
+            let hasRejectedImage = message.files.contains {
+                guard $0.isImage, let id = $0.serverId else { return false }
+                return rejectedFileIds.contains(id)
             }
-            let fallbackText = message.content.isEmpty && hadRejectedImage ? "[图片]" : message.content
-            return (["role": "user", "content": fallbackText], false)
+            guard !message.content.isEmpty || hasRejectedImage else { return nil }
+            let text = message.content.isEmpty ? "[图片]" : message.content
+            return (["role": "user", "content": text], false)
         }
         var blocks: [[String: Any]] = uploadedFiles.compactMap { file in
             guard let fid = file.serverId else { return nil }
@@ -639,6 +674,70 @@ enum AIClient {
             blocks.append(["type": "text", "text": message.content])
         }
         return (["role": "user", "content": blocks], true)
+    }
+
+    private static func buildAnthropicAssistantBlocks(
+        _ message: ChatMessage, isPrefix: Bool = false, thinking: Bool = false, includeReadLinks: Bool = false
+    ) -> [[String: Any]] {
+        if message.blocks.isEmpty, !message.content.isEmpty {
+            return [["type": "text", "text": message.content]]
+        }
+        var blocks: [[String: Any]] = []
+        var text = ""
+        func flushText() {
+            guard !text.isEmpty else { return }
+            let separator = blocks.last?["type"] as? String == "text" ? "\n\n" : ""
+            blocks.append(["type": "text", "text": separator + text])
+            text = ""
+        }
+        let unsignedLinks = includeReadLinks ? Set(message.blocks.compactMap { block -> String? in
+            guard case .webFetchResult(_, let toolUseId, "read_link", let result, let signature) = block,
+                  result.errorCode == nil, signature?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
+            else { return nil }
+            return toolUseId
+        }) : []
+        for block in message.blocks {
+            switch block {
+            case .text(_, let value, _, _):
+                text += value
+            case .thinking(_, let value, let signature, _, _, _):
+                if isPrefix && value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continue }
+                flushText()
+                if isPrefix && thinking {
+                    blocks.append(["type": "thinking", "thinking": value, "signature": signature ?? ""])
+                }
+            case .serverToolUse(_, let info):
+                flushText()
+                if includeReadLinks, info.kind == "read_link", !unsignedLinks.contains(info.id), let url = info.url {
+                    blocks.append(["type": "server_tool_use", "kind": "read_link", "id": info.id,
+                                   "name": info.name, "input": ["action": info.action, "url": url]])
+                }
+            case .webFetchResult(_, let toolUseId, let kind, let result, let signature):
+                flushText()
+                guard includeReadLinks, kind == "read_link", !unsignedLinks.contains(toolUseId) else { continue }
+                var content: [String: Any]
+                if let code = result.errorCode {
+                    content = ["type": "web_fetch_tool_result_error", "error_code": code]
+                } else if let url = result.url {
+                    let document: [String: Any] = [
+                        "type": "document", "title": result.title as Any? ?? NSNull(),
+                        "source": ["type": "text", "media_type": "text/plain", "data": result.documentText ?? ""],
+                    ]
+                    content = ["type": "web_fetch_result", "url": url, "content": document,
+                               "published_at": result.publishedAt as Any? ?? NSNull()]
+                } else {
+                    continue
+                }
+                var resultBlock: [String: Any] = ["type": "web_fetch_tool_result", "tool_use_id": toolUseId,
+                                                  "kind": kind, "content": content]
+                if let signature { resultBlock["signature"] = signature }
+                blocks.append(resultBlock)
+            case .webSearchResult:
+                flushText()
+            }
+        }
+        flushText()
+        return blocks
     }
 
     private static func parseAnthropicStartBlock(_ dict: [String: Any]) -> ReplyBlock? {
@@ -711,7 +810,7 @@ enum AIClient {
                   let content = dict["content"] as? [String: Any]
             else { return nil }
             let contentType = content["type"] as? String
-            let info: WebFetchResultInfo
+            var info: WebFetchResultInfo
             if contentType == "web_fetch_tool_result_error" {
                 info = WebFetchResultInfo(url: nil, title: nil, publishedAt: nil, errorCode: content["error_code"] as? String)
             } else {
@@ -722,6 +821,9 @@ enum AIClient {
                     publishedAt: content["published_at"] as? String,
                     errorCode: nil
                 )
+                if kind == "read_link" {
+                    info.documentText = (inner?["source"] as? [String: Any])?["data"] as? String
+                }
             }
             return .webFetchResult(id: UUID(), toolUseId: toolUseId, kind: kind, result: info, signature: dict["signature"] as? String)
 
@@ -743,16 +845,20 @@ enum AIClient {
         if !trimmedSystem.isEmpty {
             payloadMessages.append(["role": "system", "content": trimmedSystem])
         }
-        for msg in params.history {
-            if msg.role == .user && !msg.content.isEmpty {
-                payloadMessages.append(["role": "user", "content": msg.content])
-            } else if msg.role == .assistant && (msg.status == .done || msg.status == .stopped) {
-                let t = msg.fullTextContent
-                if !t.isEmpty { payloadMessages.append(["role": "assistant", "content": t]) }
-            }
+        for (question, reply) in contextRounds(params.history) where !question.content.isEmpty {
+            payloadMessages.append(["role": "user", "content": question.content])
+            let text = buildAnthropicAssistantBlocks(reply).compactMap { $0["text"] as? String }.joined(separator: "\n")
+            payloadMessages.append(["role": "assistant", "content": text])
         }
         if !params.question.content.isEmpty {
             payloadMessages.append(["role": "user", "content": params.question.content])
+        }
+        if let prefix = params.prefixReply, prefix.canContinueReply {
+            let text = buildAnthropicAssistantBlocks(prefix, isPrefix: true)
+                .compactMap { $0["text"] as? String }.joined(separator: "\n")
+            if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                payloadMessages.append(["role": "assistant", "content": text])
+            }
         }
 
         let body: [String: Any] = [
@@ -777,18 +883,25 @@ enum AIClient {
             let errText = try await collectErrorText(from: bytes)
             throw AIClientError.httpError(http.statusCode, errText)
         }
+        guard isEventStream(http) else {
+            throw AIClientError.streamError("服务端没有返回流式回复。")
+        }
 
         var blockIndex = 0
         var thinkingIdx: Int?
         var textIdx: Int?
         var finishReason: String?
+        var sawDone = false
 
         for try await rawLine in bytes.lines {
             try Task.checkCancellation()
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
             guard line.hasPrefix("data:") else { continue }
             let jsonStr = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
-            if jsonStr == "[DONE]" { break }
+            if jsonStr == "[DONE]" {
+                sawDone = true
+                break
+            }
             guard let data = jsonStr.data(using: .utf8),
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             else { continue }
@@ -830,10 +943,15 @@ enum AIClient {
             }
         }
 
+        guard sawDone || finishReason != nil else { throw AIClientError.interruptedStream }
         if let thIdx = thinkingIdx { continuation.yield(.blockStop(index: thIdx)) }
         if let tIdx = textIdx { continuation.yield(.blockStop(index: tIdx)) }
         let mappedStop = finishReason == "length" ? "max_tokens" : (finishReason == "content_filter" ? "refusal" : "end_turn")
         continuation.yield(.messageDelta(stopReason: mappedStop, title: nil))
+    }
+
+    private static func isEventStream(_ response: HTTPURLResponse) -> Bool {
+        response.value(forHTTPHeaderField: "Content-Type")?.lowercased().contains("text/event-stream") == true
     }
 
     private static func collectErrorText(from bytes: URLSession.AsyncBytes) async throws -> String {

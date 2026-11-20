@@ -445,6 +445,7 @@ final class ChatStore: ObservableObject {
             history: visible,
             question: userMsg,
             prefixReply: nil,
+            latestReminder: assistantMsg.latestReminder,
             settings: settings
         )
     }
@@ -483,6 +484,7 @@ final class ChatStore: ObservableObject {
             history: history,
             question: editedUser,
             prefixReply: nil,
+            latestReminder: assistantMsg.latestReminder,
             settings: settings
         )
     }
@@ -528,6 +530,7 @@ final class ChatStore: ObservableObject {
             history: history,
             question: question,
             prefixReply: nil,
+            latestReminder: assistantMsg.latestReminder,
             settings: settings
         )
     }
@@ -552,6 +555,7 @@ final class ChatStore: ObservableObject {
 
         if let mIdx = sessions[sIdx].messages.firstIndex(where: { $0.id == messageId }) {
             sessions[sIdx].messages[mIdx].status = .streaming
+            sessions[sIdx].messages[mIdx].stopReason = nil
             sessions[sIdx].messages[mIdx].errorMessage = nil
         }
         scheduleSave()
@@ -562,6 +566,7 @@ final class ChatStore: ObservableObject {
             history: history,
             question: question,
             prefixReply: prefixSnapshot,
+            latestReminder: prefixSnapshot.latestReminder,
             settings: settings
         )
     }
@@ -637,7 +642,7 @@ final class ChatStore: ObservableObject {
             saveServerIds(sessionId: sessionId, map: uploadedMap)
         }
 
-        for msg in liveHistory.reversed() where msg.role == .user {
+        for (msg, _) in AIClient.contextRounds(liveHistory).reversed() {
             for file in msg.files where file.serverId == nil && uploadedMap[file.id] == nil {
                 try Task.checkCancellation()
                 guard let url = AttachmentStore.localURL(for: file),
@@ -675,7 +680,7 @@ final class ChatStore: ObservableObject {
         for mIdx in sessions[sIdx].messages.indices where sessions[sIdx].messages[mIdx].role == .user {
             for fIdx in sessions[sIdx].messages[mIdx].files.indices {
                 if let sid = sessions[sIdx].messages[mIdx].files[fIdx].serverId,
-                   (targetServerIds.isEmpty || targetServerIds.contains(sid)),
+                   targetServerIds.contains(sid),
                    AttachmentStore.localURL(for: sessions[sIdx].messages[mIdx].files[fIdx]) != nil {
                     sessions[sIdx].messages[mIdx].files[fIdx].serverId = nil
                     clearedAny = true
@@ -694,6 +699,7 @@ final class ChatStore: ObservableObject {
         history: [ChatMessage],
         question: ChatMessage,
         prefixReply: ChatMessage?,
+        latestReminder: String?,
         settings: SettingsStore
     ) {
         let generation = UUID()
@@ -707,9 +713,8 @@ final class ChatStore: ObservableObject {
         let secret = settings.activeSecret
         let model = settings.effectiveModel
         let customSystemPrompt = settings.systemPrompt
-        let thinkingEnabled = settings.thinkingEnabled
-        let searchEnabled = settings.searchEnabled
-        let reminder = prefixReply?.latestReminder ?? LocationCatalog.createLatestReminder(locale: settings.locale, location: settings.location)
+        let thinkingEnabled = prefixReply?.thinkingEnabled ?? settings.thinkingEnabled
+        let searchEnabled = prefixReply?.searchEnabled ?? settings.searchEnabled
         let initialWantsTitle = sessions.first(where: { $0.id == sessionId })?.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true
 
         activeTask = Task {
@@ -750,7 +755,7 @@ final class ChatStore: ObservableObject {
                         thinkingEnabled: thinkingEnabled,
                         searchEnabled: searchEnabled,
                         wantsTitle: wantsTitle,
-                        latestReminder: reminder,
+                        latestReminder: latestReminder,
                         omitExtendedFor1M: omitExtendedFor1M,
                         rejectedFileIds: rejectedHistoryImageIds
                     )
@@ -837,11 +842,13 @@ final class ChatStore: ObservableObject {
 
                             case .messageDelta(let stopReason, let autoTitle):
                                 if let stopReason { draft.stopReason = stopReason }
-                                if let autoTitle, !autoTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                if wantsTitle, stopReason == "end_turn" || stopReason == "max_tokens",
+                                   let autoTitle, !autoTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                                     pendingTitle = autoTitle.trimmingCharacters(in: .whitespacesAndNewlines)
                                 }
 
                             case .disablePrefix:
+                                receivedContent = true
                                 draft.prefixEnabled = false
                             }
 
@@ -880,28 +887,27 @@ final class ChatStore: ObservableObject {
                 } catch let err as AIClientError where !receivedContent && !omitExtendedFor1M && err.is32kInputLimit {
                     omitExtendedFor1M = true
                     continue
-                } catch let err as AIClientError where !receivedContent && skippedBadImages < maxSkippedBadImages && err.unsupportedImageIndices() != nil {
-                    let candidateIds: [String] = history.flatMap { msg in
-                        msg.role == .user ? msg.files.compactMap { $0.isImage ? $0.serverId : nil } : []
-                    }
-                    if let badId = candidateIds.first(where: { !rejectedHistoryImageIds.contains($0) }) {
-                        rejectedHistoryImageIds.insert(badId)
+                } catch AIClientError.unsupportedImage(let historyFileId) where !receivedContent {
+                    if let historyFileId, skippedBadImages < maxSkippedBadImages,
+                       rejectedHistoryImageIds.insert(historyFileId).inserted {
                         skippedBadImages += 1
                         continue
                     }
-                    setStreamError(sessionId: sessionId, assistantId: assistantId, message: "暂不支持解析该图片，请更换 JPG / PNG / WebP 图片后重试。")
+                    let error = AIClientError.unsupportedImage(historyFileId: historyFileId)
+                    setStreamError(sessionId: sessionId, assistantId: assistantId, message: error.localizedDescription)
                     break
-                } catch let err as AIClientError where !receivedContent && fileRetryAttempt < maxFileRetries && err.isFileInvalidated {
+                } catch AIClientError.invalidatedFiles(let targetIds, let message) where !receivedContent {
                     guard generationID == generation else { return }
-                    let mentioned = Set(err.mentionedFileIds())
-                    if invalidateServerFileIds(sessionId: sessionId, targetServerIds: mentioned) {
+                    if fileRetryAttempt < maxFileRetries,
+                       invalidateServerFileIds(sessionId: sessionId, targetServerIds: targetIds) {
                         let delayMs = 1000 * (1 << fileRetryAttempt)
                         fileRetryAttempt += 1
                         try? await Task.sleep(for: .milliseconds(delayMs))
                         guard generationID == generation else { return }
                         continue
                     }
-                    setStreamError(sessionId: sessionId, assistantId: assistantId, message: err.localizedDescription)
+                    let error = AIClientError.invalidatedFiles(targetIds, message: message)
+                    setStreamError(sessionId: sessionId, assistantId: assistantId, message: error.localizedDescription)
                     break
                 } catch {
                     guard generationID == generation else { return }

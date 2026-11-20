@@ -1,8 +1,8 @@
 import Foundation
 
-/// Pure Swift Store-mode ZIP exporter producing DeepSeek/Nuwa v2 compatible archives
+/// Pure Swift Store-mode ZIP exporter producing DeepSeek/Nuwa v3 compatible archives
 /// (`deepseek_data-YYYY-MM-DD.zip`) with 1:1 parity to chat-demo/src/services/chat/history/toArchive.ts:
-/// - manifest.json first (format_version: 2)
+/// - manifest.json first (export_format_version: 3)
 /// - Topological parent-first message numbering (parent_id < id guaranteed)
 /// - All fragments exported: REQUEST, FILE (w/ export_path), THINK, RESPONSE, TEMPLATE_RESPONSE,
 ///   TOOL_SEARCH, TOOL_OPEN, TOOL_FIND, READ_LINK
@@ -23,11 +23,7 @@ enum DeepSeekZipExporter {
         var addedImagePaths = Set<String>()
 
         // 1. manifest.json (must be first entry per checkArchiveFormat in importArchive.ts)
-        let manifestObj: [String: Any] = [
-            "format_version": 2,
-            "exported_at": iso.string(from: Date()),
-            "source": "nuwa-ios",
-        ]
+        let manifestObj = ["export_format_version": 3]
         entries.append(Entry(path: "manifest.json", data: try JSONSerialization.data(withJSONObject: manifestObj, options: [.prettyPrinted])))
 
         // 2. chat_sessions/<id>.json
@@ -56,7 +52,7 @@ enum DeepSeekZipExporter {
                                let localURL = AttachmentStore.localURL(for: f),
                                let imgData = try? Data(contentsOf: localURL),
                                !imgData.isEmpty {
-                                let safeName = "\(f.id)_\(f.name.replacingOccurrences(of: "/", with: "_"))"
+                                let safeName = "\(f.id)_\(f.name)".replacingOccurrences(of: "/", with: "_")
                                 let zipPath = "chat_sessions/\(sessionIdStr)_files/\(safeName)"
                                 exportPath = zipPath
                                 if !addedImagePaths.contains(zipPath) {
