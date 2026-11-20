@@ -280,19 +280,40 @@ function readableArchiveFragment(fragment: ArchiveFragment): boolean {
   }
 }
 
-function registerArchiveImages(message: ArchiveMessage, sessionId: string, imagePaths: Map<string, string>): void {
+function forEachArchiveImageFile(message: ArchiveMessage, visit: (file: ArchiveFile) => void): void {
   for (const fragment of message.fragments) {
     if (fragment.type !== 'FILE') continue;
     for (const file of fragment.files ?? []) {
-      if (!file.is_image || file.export_path === null) continue;
-      const path = backupPath(file.export_path);
-      if (!path.startsWith(filesPrefix(sessionId)) || path.endsWith('/') ||
-        (imagePaths.has(path) && imagePaths.get(path) !== file.id)) {
-        invalidImages();
-      }
-      imagePaths.set(path, file.id);
+      if (file.is_image) visit(file);
     }
   }
+}
+
+function registerArchiveImages(message: ArchiveMessage, sessionId: string, imagePaths: Map<string, string>): void {
+  forEachArchiveImageFile(message, (file: ArchiveFile): void => {
+    if (file.export_path === null) return;
+    const path = backupPath(file.export_path);
+    if (!path.startsWith(filesPrefix(sessionId)) || path.endsWith('/') ||
+      (imagePaths.has(path) && imagePaths.get(path) !== file.id)) {
+      invalidImages();
+    }
+    imagePaths.set(path, file.id);
+  });
+}
+
+function archiveImagePaths(session: ArchiveSession): Map<string, string> {
+  const paths = new Map<string, string>();
+  for (const message of session.messages) registerArchiveImages(message, session.id, paths);
+  return paths;
+}
+
+function archiveImagesById(origin: ArchiveOrigin, paths: Map<string, string>): Map<string, ArchiveImage> {
+  const images = new Map<string, ArchiveImage>();
+  for (const image of origin.images) {
+    const id = paths.get(image.path);
+    if (id && !images.has(id)) images.set(id, image);
+  }
+  return images;
 }
 
 let recentTemplateArchive = '';
@@ -680,6 +701,15 @@ async function loadArchiveOrigin(context: common.UIAbilityContext, session: Nati
     if (base64.encodeToStringSync(digest.digestSync().data) !== source.digest) return invalidArchive();
     const archived = JSON.parse(text) as ArchiveSession;
     if (archived?.id !== metadata.session.id) return invalidArchive();
+    const images = archiveImagesById(metadata, archiveImagePaths(metadata.session));
+    // Image aliases repaired by a later import live in the current metadata.
+    if (images.size) {
+      for (const message of archived.messages) {
+        forEachArchiveImageFile(message, (file: ArchiveFile): void => {
+          if (!file.export_path) file.export_path = images.get(file.id)?.path ?? null;
+        });
+      }
+    }
     return { session: archived, images: metadata.images };
   });
 }
@@ -918,43 +948,49 @@ function nativeSession(source: ArchiveSession, archiveSize: number): PreparedSes
   };
 }
 
-function addImageAlias(prepared: PreparedSession, image: ArchiveImage, path: string): void {
-  prepared.origin.images.push({ path: path, blobId: image.blobId, bytes: image.bytes, size: image.size,
+function addImageAlias(origin: ArchiveOrigin, image: ArchiveImage, path: string): void {
+  origin.images.push({ path: path, blobId: image.blobId, bytes: image.bytes, size: image.size,
     crc: image.crc, mimeType: image.mimeType, softwareAvifPreview: image.softwareAvifPreview });
 }
 
-function restorePreparedImages(prepared: PreparedSession, images: Map<string, ArchiveImage>): void {
+function restoreArchiveImages(origin: ArchiveOrigin, imagePaths: Map<string, string>, images: Map<string, ArchiveImage>): boolean {
+  const localImages = archiveImagesById(origin, imagePaths);
+  const retainedPaths = new Set(origin.images.map((image: ArchiveImage): string => image.path));
   const availablePaths = new Map<string, string>();
-  prepared.imagePaths.forEach((id: string, path: string): void => {
-    const image = images.get(id);
-    if (image) {
-      addImageAlias(prepared, image, path);
+  let restored = false;
+  imagePaths.forEach((id: string, path: string): void => {
+    if (retainedPaths.has(path)) {
       availablePaths.set(id, path);
+      return;
     }
+    const image = localImages.get(id) ?? images.get(id);
+    if (!image) return;
+    addImageAlias(origin, image, path);
+    availablePaths.set(id, path);
+    restored = true;
   });
-  for (const message of prepared.origin.session.messages) {
-    for (const fragment of message.fragments) {
-      if (fragment.type !== 'FILE') continue;
-      for (const file of fragment.files ?? []) {
-        if (!file.is_image || file.export_path) continue;
+  for (const message of origin.session.messages) {
+    forEachArchiveImageFile(message, (file: ArchiveFile): void => {
+      if (file.export_path) return;
+      let path = availablePaths.get(file.id);
+      if (!path) {
         const image = images.get(file.id);
-        if (!image) continue;
-        let path = availablePaths.get(file.id);
-        if (!path) {
-          const base = filesPrefix(prepared.session.id) + safeFileName(file.id) + '_' + safeFileName(file.file_name);
-          path = backupPath(base);
-          let suffix = 1;
-          while (prepared.imagePaths.has(path)) {
-            path = backupPath(base + '_' + suffix++);
-          }
-          prepared.imagePaths.set(path, file.id);
-          availablePaths.set(file.id, path);
-          addImageAlias(prepared, image, path);
+        if (!image) return;
+        const base = filesPrefix(origin.session.id) + safeFileName(file.id) + '_' + safeFileName(file.file_name);
+        path = backupPath(base);
+        let suffix = 1;
+        while (imagePaths.has(path)) {
+          path = backupPath(base + '_' + suffix++);
         }
-        file.export_path = path;
+        imagePaths.set(path, file.id);
+        availablePaths.set(file.id, path);
+        addImageAlias(origin, image, path);
       }
-    }
+      file.export_path = path;
+      restored = true;
+    });
   }
+  return restored;
 }
 
 export async function decodeChatBackup(bytes: Uint8Array): Promise<NativeConversation[]> {
@@ -1045,7 +1081,7 @@ async function readChatBackup(input: NativeBackupZipInput, context?: common.UIAb
     }
     const imported: NativeConversation[] = [];
     for (const prepared of sessions) {
-      restorePreparedImages(prepared, loadedImages);
+      restoreArchiveImages(prepared.origin, prepared.imagePaths, loadedImages);
       prepared.session.archiveJson = context && prepared.archiveSize > MAX_EMBEDDED_ARCHIVE_BYTES ?
         await retainArchiveOrigin(prepared, context, staged) : JSON.stringify(prepared.origin);
       imported.push(prepared.session);
@@ -1450,6 +1486,30 @@ function sameArchiveSource(first: ArchiveOrigin, second: ArchiveOrigin): boolean
   return second.images.every((image: ArchiveImage): boolean => imageKeys.get(image.path) === retainedImageKey(image));
 }
 
+function restoreMergedArchiveImages(sessions: NativeConversation[], existing: NativeConversation[],
+  imported: NativeConversation[]): void {
+  const images = new Map<string, ArchiveImage>();
+  for (const source of [existing, imported]) {
+    for (const session of source) {
+      const origin = original(session);
+      if (!origin?.images.length) continue;
+      archiveImagesById(origin, archiveImagePaths(origin.session)).forEach((image: ArchiveImage, id: string): void => {
+        if (!images.has(id)) images.set(id, image);
+      });
+    }
+  }
+  if (!images.size) return;
+  for (let index = 0; index < sessions.length; index++) {
+    const session = sessions[index];
+    const origin = original(session);
+    if (origin && restoreArchiveImages(origin, archiveImagePaths(origin.session), images)) {
+      const restored = copyMerged(session, session.id, session.title, session.pinnedAt);
+      restored.archiveJson = JSON.stringify(origin);
+      sessions[index] = restored;
+    }
+  }
+}
+
 export function mergeChatBackup(history: NativeConversationState, imported: NativeConversation[]): NativeBackupMergeResult {
   const sessions = history.sessions.slice();
   const priorArchives = new Map<string, ArchiveOrigin[]>();
@@ -1496,6 +1556,7 @@ export function mergeChatBackup(history: NativeConversationState, imported: Nati
     sessions[index] = copyMerged(existing, existing.id, withPrefix(existing.title, 'N分支·'), existing.pinnedAt);
     sessions.push(copyMerged(incoming, unusedConversationId(sessions), withPrefix(incoming.title, 'D分支·')));
   }
+  restoreMergedArchiveImages(sessions, history.sessions, imported);
   return { history: { sessions: sessions, activeId: history.activeId }, importedCount: total };
 }
 
@@ -1504,25 +1565,21 @@ export async function commitChatBackup(context: common.UIAbilityContext, history
   const merged = mergeChatBackup(history, imported);
   await save(merged.history);
   // Every staged blob ID is unique to this import. Leave potentially committed files intact if the save throws.
-  const acceptedArchives = new Set<string>();
-  for (const session of merged.history.sessions) {
-    if (session.archiveJson) acceptedArchives.add(session.archiveJson);
-  }
-  const unused = new Set<string>();
   const retained = new Set<string>();
+  for (const session of merged.history.sessions) {
+    for (const id of backupImageIds(session.archiveJson)) retained.add(id);
+  }
+  const staged = new Set<string>();
   const avifPreviews = new Set<string>();
   for (const session of imported) {
-    const destination = session.archiveJson && acceptedArchives.has(session.archiveJson) ? retained : unused;
-    for (const id of backupImageIds(session.archiveJson, destination === retained ? avifPreviews : undefined)) {
-      destination.add(id);
-    }
+    for (const id of backupImageIds(session.archiveJson, avifPreviews)) staged.add(id);
   }
-  for (const id of unused) {
+  for (const id of staged) {
     if (!retained.has(id)) await removeBackupImage(context, id);
   }
   // Save history and originals before spending space on optional PNG previews.
   for (const id of avifPreviews) {
-    await writeNativeAvifPreview(backupImagePath(context, id), backupAvifPreviewPath(context, id));
+    if (retained.has(id)) await writeNativeAvifPreview(backupImagePath(context, id), backupAvifPreviewPath(context, id));
   }
   return merged;
 }
