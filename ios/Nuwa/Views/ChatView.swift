@@ -253,6 +253,11 @@ struct ChatView: View {
                     drawerModal: drawerModal,
                     onToggleSidebar: onToggleSidebar
                 )
+                .background(heightReader { height in
+                    if height > 0, abs(headerHeight - height) > 0.5 {
+                        headerHeight = height
+                    }
+                })
             }
             .safeAreaBar(edge: .bottom, spacing: 0) {
                 bottomComposerBar(
@@ -260,6 +265,11 @@ struct ChatView: View {
                     allowComposerPress: allowComposerPress,
                     onToggleSidebar: onToggleSidebar
                 )
+                .background(heightReader { height in
+                    if height > 0, abs(composerHeight - height) > 0.5 {
+                        composerHeight = height
+                    }
+                })
             }
         } else {
             legacyMainSurface(

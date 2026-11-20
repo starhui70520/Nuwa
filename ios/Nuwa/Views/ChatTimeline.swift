@@ -140,8 +140,8 @@ private struct TimelineCollection<Row: View>: UIViewRepresentable {
                 view.topEdgeEffect.isHidden = true
                 view.bottomEdgeEffect.isHidden = true
             }
-            view.applyInsets(top: topInset, bottom: bottomInset)
         }
+        view.applyInsets(top: topInset, bottom: bottomInset)
 
         streamingCoordinator.onLiveRowUpdated = { [weak view] in
             view?.syncStreamingLayout()
@@ -186,9 +186,7 @@ private struct TimelineCollection<Row: View>: UIViewRepresentable {
             input = updated
             guard let dataSource else { return }
 
-            if !updated.usesSystemSafeAreaBars {
-                view.applyInsets(top: updated.topInset, bottom: updated.bottomInset)
-            }
+            view.applyInsets(top: updated.topInset, bottom: updated.bottomInset)
 
             let isStreamingReply = updated.appearance.isGenerating && updated.messages.last?.isStreaming == true
             view.setStreamingState(active: isStreamingReply, lastIndex: updated.messages.count - 1)
@@ -441,17 +439,14 @@ private final class TimelineCollectionView: UICollectionView {
     }
 
     func applyInsets(top: CGFloat, bottom: CGFloat) {
-        guard !usesSystemSafeAreaBars else { return }
         chromeTopInset = max(0, top)
         chromeBottomInset = max(0, bottom)
-        refreshManualInsets()
+        reconcileInsets()
     }
 
     override func safeAreaInsetsDidChange() {
         super.safeAreaInsetsDidChange()
-        if !usesSystemSafeAreaBars {
-            refreshManualInsets()
-        }
+        reconcileInsets()
     }
 
     override func adjustedContentInsetDidChange() {
@@ -466,13 +461,38 @@ private final class TimelineCollectionView: UICollectionView {
         }
     }
 
-    private func refreshManualInsets() {
-        let next = UIEdgeInsets(
-            top: safeAreaInsets.top + chromeTopInset,
-            left: 0,
-            bottom: safeAreaInsets.bottom + chromeBottomInset,
-            right: 0
-        )
+    /// Guarantees the first message NEVER hides behind the floating top header and the last message
+    /// NEVER hides behind the floating composer — whether SwiftUI propagated `.safeAreaBar` into
+    /// `UIView.safeAreaInsets` or `.ignoresSafeArea(.container)` stripped it.
+    private func reconcileInsets() {
+        let next: UIEdgeInsets
+        if usesSystemSafeAreaBars {
+            let windowTop = window?.safeAreaInsets.top ?? safeAreaInsets.top
+            let windowBottom = window?.safeAreaInsets.bottom ?? 0
+            let bottomHardwareOverlap: CGFloat
+            if let window, bounds.height > 0 {
+                let frameInWindow = convert(bounds, to: window)
+                bottomHardwareOverlap = max(0, min(windowBottom, frameInWindow.maxY - (window.bounds.height - windowBottom)))
+            } else {
+                bottomHardwareOverlap = min(windowBottom, safeAreaInsets.bottom)
+            }
+            let requiredTop = windowTop + chromeTopInset
+            let requiredBottom = bottomHardwareOverlap + chromeBottomInset
+            next = UIEdgeInsets(
+                top: max(0, requiredTop - safeAreaInsets.top),
+                left: 0,
+                bottom: max(0, requiredBottom - safeAreaInsets.bottom),
+                right: 0
+            )
+        } else {
+            next = UIEdgeInsets(
+                top: safeAreaInsets.top + chromeTopInset,
+                left: 0,
+                bottom: safeAreaInsets.bottom + chromeBottomInset,
+                right: 0
+            )
+        }
+
         guard abs(contentInset.top - next.top) > 0.5 || abs(contentInset.bottom - next.bottom) > 0.5 else {
             return
         }
@@ -480,7 +500,9 @@ private final class TimelineCollectionView: UICollectionView {
             ? readingPosition(in: visibleViewport)
             : nil
         contentInset = next
-        verticalScrollIndicatorInsets = next
+        if !usesSystemSafeAreaBars {
+            verticalScrollIndicatorInsets = next
+        }
         if disclosureAnchor == nil {
             if followsLatest && !isDragging && !isTracking && !isDecelerating {
                 setOffsetImmediate(bottomOffset)
@@ -523,6 +545,7 @@ private final class TimelineCollectionView: UICollectionView {
         super.didMoveToWindow()
         focusProbe.view?.removeGestureRecognizer(focusProbe)
         window?.addGestureRecognizer(focusProbe)
+        reconcileInsets()
     }
 
     func beginDragging() {
@@ -564,6 +587,7 @@ private final class TimelineCollectionView: UICollectionView {
         }
         if sizeChanged { clearFocusAnchor() }
         laidOutSize = bounds.size
+        if sizeChanged { reconcileInsets() }
         lastAdjustedInset = effectiveInset
 
         if isStreaming && disclosureAnchor == nil && !sizeChanged && !isDragging && !isTracking && !isDecelerating {
