@@ -1,5 +1,8 @@
 import { nativeIconTint } from '../native/NativeIconTint';
 import { NativeMessageCopyButton } from '../native/NativeMessageCopyButton';
+import {
+  NativeDocumentCard, NATIVE_DOCUMENT_CARD_HEIGHT, NATIVE_DOCUMENT_CARD_WIDTH,
+} from '../native/NativeDocumentCard';
 import { common, ConfigurationConstant, wantConstant } from '@kit.AbilityKit';
 import { KeyboardAvoidMode, LengthMetrics } from '@kit.ArkUI';
 import { KeyCode } from '@kit.InputKit';
@@ -2530,6 +2533,7 @@ struct NativeChat {
       blocks: message.prefillBlocks ??
         nativeReplyPrefillBlocks(message.content, message.reasoning, message.thinkingSignature ?? ''),
     };
+    this.stopReadAloud();
     this.resumeReplyInPlace(session, message, config);
   }
 
@@ -2667,6 +2671,7 @@ struct NativeChat {
       if (this.startReply(session, message.parentId, edited)) {
         this.closeMessageEditor();
         this.stopVoice();
+        this.stopReadAloud();
       }
     }
   }
@@ -3018,12 +3023,6 @@ struct NativeChat {
     }
   }
 
-  private attachmentSize(bytes: number): string {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  }
-
   private async openAttachment(item: NativeAttachment): Promise<void> {
     const image = this.attachmentPreview(item);
     if (image) {
@@ -3068,31 +3067,35 @@ struct NativeChat {
   }
 
   @Builder
-  private attachmentTile(item: NativeAttachment, size: number, preview: string) {
-    if (preview) {
-      Image(preview).width(size).height(size).objectFit(ImageFit.Cover).autoResize(true)
-        .borderRadius(12).draggable(false).accessibilityText(item.name)
-        .onClick(() => { void this.openAttachment(item); })
-    } else {
-      Row({ space: 8 }) {
-        Image($r('app.media.native_file')).width(20).height(20).colorFilter(nativeIconTint($r('app.color.native_chat_secondary')))
-        Column({ space: 3 }) {
-          Text(item.name).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).fontSize(this.appFontSize(12))
-            .fontColor($r('app.color.native_chat_primary'))
-          Text(this.attachmentSize(item.size)).fontSize(this.appFontSize(11)).fontColor($r('app.color.native_chat_secondary'))
-        }
-        .layoutWeight(1).alignItems(HorizontalAlign.Start)
-      }
-      .width(148).height(62).padding({ left: 10, right: 10 }).borderRadius(12)
-      .backgroundColor($r('app.color.native_chat_field')).accessibilityText(item.name)
+  private attachmentThumbnail(item: NativeAttachment, size: number, preview: string) {
+    Image(preview).width(size).height(size).objectFit(ImageFit.Cover).autoResize(true)
+      .borderRadius(12).draggable(false).accessibilityText(item.name)
       .onClick(() => { void this.openAttachment(item); })
-    }
   }
 
   @Builder
   private messageAttachmentTile(prompt: NativeConversationMessage, item: NativeAttachment, preview: string) {
+    if (preview) {
+      this.messageImageTile(prompt, item, preview)
+    } else {
+      NativeDocumentCard({
+        name: item.name, bytes: item.size, fontScale: this.appFontScale(), locale: this.settings.locale,
+        status: this.reply()?.uploadingIds.includes(item.id) ? 'uploading' :
+          this.messageUploadFailure(prompt, item) ? 'failed' : 'ready',
+        detail: this.messageUploadFailure(prompt, item)?.detail ?? '',
+        retryable: this.canRetryMessageUpload(prompt, item), openable: item.local,
+        onAction: () => {
+          if (this.messageUploadFailure(prompt, item)) this.retryMessageUpload(prompt, item);
+          else void this.openAttachment(item);
+        },
+      })
+    }
+  }
+
+  @Builder
+  private messageImageTile(prompt: NativeConversationMessage, item: NativeAttachment, preview: string) {
     Stack() {
-      this.attachmentTile(item, this.messageImageSize(prompt), preview)
+      this.attachmentThumbnail(item, this.messageImageSize(prompt), preview)
       if (this.reply()?.uploadingIds.includes(item.id)) {
         Row() { LoadingProgress().width(20).height(20).color(Color.White) }
         .width('100%').height('100%').justifyContent(FlexAlign.Center)
@@ -3118,43 +3121,13 @@ struct NativeChat {
         }
       }
     }
-    .width(preview ? this.messageImageSize(prompt) : 148)
-    .height(preview ? this.messageImageSize(prompt) : 62)
-  }
-
-  @Builder
-  private draftDocumentCard(file: NativeDraftAttachment) {
-    Row({ space: 8 }) {
-      if (file.state === 'uploading') {
-        LoadingProgress().width(18).height(18).color($r('app.color.native_chat_blue'))
-      } else {
-        Image(file.retryable ? $r('app.media.native_retry') : $r('app.media.native_file'))
-          .width(20).height(20).colorFilter(nativeIconTint($r('app.color.native_chat_secondary')))
-      }
-      Column({ space: 3 }) {
-        Text(file.item.name).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).fontSize(this.appFontSize(12))
-          .fontColor($r('app.color.native_chat_primary'))
-        Text(file.state === 'failed' ? file.error : file.state === 'uploading' ? this.label('正在上传', 'Uploading…') :
-          this.attachmentSize(file.item.size))
-          .fontSize(this.appFontSize(11)).fontColor($r('app.color.native_chat_secondary')).maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-      }
-      .layoutWeight(1).alignItems(HorizontalAlign.Start)
-    }
-    .width(148).height(62).padding({ left: 10, right: 21 }).borderRadius(12)
-    .backgroundColor($r('app.color.native_chat_field'))
-    .border({ width: file.state === 'failed' ? 1 : 0, color: $r('app.color.native_chat_error') })
-    .accessibilityText(file.item.name).accessibilityDescription(file.error)
-    .onClick(() => {
-      if (file.retryable) void this.uploadDraftFile(this.history.activeId ?? '', file.item);
-      else if (file.state === 'ready') void this.openAttachment(file.item);
-    })
+    .width(this.messageImageSize(prompt)).height(this.messageImageSize(prompt))
   }
 
   @Builder
   private draftImageCard(file: NativeDraftAttachment, preview: string) {
     Stack() {
-      this.attachmentTile(file.item, 62, preview)
+      this.attachmentThumbnail(file.item, 62, preview)
       if (file.state === 'uploading') {
         Row() { LoadingProgress().width(20).height(20).color(Color.White) }
         .width('100%').height('100%').justifyContent(FlexAlign.Center)
@@ -3190,7 +3163,12 @@ struct NativeChat {
               if (this.attachmentPreview(file.item)) {
                 this.draftImageCard(file, this.attachmentPreview(file.item))
               } else {
-                this.draftDocumentCard(file)
+                NativeDocumentCard({
+                  name: file.item.name, bytes: file.item.size, status: file.state, detail: file.error,
+                  locale: this.settings.locale, fontScale: this.appFontScale(),
+                  editable: true, retryable: file.retryable ?? false,
+                  onAction: () => { void this.uploadDraftFile(this.history.activeId ?? '', file.item); },
+                })
               }
               Row() {
                 this.iconButton($r('app.media.native_close'), this.label('移除附件', "Remove attachment"), () => { this.removeDraftFile(file.item); },
@@ -3199,7 +3177,8 @@ struct NativeChat {
               }
               .margin({ top: 3, right: 3 })
             }
-            .width(this.attachmentPreview(file.item) ? 62 : 148).height(62)
+            .width(this.attachmentPreview(file.item) ? 62 : NATIVE_DOCUMENT_CARD_WIDTH)
+            .height(this.attachmentPreview(file.item) ? 62 : NATIVE_DOCUMENT_CARD_HEIGHT)
           }, (file: NativeDraftAttachment): string => `${file.item.id}:${file.state}`)
         }
         .padding({ left: 12, right: 12 })
@@ -4839,6 +4818,11 @@ struct NativeChat {
       .padding({ top: 2, right: 10, bottom: 2, left: 10 })
   }
 
+  private openSidebarSettings(): void {
+    this.setDrawer(false);
+    this.openSettings();
+  }
+
   @Builder
   private drawer(desktop: boolean = false) {
     Column() {
@@ -4949,22 +4933,39 @@ struct NativeChat {
         }
         .height(52).width('100%')
       } else {
-        Button({ type: ButtonType.Normal }) {
-          Row({ space: 10 }) {
-            Image($r('app.media.native_welcome_logo')).width(31).height(31).borderRadius(10).draggable(false)
-            Text(this.accountToken() ? this.account?.label ?? this.label('DeepSeek API 账号', "DeepSeek API account") : this.label('设置', "Settings"))
-              .fontSize(this.appFontSize(15)).layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-              .fontColor($r('app.color.native_chat_primary'))
-            if (this.balance) {
-              Text(this.balance.formatted).fontSize(this.appFontSize(12)).fontColor($r('app.color.native_chat_blue_text'))
-                .onClick(() => { void this.openLink('https://platform.deepseek.com/top_up'); })
+        Row({ space: 10 }) {
+          Button({ type: ButtonType.Normal }) {
+            Row({ space: 10 }) {
+              Image($r('app.media.native_welcome_logo')).width(31).height(31).borderRadius(10)
+                .draggable(false).accessibilityLevel('no')
+              Text(this.accountToken() ?
+                this.account?.label ?? this.label('DeepSeek API 账号', 'DeepSeek API account') : this.label('设置', 'Settings'))
+                .fontSize(this.appFontSize(15)).layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+                .fontColor($r('app.color.native_chat_primary'))
             }
+            .width('100%').padding({ left: 6 })
+          }
+          .height(52).layoutWeight(1).padding(0).backgroundColor(Color.Transparent)
+          .accessibilityDescription(this.label('打开设置', 'Open settings'))
+          .onClick(() => { this.openSidebarSettings(); })
+
+          if (this.balance) {
+            Button({ type: ButtonType.Normal }) {
+              Text(this.balance.formatted).fontSize(this.appFontSize(12)).fontColor($r('app.color.native_chat_blue_text'))
+            }
+            .height(52).padding(0).backgroundColor(Color.Transparent)
+            .accessibilityText(this.label(`账户余额 ${this.balance.formatted}，前往充值`,
+              `Account balance ${this.balance.formatted}. Top up`))
+            .onClick(() => { void this.openLink('https://platform.deepseek.com/top_up'); })
+          }
+
+          Row() {
             Text('⋯').fontSize(18).fontColor($r('app.color.native_chat_secondary'))
           }
-          .width('100%').padding({ left: 6, right: 6 })
+          .height(52).padding({ right: 6 }).focusable(false).accessibilityLevel('no-hide-descendants')
+          .onClick(() => { this.openSidebarSettings(); })
         }
-        .height(52).width('100%').padding(0).backgroundColor(Color.Transparent)
-        .onClick(() => { this.setDrawer(false); this.openSettings(); })
+        .height(52).width('100%')
       }
     }
     .width(desktop ? 261 : this.drawerWidth()).height('100%').padding({ left: 16, right: 10, top: 14, bottom: 8 })

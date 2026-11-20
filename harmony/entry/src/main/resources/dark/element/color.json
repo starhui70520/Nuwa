@@ -73,6 +73,10 @@
       "value": "#1FFFFFFF"
     },
     {
+      "name": "native_attachment_border",
+      "value": "#1FFFFFFF"
+    },
+    {
       "name": "native_chat_table_header_border",
       "value": "#29FFFFFF"
     },
