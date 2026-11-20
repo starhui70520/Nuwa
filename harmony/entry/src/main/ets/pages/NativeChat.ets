@@ -1923,15 +1923,21 @@ struct NativeChat {
         continue;
       }
       const files: NativeChatFileRef[] = [];
+      let rejectedImageRemoved = false;
       if (message.role === 'user') {
         for (const item of message.files ?? []) {
           const file = prepared.get(item.id);
-          if (file && !rejectedImages.has(file.serverId)) {
+          if (!file) continue;
+          if (file.isImage && rejectedImages.has(file.serverId)) {
+            rejectedImageRemoved = true;
+          } else {
             files.push(file);
           }
         }
       }
-      if (message.content || files.length) {
+      // Keep an answered image-only turn in context after filtering a rejected image.
+      const content = message.content || (rejectedImageRemoved && files.length === 0 ? '[图片]' : '');
+      if (content || files.length) {
         const reminder = message.id === prompt?.id ? reply.message.latestReminder : next?.latestReminder;
         if (message.role === 'user' && reminder && reminder !== previousReminder && usesFiles) {
           messages.push({ role: 'latest_reminder', content: reminder });
@@ -1939,7 +1945,7 @@ struct NativeChat {
         }
         const readLinks = message.role === 'assistant' ? message.readLinks : undefined;
         messages.push({
-          role: message.role, content: message.content, files,
+          role: message.role, content, files,
           readLinks: usesFiles ? readLinks?.filter((link: NativeReadLink): boolean =>
             useNativeReadLink(link, reply.attachmentBinding, config.baseUrl, !!config.accountToken)) : readLinks,
           prefillBlocks: message.role === 'assistant' ? message.prefillBlocks : undefined,
@@ -5094,7 +5100,8 @@ struct NativeChat {
         this.drawerDrag = 0;
       }
     })
-    .parallelGesture(
+    // Leave horizontal drags on scrollable message content to the child first.
+    .gesture(
       PanGesture({ direction: PanDirection.Horizontal, distance: 14 })
         .onActionStart((event: GestureEvent) => { this.touchStart = event.fingerList[0]?.globalX ?? this.viewportWidth; })
         .onActionUpdate((event: GestureEvent) => {
