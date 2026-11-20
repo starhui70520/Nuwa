@@ -1,5 +1,6 @@
 import { common } from '@kit.AbilityKit';
 import { url, util } from '@kit.ArkTS';
+import { BusinessError } from '@kit.BasicServicesKit';
 import { fileIo, fileUri, picker } from '@kit.CoreFileKit';
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { existingNativeAvifPreview, writeNativeAvifPreview } from './NativeAvifPreview';
@@ -31,6 +32,7 @@ const MANIFEST = 'manifest.json';
 const SESSION_INDEX = 'chat_session_index.json';
 const USER = 'user.json';
 const VERSION = 3;
+const BACKUP_ORIGINAL_NOT_FOUND = 13900002;
 export const NATIVE_BACKUP_UNREADABLE_CONVERSATION = 'NATIVE_BACKUP_UNREADABLE_CONVERSATION';
 const MAX_INLINE_IMAGE_BYTES = 16 * 1024 * 1024;
 const MAX_PREVIEW_BYTES = 1024 * 1024;
@@ -1609,6 +1611,46 @@ export class NativeChatBackup {
     return this.importFromUri(selected[0], context, onVerified, onProgress);
   }
 
+  private originalImagePath(context: common.UIAbilityContext, image: BackupImageSource): string {
+    if (image.retained?.blobId) return backupImagePath(context, image.retained.blobId);
+    return image.live ? this.attachments.originalPath(context, image.live) : '';
+  }
+
+  private async hasOriginalImage(context: common.UIAbilityContext, image: BackupImageSource): Promise<boolean> {
+    if (image.retained?.bytes !== undefined) return true;
+    const path = this.originalImagePath(context, image);
+    if (!path) return false;
+    try {
+      await fileIo.stat(path);
+      return true;
+    } catch (error) {
+      if ((error as BusinessError).code === BACKUP_ORIGINAL_NOT_FOUND) return false;
+      throw error as Error;
+    }
+  }
+
+  private async collectExportImages(context: common.UIAbilityContext, file: ArchiveSession,
+    candidates: Map<string, BackupImageSource>, images: Map<string, BackupImageSource>): Promise<void> {
+    const references = new Map<string, ArchiveFile[]>();
+    for (const message of file.messages) {
+      forEachArchiveImageFile(message, (attachment: ArchiveFile): void => {
+        const path = attachment.export_path;
+        if (!path) return;
+        const entries = references.get(path) ?? [];
+        entries.push(attachment);
+        references.set(path, entries);
+      });
+    }
+    for (const path of references.keys()) {
+      const image = candidates.get(path);
+      if (image && await this.hasOriginalImage(context, image)) {
+        images.set(path, image);
+      } else {
+        for (const attachment of references.get(path) ?? []) attachment.export_path = null;
+      }
+    }
+  }
+
   private async writeImage(context: common.UIAbilityContext, writer: NativeBackupZipWriter, name: string,
     image: BackupImageSource): Promise<void> {
     const retained = image.retained;
@@ -1625,12 +1667,11 @@ export class NativeChatBackup {
       return;
     }
     const live = image.live;
-    const uri = retained?.blobId ? backupImagePath(context, retained.blobId) :
-      (live ? this.attachments.previewUri(context, live) : '');
-    if (!uri) {
+    const path = this.originalImagePath(context, image);
+    if (!path) {
       throw new Error('本地图片原件未能读取：' + (live?.name ?? name));
     }
-    await withBackupInput<void>(uri, async (input: NativeBackupZipInput): Promise<void> => {
+    await withBackupInput<void>(path, async (input: NativeBackupZipInput): Promise<void> => {
       if (input.size !== (retained?.size ?? live?.size)) {
         throw new Error('图片原件大小无效。');
       }
@@ -1651,7 +1692,9 @@ export class NativeChatBackup {
       await writer.addJson(MANIFEST, manifest);
       for (const session of sessions) {
         const previous = await loadArchiveOrigin(context, session);
-        const file = archiveSession(session, images, locale, previous);
+        const candidates = new Map<string, BackupImageSource>();
+        const file = archiveSession(session, candidates, locale, previous);
+        await this.collectExportImages(context, file, candidates, images);
         await writer.addJson(sessionPath(file.id), file);
         index.push(summaryEntry(file));
       }
