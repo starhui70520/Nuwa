@@ -154,12 +154,8 @@ export class HarmonySpeechRecognition {
     const engine = options?.engine ?? 'native';
     const english = (options?.locale ?? '').toLowerCase().startsWith('en');
     session.route = engine === 'native' ? undefined : resolveHarmonySpeechRoute(options, false);
-    if (engine === 'cloud' && !session.route) {
-      this.fail(session, 'key-required');
-      return;
-    }
     const nativeAvailable = canIUse('SystemCapability.AI.SpeechRecognizer');
-    const offlineEnglish = english && engine !== 'cloud' && !session.route;
+    const offlineEnglish = english && !session.route;
     if (!offlineEnglish && !nativeAvailable && !session.route) {
       this.fail(session, 'unavailable');
       return;
@@ -180,7 +176,7 @@ export class HarmonySpeechRecognition {
 
     if (offlineEnglish) {
       await this.openEnglishRecorder(session, context);
-    } else if (engine === 'cloud' || !nativeAvailable || (english && session.route)) {
+    } else if (session.route && (engine === 'cloud' || english || !nativeAvailable)) {
       await this.openCloudRecorder(session);
     } else {
       await this.openDevice(session);

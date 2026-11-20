@@ -74,17 +74,13 @@ export class HarmonyTextToSpeech {
     }
     const mode = options?.engine ?? 'native';
     const cloudRoute = mode === 'native' ? undefined : resolveHarmonySpeechRoute(options, true);
-    if (mode === 'cloud' && !cloudRoute) {
-      this.emit(id, 'error', 'key-required');
-      return;
-    }
     const playback: Playback = {
       id: id, text: text, locale: locale.toLowerCase().startsWith('en') ? 'en-US' : 'zh-CN',
       voice: options?.voice ?? 'stella', chunks: chunks, nextChunk: 0, requestId: '',
       started: false, context, cloudRoute: cloudRoute,
     };
     this.active = playback;
-    if (mode === 'cloud') {
+    if (mode === 'cloud' && cloudRoute) {
       void this.startCloud(playback);
     } else {
       this.playNext();

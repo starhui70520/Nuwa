@@ -6,7 +6,6 @@ import { url, util } from '@kit.ArkTS';
 import { http } from '@kit.NetworkKit';
 
 const PLATFORM_ORIGIN: string = 'https://platform.deepseek.com';
-const API_ORIGIN: string = 'https://api.deepseek.com';
 const CLIENT_VERSION: string = '0.2.2';
 const DEVICE_PREFERENCES: string = 'nuwa_native_account';
 
@@ -20,11 +19,10 @@ export interface NativeDeepSeekAccount {
   label: string;
 }
 
-export interface NativeDeepSeekBalance {
-  currency: string;
-  totalBalance: string;
-  formatted: string;
-  isAvailable: boolean;
+export class NativeDeepSeekExchangeError extends Error {
+  constructor(message: string) {
+    super(message);
+  }
 }
 
 interface PlatformUserProfile {
@@ -77,16 +75,6 @@ interface AuthExchangeBody {
 interface AuthCancelBody {
   authorize_id: string;
   code_verifier: string;
-}
-
-interface BalanceInfo {
-  currency?: string;
-  total_balance?: string | number;
-}
-
-interface BalancePayload {
-  balance_infos?: BalanceInfo[];
-  is_available?: boolean;
 }
 
 type AuthMethod = 'auth_init' | 'auth_exchange' | 'auth_cancel';
@@ -165,33 +153,6 @@ const readQueryParameter = (target: string, name: string): string => {
   return '';
 };
 
-const normalizedBalance = (currency: string, total: string | number, available: boolean): NativeDeepSeekBalance | null => {
-  const numeric = typeof total === 'number' ? total : Number(total.trim());
-  if (!Number.isFinite(numeric)) {
-    return null;
-  }
-  let amount: string;
-  if (typeof total === 'string' && /^-?\d+\.\d{2}$/.test(total.trim())) {
-    amount = total.trim();
-  } else if (numeric !== 0 && Math.abs(numeric) < 0.01) {
-    amount = numeric.toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
-  } else {
-    amount = numeric.toFixed(2);
-  }
-  const upperCurrency = currency.trim().toUpperCase();
-  let formatted: string;
-  if (upperCurrency === 'CNY' || upperCurrency === 'RMB') {
-    formatted = `¥${amount}`;
-  } else if (upperCurrency === 'USD') {
-    formatted = `$${amount}`;
-  } else if (upperCurrency === 'EUR') {
-    formatted = `€${amount}`;
-  } else {
-    formatted = `${upperCurrency} ${amount}`;
-  }
-  return { currency: upperCurrency, totalBalance: amount, formatted, isAvailable: available };
-};
-
 /** Native PKCE account transport. Both the embedded page and browser use the validated authorizeUrl. */
 export class NativeDeepSeekAccountController {
   private locale: string = 'zh_CN';
@@ -221,15 +182,17 @@ export class NativeDeepSeekAccountController {
     this.exchanging = false;
     const port = 30000 + Math.floor(Math.random() * 25000);
     this.redirectUri = browserCallback ?? `http://127.0.0.1:${port}/oauth/callback`;
-    const body: AuthInitBody = {
-      code_challenge: await sha256Base64Url(this.verifier),
-      code_challenge_method: 'S256',
-      state: this.state,
-      redirect_uri: this.redirectUri,
-      locale: this.locale,
-      login_source: 'web',
-    };
     try {
+      const challenge = await sha256Base64Url(this.verifier);
+      if (attempt !== this.generation) throw new Error('登录已取消');
+      const body: AuthInitBody = {
+        code_challenge: challenge,
+        code_challenge_method: 'S256',
+        state: this.state,
+        redirect_uri: this.redirectUri,
+        locale: this.locale,
+        login_source: 'web',
+      };
       const result = await this.postPlatform('auth_init', JSON.stringify(body), attempt);
       if (attempt !== this.generation) {
         throw new Error('登录已取消');
@@ -285,15 +248,17 @@ export class NativeDeepSeekAccountController {
       this.exchanging = false;
       throw new Error('登录上下文不可用');
     }
-    const body: AuthExchangeBody = {
-      code: code,
-      code_verifier: this.verifier,
-      redirect_uri: this.redirectUri,
-      device_id: await this.getDeviceId(context),
-      device_model: deviceInfo.marketName || 'HarmonyOS',
-      os_version: deviceInfo.osFullName || 'HarmonyOS',
-    };
     try {
+      const deviceId = await this.getDeviceId(context);
+      if (attempt !== this.generation) return null;
+      const body: AuthExchangeBody = {
+        code: code,
+        code_verifier: this.verifier,
+        redirect_uri: this.redirectUri,
+        device_id: deviceId,
+        device_model: deviceInfo.marketName || 'HarmonyOS',
+        os_version: deviceInfo.osFullName || 'HarmonyOS',
+      };
       const result = await this.postPlatform('auth_exchange', JSON.stringify(body), attempt);
       if (attempt !== this.generation) {
         return null;
@@ -307,10 +272,9 @@ export class NativeDeepSeekAccountController {
       this.clearFlow();
       return account;
     } catch (error) {
-      if (attempt === this.generation) {
-        this.exchanging = false;
-      }
-      throw error instanceof Error ? error : new Error('换取 DeepSeek 账号令牌失败');
+      if (attempt !== this.generation) return null;
+      this.exchanging = false;
+      throw new NativeDeepSeekExchangeError(error instanceof Error ? error.message : '换取 DeepSeek 账号令牌失败');
     }
   }
 
@@ -352,73 +316,6 @@ export class NativeDeepSeekAccountController {
       });
     } catch {
       // Local logout should not depend on a remote revocation request succeeding.
-    } finally {
-      request.destroy();
-    }
-  }
-
-  async fetchBalance(token: string, locale: string): Promise<NativeDeepSeekBalance | null> {
-    if (!token) {
-      return null;
-    }
-    const request = http.createHttp();
-    try {
-      const headers: Record<string, string> = {};
-      headers['x-dsh-auth-token'] = token;
-      const response = await request.request(`${API_ORIGIN}/user/balance`, {
-        method: http.RequestMethod.GET,
-        header: headers,
-        maxRedirects: 0,
-        connectTimeout: 10000,
-        readTimeout: 10000,
-        expectDataType: http.HttpDataType.STRING,
-      });
-      if (response.responseCode < 200 || response.responseCode >= 300) {
-        return null;
-      }
-      const raw = typeof response.result === 'string' ? response.result : JSON.stringify(response.result);
-      const payload = JSON.parse(raw) as BalancePayload;
-      const infos = payload.balance_infos;
-      if (!infos || infos.length === 0) {
-        return null;
-      }
-      const candidates: BalanceInfo[] = [];
-      for (let index = 0; index < infos.length; index++) {
-        const item = infos[index];
-        if (item.currency && (typeof item.total_balance === 'string' || typeof item.total_balance === 'number')) {
-          candidates.push(item);
-        }
-      }
-      if (candidates.length === 0) {
-        return null;
-      }
-      let positive: BalanceInfo[] = [];
-      for (let index = 0; index < candidates.length; index++) {
-        const item = candidates[index];
-        const total = item.total_balance as string | number;
-        const numeric = typeof total === 'number' ? total : Number(total.trim());
-        if (Number.isFinite(numeric) && numeric > 0) {
-          positive.push(item);
-        }
-      }
-      const selection = positive.length > 0 ? positive : candidates;
-      const preferred = locale.toLowerCase().startsWith('zh') ? 'CNY' : 'USD';
-      let selected = selection[0];
-      for (let index = 0; index < selection.length; index++) {
-        if (selection[index].currency?.trim().toUpperCase() === preferred) {
-          selected = selection[index];
-          break;
-        }
-      }
-      if (!selected.currency || selected.total_balance === undefined) {
-        return null;
-      }
-      const numeric = typeof selected.total_balance === 'number'
-        ? selected.total_balance : Number(selected.total_balance.trim());
-      const available = typeof payload.is_available === 'boolean' ? payload.is_available : numeric > 0;
-      return normalizedBalance(selected.currency, selected.total_balance, available);
-    } catch {
-      return null;
     } finally {
       request.destroy();
     }

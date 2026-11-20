@@ -1,8 +1,15 @@
 import { url } from '@kit.ArkTS';
 import { http } from '@kit.NetworkKit';
-import { NativeDeepSeekBalance } from './NativeDeepSeekAccount';
 
 const DEFAULT_API_ORIGIN: string = 'https://api.deepseek.com';
+const DEFAULT_RETRY_AFTER_MS: number = 15000;
+
+export interface NativeDeepSeekBalance {
+  currency: string;
+  totalBalance: string;
+  formatted: string;
+  isAvailable: boolean;
+}
 
 type JsonRecord = Record<string, Object>;
 
@@ -87,27 +94,80 @@ function normalizeOrigin(baseUrl: string): NormalizedProviderBase | null {
   }
 }
 
-async function getJson(origin: string, path: string, apiKey: string): Promise<Object | null> {
-  const request = http.createHttp();
-  try {
-    const response = await request.request(`${origin}${path}`, {
-      method: http.RequestMethod.GET,
-      header: { Authorization: `Bearer ${apiKey}` },
-      usingCache: false,
-      connectTimeout: 10000,
-      readTimeout: 10000,
-      expectDataType: http.HttpDataType.STRING,
-      maxRedirects: 0,
-    });
-    if (response.responseCode < 200 || response.responseCode >= 300) {
-      return null;
+function retryAfterMs(headers: Object): number {
+  const fields = asRecord(headers);
+  if (!fields) return DEFAULT_RETRY_AFTER_MS;
+  for (const name of Object.keys(fields)) {
+    if (name.toLowerCase() !== 'retry-after') continue;
+    const raw = fields[name];
+    const value = Array.isArray(raw) ? (raw as Object[])[0] : raw;
+    if (typeof value !== 'string' && typeof value !== 'number') break;
+    const retry = String(value).trim();
+    const delay = /^\d+$/.test(retry) ? Number(retry) * 1000 : Date.parse(retry) - Date.now();
+    if (Number.isFinite(delay)) return Math.max(1000, delay);
+    break;
+  }
+  return DEFAULT_RETRY_AFTER_MS;
+}
+
+export class NativeBalanceRequest {
+  private request?: http.HttpRequest;
+  private cancelled: boolean = false;
+  retryAfterMs: number = 0;
+
+  async fetch(baseUrl: string, apiKey: string, accountToken: string, locale: string): Promise<NativeDeepSeekBalance | null> {
+    const token = accountToken.trim();
+    if (token) {
+      if (/[\r\n]/.test(token)) return null;
+      const header: Record<string, string> = {};
+      header['x-dsh-auth-token'] = token;
+      return parseDeepSeekBalance(await this.getJson(DEFAULT_API_ORIGIN, '/user/balance', header), locale);
     }
-    const raw = typeof response.result === 'string' ? response.result : JSON.stringify(response.result);
-    return JSON.parse(raw) as Object;
-  } catch {
-    return null;
-  } finally {
-    request.destroy();
+    return fetchNativeProviderBalance(this, baseUrl, apiKey, locale);
+  }
+
+  cancel(): void {
+    this.cancelled = true;
+    const request = this.request;
+    this.request = undefined;
+    if (request) this.release(request);
+  }
+
+  async getJson(origin: string, path: string, header: Record<string, string>): Promise<Object | null> {
+    if (this.cancelled || this.retryAfterMs) return null;
+    let request: http.HttpRequest | undefined;
+    try {
+      request = http.createHttp();
+      this.request = request;
+      const response = await request.request(`${origin}${path}`, {
+        method: http.RequestMethod.GET,
+        header: header,
+        usingCache: false,
+        connectTimeout: 10000,
+        readTimeout: 10000,
+        expectDataType: http.HttpDataType.STRING,
+        maxRedirects: 0,
+      });
+      if (response.responseCode === 429) this.retryAfterMs = retryAfterMs(response.header);
+      if (response.responseCode < 200 || response.responseCode >= 300) return null;
+      const raw = typeof response.result === 'string' ? response.result : JSON.stringify(response.result);
+      return JSON.parse(raw) as Object;
+    } catch {
+      return null;
+    } finally {
+      if (request && this.request === request) {
+        this.request = undefined;
+        this.release(request);
+      }
+    }
+  }
+
+  private release(request: http.HttpRequest): void {
+    try {
+      request.destroy();
+    } catch {
+      // The system can close a request while the page is cancelling it.
+    }
   }
 }
 
@@ -163,7 +223,8 @@ function toYmd(timestamp: number): string {
  * on that HTTPS origin, disables redirects, and returns null for unsupported or
  * unavailable provider endpoints.
  */
-export async function fetchNativeProviderBalance(
+async function fetchNativeProviderBalance(
+  request: NativeBalanceRequest,
   baseUrl: string,
   apiKey: string,
   locale: string,
@@ -177,8 +238,10 @@ export async function fetchNativeProviderBalance(
     return null;
   }
   const base = normalized.base;
+  const header: Record<string, string> = {};
+  header['Authorization'] = `Bearer ${key}`;
 
-  const deepSeek = await getJson(base, '/user/balance', key);
+  const deepSeek = await request.getJson(base, '/user/balance', header);
   const directBalance = parseDeepSeekBalance(deepSeek, locale);
   if (directBalance) {
     return directBalance;
@@ -186,7 +249,7 @@ export async function fetchNativeProviderBalance(
 
   if (normalized.hostname.includes('openrouter.ai')) {
     const creditsPath = normalized.pathname.endsWith('/api') ? '/v1/credits' : '/api/v1/credits';
-    const payload = asRecord(await getJson(base, creditsPath, key));
+    const payload = asRecord(await request.getJson(base, creditsPath, header));
     const data = payload && asRecord(payload.data) ? asRecord(payload.data) : payload;
     if (!data) {
       return null;
@@ -201,7 +264,7 @@ export async function fetchNativeProviderBalance(
   }
 
   if (normalized.hostname.includes('siliconflow')) {
-    const payload = asRecord(await getJson(base, '/v1/user/info', key));
+    const payload = asRecord(await request.getJson(base, '/v1/user/info', header));
     const data = payload && asRecord(payload.data) ? asRecord(payload.data) : payload;
     if (!data || (typeof data.totalBalance !== 'string' && typeof data.totalBalance !== 'number')) {
       return null;
@@ -213,7 +276,7 @@ export async function fetchNativeProviderBalance(
     return buildBalance('CNY', data.totalBalance as string | number, amount > 0);
   }
 
-  const subscription = asRecord(await getJson(base, '/v1/dashboard/billing/subscription', key));
+  const subscription = asRecord(await request.getJson(base, '/v1/dashboard/billing/subscription', header));
   if (!subscription || typeof subscription.hard_limit_usd !== 'number' ||
     !Number.isFinite(subscription.hard_limit_usd) || subscription.hard_limit_usd <= 0 ||
     subscription.hard_limit_usd >= 10_000_000) {
@@ -223,7 +286,7 @@ export async function fetchNativeProviderBalance(
   const startDate = toYmd(now - 99 * 86_400_000);
   const endDate = toYmd(now + 86_400_000);
   const usagePath = `/v1/dashboard/billing/usage?start_date=${startDate}&end_date=${endDate}`;
-  const usage = asRecord(await getJson(base, usagePath, key));
+  const usage = asRecord(await request.getJson(base, usagePath, header));
   if (!usage || typeof usage.total_usage !== 'number' || !Number.isFinite(usage.total_usage)) {
     return null;
   }
