@@ -2,12 +2,12 @@ import { common } from '@kit.AbilityKit';
 import { util } from '@kit.ArkTS';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { fileIo, statfs } from '@kit.CoreFileKit';
+import { NATIVE_AVIF_PREVIEW_SUFFIX } from './NativeAvifPreview';
 import { NativeBackupZipInput, NativeBackupZipStreamEntry } from './NativeBackupZip';
 import { ensureNativeDirectory } from './NativeFileSystem';
 
 const IO_CHUNK = 256 * 1024;
 const IMAGE_DIRECTORY = 'nuwa-history-images';
-const AVIF_PREVIEW_SUFFIX = '.avif-preview.png';
 const PRUNE_AFTER_MS = 24 * 60 * 60 * 1_000;
 const FILE_SYSTEM_FULL = 13900025;
 
@@ -57,7 +57,7 @@ export function backupImagePath(context: common.UIAbilityContext, id: string): s
 }
 
 export function backupAvifPreviewPath(context: common.UIAbilityContext, id: string): string {
-  return backupImagePath(context, id) + AVIF_PREVIEW_SUFFIX;
+  return backupImagePath(context, id) + NATIVE_AVIF_PREVIEW_SUFFIX;
 }
 
 async function readExactly(fd: number, offset: number, length: number): Promise<Uint8Array> {
@@ -190,9 +190,9 @@ export async function pruneBackupImages(context: common.UIAbilityContext, retain
     const id = name.split('.')[0];
     if (!validBlobId(id)) continue;
     const suffix = name.slice(id.length);
-    const temporary = suffix.startsWith(AVIF_PREVIEW_SUFFIX + '.') && suffix.endsWith('.tmp') &&
-      validBlobId(suffix.slice(AVIF_PREVIEW_SUFFIX.length + 1, -4));
-    if ((!temporary && retained.has(id)) || (suffix && suffix !== AVIF_PREVIEW_SUFFIX && !temporary)) {
+    const temporary = suffix.startsWith(NATIVE_AVIF_PREVIEW_SUFFIX + '.') && suffix.endsWith('.tmp') &&
+      validBlobId(suffix.slice(NATIVE_AVIF_PREVIEW_SUFFIX.length + 1, -4));
+    if ((!temporary && retained.has(id)) || (suffix && suffix !== NATIVE_AVIF_PREVIEW_SUFFIX && !temporary)) {
       continue;
     }
     const path = directory + '/' + name;

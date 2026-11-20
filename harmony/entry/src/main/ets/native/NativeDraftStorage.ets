@@ -38,6 +38,7 @@ function validAttachment(item: NativeAttachment): boolean {
     item.createdAt <= 8_640_000_000_000_000 && (item.serverId === null || typeof item.serverId === 'string') &&
     (item.serverBinding === undefined || typeof item.serverBinding === 'string') &&
     (item.archiveId === undefined || (typeof item.archiveId === 'string' && !!item.archiveId)) &&
+    (item.nativeAvifPreview === undefined || typeof item.nativeAvifPreview === 'boolean') &&
     typeof item.local === 'boolean' && (!item.local || LOCAL_ATTACHMENT_ID.test(item.id));
 }
 
@@ -45,7 +46,7 @@ function storedAttachment(item: NativeAttachment): NativeAttachment {
   return {
     id: item.id, name: item.name, size: item.size, isImage: item.isImage, mimeType: item.mimeType,
     purpose: item.purpose, createdAt: item.createdAt, serverId: item.serverId, serverBinding: item.serverBinding,
-    archiveId: item.archiveId, local: item.local,
+    archiveId: item.archiveId, nativeAvifPreview: item.nativeAvifPreview, local: item.local,
   };
 }
 

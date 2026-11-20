@@ -2,7 +2,7 @@ import { common } from '@kit.AbilityKit';
 import { url, util } from '@kit.ArkTS';
 import { fileIo, fileUri, picker } from '@kit.CoreFileKit';
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
-import { writeNativeAvifPreview } from './NativeAvifPreview';
+import { existingNativeAvifPreview, writeNativeAvifPreview } from './NativeAvifPreview';
 import {
   attachmentMime, attachmentPurpose, attachmentRasterMime, attachmentUploadImageMime, fileAttachmentRasterMime,
   isArchiveRasterPreviewMime, NativeAttachment, NativeChatAttachments,
@@ -725,14 +725,12 @@ export function importedAttachmentPreview(session: NativeConversation, item: Nat
   }
   try {
     if (context && image.blobId && image.size !== undefined && image.size > 0) {
+      const originalPath = backupImagePath(context, image.blobId);
       if (isArchiveRasterPreviewMime(image.mimeType ?? '')) {
-        return fileUri.getUriFromPath(backupImagePath(context, image.blobId));
+        return fileUri.getUriFromPath(originalPath);
       }
-      const preview = backupAvifPreviewPath(context, image.blobId);
-      if (fileIo.accessSync(preview)) {
-        const stat = fileIo.statSync(preview);
-        if (stat.isFile() && stat.size > 0) return fileUri.getUriFromPath(preview);
-      }
+      const preview = existingNativeAvifPreview(originalPath);
+      if (preview) return fileUri.getUriFromPath(preview);
     }
     if (image.bytes && image.bytes.length <= Math.ceil(MAX_PREVIEW_BYTES / 3) * 4) {
       const bytes = base64.decodeSync(image.bytes);

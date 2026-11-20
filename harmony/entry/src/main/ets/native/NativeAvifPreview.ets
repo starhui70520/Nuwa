@@ -5,8 +5,22 @@ import avif from 'libnuwa_avif.so';
 
 const MAX_AVIF_SIDE = 8192;
 const MAX_AVIF_PIXELS = 16 * 1024 * 1024;
+export const NATIVE_AVIF_PREVIEW_SUFFIX = '.avif-preview.png';
 const pendingPreviews = new Map<string, Promise<boolean>>();
 let previewQueue: Promise<void> = Promise.resolve();
+
+export function existingNativeAvifPreview(originalPath: string): string {
+  const preview = originalPath + NATIVE_AVIF_PREVIEW_SUFFIX;
+  try {
+    if (fileIo.accessSync(preview)) {
+      const stat = fileIo.statSync(preview);
+      if (stat.isFile() && stat.size > 0) return preview;
+    }
+  } catch {
+    // A preview is optional and can be removed together with its original.
+  }
+  return '';
+}
 
 async function decodeAndPack(originalPath: string, previewPath: string): Promise<boolean> {
   const cached = await fileIo.stat(previewPath).catch((): fileIo.Stat | undefined => undefined);

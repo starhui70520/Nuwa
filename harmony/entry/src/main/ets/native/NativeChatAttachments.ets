@@ -5,7 +5,8 @@ import { zlib } from '@kit.BasicServicesKit';
 import { fileIo, fileUri, picker } from '@kit.CoreFileKit';
 import { image } from '@kit.ImageKit';
 import { http } from '@kit.NetworkKit';
-import { ensureBackupSpace } from './NativeBackupFiles';
+import { existingNativeAvifPreview, NATIVE_AVIF_PREVIEW_SUFFIX, writeNativeAvifPreview } from './NativeAvifPreview';
+import { ensureBackupSpace, withBackupInput } from './NativeBackupFiles';
 import { NativeChatConfig } from './NativeChatClient';
 import { NativeBackupZipInput } from './NativeBackupZip';
 import type { NativeClipboardAttachments } from './NativeAttachmentClipboard';
@@ -22,6 +23,7 @@ export interface NativeAttachment {
   serverId: string | null;
   serverBinding?: string;
   archiveId?: string;
+  nativeAvifPreview?: boolean;
   local: boolean;
 }
 
@@ -298,6 +300,21 @@ export async function fileAttachmentRasterMime(path: string, header: Uint8Array)
   }
 }
 
+async function avifDecodePath(originalPath: string): Promise<string> {
+  const existing = existingNativeAvifPreview(originalPath);
+  if (existing) return existing;
+  try {
+    const header = await withBackupInput<Uint8Array>(originalPath, (file: NativeBackupZipInput): Promise<Uint8Array> =>
+      file.read(0, Math.min(16, file.size)));
+    if (attachmentUploadImageMime(header) !== 'image/avif') return '';
+    if (await fileAttachmentRasterMime(originalPath, header)) return originalPath;
+    const preview = originalPath + NATIVE_AVIF_PREVIEW_SUFFIX;
+    return await writeNativeAvifPreview(originalPath, preview) ? preview : '';
+  } catch {
+    return '';
+  }
+}
+
 function extensionMime(ext: string): string {
   switch (ext) {
     case 'apng':
@@ -408,9 +425,16 @@ function rejectCanceled(transfer: AttachmentTransfer): void {
 let imageConversionQueue: Promise<void> = Promise.resolve();
 
 function queueImageConversion(file: UploadFile, transfer: AttachmentTransfer): Promise<UploadFile> {
-  const conversion = imageConversionQueue.then((): Promise<UploadFile> => {
+  const conversion = imageConversionQueue.then(async (): Promise<UploadFile> => {
     rejectCanceled(transfer);
-    return convertImage(file);
+    const cached = file.mimeType === 'image/avif' ? existingNativeAvifPreview(file.localPath) : '';
+    const converted = await convertImage(file, cached || file.localPath);
+    if (converted.temporary || cached || file.mimeType !== 'image/avif') return converted;
+    rejectCanceled(transfer);
+    const preview = file.localPath + NATIVE_AVIF_PREVIEW_SUFFIX;
+    if (!await writeNativeAvifPreview(file.localPath, preview)) return file;
+    rejectCanceled(transfer);
+    return convertImage(file, preview);
   });
   imageConversionQueue = conversion.then((): void => {}, (): void => {});
   return conversion;
@@ -455,20 +479,20 @@ async function orientUploadPixels(pixels: image.PixelMap, original: image.Size, 
   if (rotation) await pixels.rotate(rotation);
 }
 
-async function convertImage(file: UploadFile): Promise<UploadFile> {
+async function convertImage(file: UploadFile, sourcePath: string): Promise<UploadFile> {
   const path = file.localPath + '.' + util.generateRandomUUID(true) + '.upload';
   let source: image.ImageSource | undefined;
   let pixels: image.PixelMap | undefined;
   let packer: image.ImagePacker | undefined;
   try {
-    source = image.createImageSource(file.localPath);
+    source = image.createImageSource(sourcePath);
     const size = (await source.getImageInfo()).size;
     if (!Number.isSafeInteger(size.width) || !Number.isSafeInteger(size.height) ||
       size.width < 1 || size.height < 1 || Math.max(size.width, size.height) > MAX_UPLOAD_DECODE_SIDE ||
       size.width * size.height > MAX_UPLOAD_DECODE_PIXELS) {
       return file;
     }
-    const orientation = await uploadOrientation(source, file.mimeType);
+    const orientation = sourcePath === file.localPath ? await uploadOrientation(source, file.mimeType) : 1;
     pixels = await source.createPixelMap({ editable: orientation > 1 });
     if (orientation > 1) await orientUploadPixels(pixels, size, orientation);
     packer = image.createImagePacker();
@@ -606,14 +630,29 @@ export class NativeChatAttachments {
         await fileIo.unlink(path).catch(() => {});
         throw error as Error;
       }
+      if (mimeType === 'image/avif' && await avifDecodePath(path) === path) {
+        attachment.nativeAvifPreview = true;
+      }
       return attachment;
     } finally {
       await fileIo.close(source);
     }
   }
 
-  previewUri(context: common.UIAbilityContext, item: NativeAttachment): string {
+  originalUri(context: common.UIAbilityContext, item: NativeAttachment): string {
     return item.local ? fileUri.getUriFromPath(attachmentPath(context, item)) : '';
+  }
+
+  previewUri(context: common.UIAbilityContext, item: NativeAttachment): string {
+    if (!item.local) return '';
+    if (item.mimeType !== 'image/avif' || item.nativeAvifPreview) return this.originalUri(context, item);
+    const preview = existingNativeAvifPreview(attachmentPath(context, item));
+    return preview ? fileUri.getUriFromPath(preview) : '';
+  }
+
+  async resolveAvifPreview(context: common.UIAbilityContext, item: NativeAttachment): Promise<string> {
+    const preview = await avifDecodePath(attachmentPath(context, item));
+    return preview ? fileUri.getUriFromPath(preview) : '';
   }
 
   async storeOriginal(context: common.UIAbilityContext, item: NativeAttachment, source: NativeBackupZipInput,
@@ -694,7 +733,12 @@ export class NativeChatAttachments {
   async remove(context: common.UIAbilityContext, item: NativeAttachment): Promise<void> {
     this.cancelUpload(item.id);
     if (item.local) {
-      await fileIo.unlink(attachmentPath(context, item));
+      const path = attachmentPath(context, item);
+      try {
+        await fileIo.unlink(path);
+      } finally {
+        if (item.mimeType === 'image/avif') await fileIo.unlink(path + NATIVE_AVIF_PREVIEW_SUFFIX).catch(() => {});
+      }
     }
   }
 

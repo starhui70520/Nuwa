@@ -2174,7 +2174,7 @@ struct NativeChat {
         const ready: NativeAttachment = {
           id: file.id, name: file.name, size: file.size, isImage: file.isImage, mimeType: file.mimeType,
           purpose: file.purpose, createdAt: file.createdAt, serverId, serverBinding: reply.attachmentBinding,
-          archiveId: file.archiveId, local: file.local,
+          archiveId: file.archiveId, nativeAvifPreview: file.nativeAvifPreview, local: file.local,
         };
         const keepResult = !reply.stopped || this.stoppedUploadReplies.has(reply.client);
         if (keepResult && this.settings.attachmentBinding === reply.attachmentBinding) {
@@ -3134,15 +3134,21 @@ struct NativeChat {
     }
     const context = this.host();
     const session = this.session();
-    if (session && item.isImage && !item.local) {
-      const archivedPreview = await resolveImportedAttachmentPreview(context, session, item);
-      if (this.history.activeId !== session.id || this.imagePreview || this.chatLinkUrl) return;
-      if (archivedPreview) {
-        this.imagePreview = archivedPreview;
+    if (item.isImage) {
+      const sessionId = this.history.activeId;
+      let generated = '';
+      if (session && (!item.local || item.archiveId)) {
+        generated = await resolveImportedAttachmentPreview(context, session, item);
+      } else if (item.local && item.mimeType === 'image/avif') {
+        generated = await this.attachments.resolveAvifPreview(context, item);
+      }
+      if (this.history.activeId !== sessionId || this.imagePreview || this.chatLinkUrl) return;
+      if (generated) {
+        this.imagePreview = generated;
         return;
       }
     }
-    const uri = this.attachments.previewUri(context, item) ||
+    const uri = this.attachments.originalUri(context, item) ||
       (session ? importedAttachmentOriginalUri(context, session, item) : '');
     if (!uri) {
       this.toast(this.label('本机没有该附件原件', 'The original attachment is unavailable on this device.'));
@@ -3284,7 +3290,11 @@ struct NativeChat {
                   name: file.item.name, bytes: file.item.size, status: file.state, detail: file.error,
                   locale: this.settings.locale, fontScale: this.appFontScale(),
                   editable: true, retryable: file.retryable ?? false,
-                  onAction: () => { void this.uploadDraftFile(this.history.activeId ?? '', file.item); },
+                  openable: file.item.local && file.item.mimeType === 'image/avif',
+                  onAction: () => {
+                    if (file.state === 'ready') void this.openAttachment(file.item);
+                    else void this.uploadDraftFile(this.history.activeId ?? '', file.item);
+                  },
                 })
               }
               Row() {

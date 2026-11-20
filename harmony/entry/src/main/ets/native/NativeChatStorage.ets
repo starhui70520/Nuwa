@@ -103,6 +103,7 @@ function validAttachment(item: NativeAttachment): boolean {
     (item.serverId === null || typeof item.serverId === 'string') && typeof item.local === 'boolean' &&
     (item.serverBinding === undefined || typeof item.serverBinding === 'string') &&
     (item.archiveId === undefined || (typeof item.archiveId === 'string' && !!item.archiveId)) &&
+    (item.nativeAvifPreview === undefined || typeof item.nativeAvifPreview === 'boolean') &&
     (!item.local || /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(item.id));
 }
 
