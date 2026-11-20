@@ -26,7 +26,10 @@ import { NativeDeepSeekAccount, NativeDeepSeekAccountController,
   NativeDeepSeekExchangeError } from '../native/NativeDeepSeekAccount';
 import { NativeOAuthLoopbackServer } from '../native/NativeOAuthLoopbackServer';
 import { nativeCredentialError, NativeOnboarding, NativeOnboardingView } from '../native/NativeOnboarding';
-import { NativeAttachment, NativeAttachmentQuota, NativeAttachmentUploadError, NativeChatAttachments } from '../native/NativeChatAttachments';
+import {
+  NativeAttachment, NativeAttachmentQuota, NativeAttachmentUploadError, NativeAttachmentValidationError,
+  NativeChatAttachments,
+} from '../native/NativeChatAttachments';
 import {
   hasNativeClipboardAttachments, NativeClipboardAttachments, readNativeAttachmentClipboard, releaseNativeAttachmentClipboard,
 } from '../native/NativeAttachmentClipboard';
@@ -1922,6 +1925,22 @@ struct NativeChat {
     return true;
   }
 
+  private attachmentValidationMessage(error: NativeAttachmentValidationError): string {
+    switch (error.kind) {
+      case 'format':
+        return this.label('上传的文件包含暂未支持的文件格式，请转换文件格式后重试。支持 PDF、DOC、XLSX、PPT、图片、文本、代码等。',
+          'The selected files include unsupported formats. Please convert them and try again. Supported: ' +
+          'PDF, DOC, XLSX, PPT, images, text, code, and more.');
+      case 'size':
+        return this.label(`单个文件大小超过限制（${error.limit}MB），请调整后重试`,
+          `File exceeds the size limit (${error.limit} MB). Please adjust and try again.`);
+      case 'count':
+        return this.label(`上传文件最多支持 ${error.limit} 个`, `You can upload up to ${error.limit} files`);
+      case 'unreadable':
+        return this.label('无法读取此附件，请重新选择。', 'Unable to read this attachment. Please select it again.');
+    }
+  }
+
   private async acceptDraftFiles(drop?: DragEvent, pasteSelection?: TextRange): Promise<void> {
     if (this.attachmentIntakeDraftId !== null || !this.canModifyHistory() ||
       (!drop && (!this.authenticated() || this.session()?.unreadable))) {
@@ -1992,7 +2011,8 @@ struct NativeChat {
       drop?.setResult(DragResult.DRAG_SUCCESSFUL);
     } catch (error) {
       drop?.setResult(DragResult.DRAG_FAILED);
-      this.toast((error as Error).message || this.label('添加附件失败', "Unable to add attachments"));
+      this.toast(error instanceof NativeAttachmentValidationError ? this.attachmentValidationMessage(error) :
+        (error as Error).message || this.label('添加附件失败', 'Unable to add attachments'));
     } finally {
       this.attachmentIntakeDraftId = null;
       if (clipboard) await releaseNativeAttachmentClipboard(clipboard);

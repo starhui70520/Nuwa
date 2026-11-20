@@ -32,6 +32,19 @@ export interface NativeAttachmentQuota {
   limit: string;
 }
 
+type NativeAttachmentValidationKind = 'format' | 'size' | 'count' | 'unreadable';
+
+export class NativeAttachmentValidationError extends Error {
+  readonly kind: NativeAttachmentValidationKind;
+  readonly limit: number;
+
+  constructor(kind: NativeAttachmentValidationKind, limit: number = 0) {
+    super(limit > 0 ? `${kind}: ${limit}` : kind);
+    this.kind = kind;
+    this.limit = limit;
+  }
+}
+
 export class NativeAttachmentUploadError extends Error {
   readonly retryable: boolean;
   readonly status?: number;
@@ -528,7 +541,7 @@ export class NativeChatAttachments {
 
   async pick(context: common.UIAbilityContext, existingCount: number): Promise<NativeAttachment[]> {
     if (existingCount >= NATIVE_ATTACHMENT_MAX_COUNT) {
-      throw new Error('一次最多添加 50 个附件。');
+      throw new NativeAttachmentValidationError('count', NATIVE_ATTACHMENT_MAX_COUNT);
     }
     const options = new picker.DocumentSelectOptions();
     options.maxSelectNumber = NATIVE_ATTACHMENT_MAX_COUNT - existingCount;
@@ -549,7 +562,7 @@ export class NativeChatAttachments {
     existingCount: number): Promise<NativeAttachment[]> {
     const count = uris.length + pixelMaps.length;
     if (count + existingCount > NATIVE_ATTACHMENT_MAX_COUNT) {
-      throw new Error('一次最多添加 50 个附件。');
+      throw new NativeAttachmentValidationError('count', NATIVE_ATTACHMENT_MAX_COUNT);
     }
     if (count === 0) {
       return [];
@@ -601,11 +614,11 @@ export class NativeChatAttachments {
       const name = source.name;
       const ext = extension(name);
       if (!FILE_TYPES.has(ext)) {
-        throw new Error('不支持此附件格式：' + name);
+        throw new NativeAttachmentValidationError('format');
       }
       const stat = await fileIo.stat(source.fd);
-      if (!stat.isFile() || stat.size < 0 || stat.size > MAX_BYTES) {
-        throw new Error('附件大小不能超过 64 MB：' + name);
+      if (!stat.isFile() || stat.size < 0) {
+        throw new NativeAttachmentValidationError('unreadable');
       }
       const header = new ArrayBuffer(Math.min(16, stat.size));
       let length = 0;
@@ -616,8 +629,9 @@ export class NativeChatAttachments {
       const mimeType = sniffed || extensionMime(ext);
       const isImage = mimeType.startsWith('image/');
       const purpose = attachmentPurpose(name, isImage);
-      if (purpose === 'user_data' && stat.size > MAX_BYTES / 2) {
-        throw new Error('普通文档不能超过 32 MB：' + name);
+      const limit = purpose === 'user_data' ? MAX_BYTES / 2 : MAX_BYTES;
+      if (stat.size > limit) {
+        throw new NativeAttachmentValidationError('size', limit / (1024 * 1024));
       }
       const attachment: NativeAttachment = {
         id: util.generateRandomUUID(true), name: name, size: stat.size, isImage: isImage, mimeType: mimeType,
