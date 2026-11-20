@@ -800,7 +800,7 @@ export struct NativeMarkdown {
               .constraintSize({ minWidth: 10 })
               .fontColor($r('app.color.native_chat_secondary'))
             Column() {
-              this.renderBlocks(this.currentBlock(item, path + ':' + index).children ?? [], path + ':' + index, true)
+              this.renderBlocks(() => this.currentBlock(item, path + ':' + index).children ?? [], path + ':' + index, true)
             }
             .layoutWeight(1).alignItems(HorizontalAlign.Start)
           }
@@ -814,7 +814,7 @@ export struct NativeMarkdown {
         .width('100%').margin({ top: 16, bottom: 16 })
     } else if (block.kind === 'quote') {
       Column() {
-        this.renderBlocks(this.currentBlock(block, path).children ?? [], path)
+        this.renderBlocks(() => this.currentBlock(block, path).children ?? [], path)
       }
       .width('100%').alignItems(HorizontalAlign.Start).padding({ left: 14 })
       .border({ width: { left: 2 }, color: $r('app.color.native_chat_caption') })
@@ -853,19 +853,19 @@ export struct NativeMarkdown {
   }
 
   @Builder
-  private renderBlocks(blocks: NativeMarkdownBlock[], path: string, insideList: boolean = false) {
-    ForEach(blocks, (block: NativeMarkdownBlock, index: number) => {
+  private renderBlocks(blocks: () => NativeMarkdownBlock[], path: string, insideList: boolean = false) {
+    ForEach(blocks(), (block: NativeMarkdownBlock, index: number) => {
       Column() {
         this.renderBlock(block, path + ':' + index)
       }
-      .width('100%').alignItems(HorizontalAlign.Start).margin({ top: this.blockGap(block, blocks[index - 1], insideList) })
+      .width('100%').alignItems(HorizontalAlign.Start).margin({ top: this.blockGap(block, blocks()[index - 1], insideList) })
     }, (block: NativeMarkdownBlock, index: number): string => this.renderKey(block, index))
   }
 
   @Builder
   private markdownBody() {
     Column() {
-      this.renderBlocks(this.blocks(), 'markdown')
+      this.renderBlocks(() => this.blocks(), 'markdown')
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)

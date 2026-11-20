@@ -25,6 +25,15 @@ export function nativeMessageRange(total: number, count: number, fromTop: boolea
     { start: Math.max(0, total - count), end: total };
 }
 
+function isGeneratingReply(message: NativeConversationMessage): boolean {
+  return message.role === 'assistant' && (message.status === 'pending' || message.status === 'streaming');
+}
+
+function isSettledReply(message: NativeConversationMessage): boolean {
+  return message.role === 'assistant' &&
+    (message.status === 'done' || message.status === 'error' || message.status === 'stopped');
+}
+
 export class NativeMessageList implements IDataSource {
   private rows: NativeMessageRow[] = [];
   private listeners: DataChangeListener[] = [];
@@ -46,7 +55,7 @@ export class NativeMessageList implements IDataSource {
     this.listeners = this.listeners.filter((item: DataChangeListener): boolean => item !== listener);
   }
 
-  update(path: NativeConversationMessage[], range: NativeMessageRange, keepFinishedReply: boolean = true): void {
+  update(path: NativeConversationMessage[], range: NativeMessageRange, keepReplyView: boolean = true): void {
     const byId = new Map<string, NativeMessageRow>();
     for (const row of this.rows) byId.set(row.message.id, row);
     const next: NativeMessageRow[] = [];
@@ -54,13 +63,14 @@ export class NativeMessageList implements IDataSource {
     for (let index = range.start; index < range.end; index++) {
       const message = path[index];
       const prior = byId.get(message.id);
-      const finishedReply = prior && keepFinishedReply && prior.message.role === 'assistant' &&
-        (prior.message.status === 'pending' || prior.message.status === 'streaming') && message.role === 'assistant' &&
-        (message.status === 'done' || message.status === 'error' || message.status === 'stopped');
+      const replyTransition = prior && keepReplyView &&
+        ((isGeneratingReply(prior.message) && isSettledReply(message)) ||
+          (isSettledReply(prior.message) && isGeneratingReply(message)));
       let row: NativeMessageRow;
-      if (prior && prior.index === index && (prior.message === message || finishedReply)) {
+      if (prior && prior.index === index && (prior.message === message || replyTransition)) {
         row = prior;
-        if (finishedReply) row.message = message;
+        // Updating the observed row preserves Markdown state across continuation and completion.
+        if (replyTransition) row.message = message;
       } else {
         row = new NativeMessageRow(++this.sequence, index, message);
       }

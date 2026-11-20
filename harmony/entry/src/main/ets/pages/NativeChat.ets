@@ -1233,12 +1233,12 @@ struct NativeChat {
     this.updateMessageWindow(!sessionChanged);
   }
 
-  private updateMessageWindow(keepFinishedReply: boolean = true): void {
+  private updateMessageWindow(keepReplyView: boolean = true): void {
     const range = nativeMessageRange(this.messagePath.length, this.messageLimit, this.rangeFromTop);
     this.messageRange = range;
     this.earlierCount = range.start;
     this.laterCount = this.messagePath.length - range.end;
-    this.messageList.update(this.messagePath, range, keepFinishedReply);
+    this.messageList.update(this.messagePath, range, keepReplyView);
   }
 
   private nearListEnd(): boolean {
@@ -2501,8 +2501,8 @@ struct NativeChat {
     reply.message = current;
     this.stopVoice();
     this.status = '';
-    this.history = upsertConversation(this.history, next);
     this.replies = [...this.replies, reply];
+    this.history = upsertConversation(this.history, next);
     this.lastStreamSave = Date.now();
     this.jumpToNewestMessages();
     reply.completion = this.receive(this.host(), config, next, reply);
