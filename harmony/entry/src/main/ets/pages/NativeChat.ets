@@ -75,6 +75,7 @@ import {
   checkNativeUpdate, fetchNativeReleaseHistory, getNativeCurrentVersion, isUpdateSnoozed, NativeReleaseHistoryItem,
   NativeUpdateCheck, NativeUpdatePreferences, NativeUpdateSchedule, UPDATE_POLL_MS, UPDATE_RESUME_MS,
 } from '../native/NativeUpdates';
+import { NativeUpdateDialog, NativeUpdateDialogModel } from '../native/NativeUpdateDialog';
 import { importNativeShareLink } from '../native/NativeShareImport';
 import { openNuwaPrivacyPolicy } from '../native/PrivacyPolicy';
 import { HarmonySpeechRecognition } from '../speech/HarmonySpeechRecognition';
@@ -90,6 +91,7 @@ interface NativeReply {
   stopped: boolean;
   uploadingIds: string[];
   attachmentBinding: string;
+  stopPreparing?: () => void;
   resumeRetry?: () => void;
   completion?: Promise<void>;
 }
@@ -205,6 +207,7 @@ struct NativeChat {
   private readonly composerEditor = new TextAreaController();
   private composerSelection: TextRange = {};
   @State private replies: NativeReply[] = [];
+  private readonly stoppedUploadReplies = new Map<NativeChatClient, NativeReply>();
   @State private recognitionId: string = '';
   @State private readingId: string = '';
   @State private collapsedThoughts: string[] = [];
@@ -229,7 +232,19 @@ struct NativeChat {
   private readonly updateSchedule = new NativeUpdateSchedule();
   private updatePreferences: NativeUpdatePreferences = { checkAt: 0, dismissedAt: 0, dismissedVersion: '' };
   private pendingUpdate: NativeUpdateCheck | null = null;
-  private updateDialogOpen: boolean = false;
+  @State private updateNotice: NativeUpdateDialogModel | null = null;
+  private readonly updateNoticeController = new CustomDialogController({
+    builder: NativeUpdateDialog({
+      model: this.$updateNotice,
+      onLater: () => { this.closeUpdateNotice(true); },
+      onDownload: () => { this.openUpdateDestination(); },
+    }),
+    customStyle: true,
+    alignment: DialogAlignment.Center,
+    autoCancel: true,
+    maskColor: '#5C000000',
+    cancel: () => { this.closeUpdateNotice(true, false); },
+  });
   private updateTimer: number = -1;
   private readonly attachments = new NativeChatAttachments();
   private readonly backup = new NativeChatBackup();
@@ -382,9 +397,10 @@ struct NativeChat {
 
   aboutToDisappear(): void {
     this.onPageHide();
+    this.closeUpdateNotice(false);
     this.balanceRefreshEnabled = false;
     this.resetBalance();
-    this.replies.forEach((reply: NativeReply) => { this.cancelReply(reply.sessionId); });
+    this.cancelAllReplies();
     this.stopVoice();
     this.speaker.destroy();
     this.authorizationLoopback.stop();
@@ -397,7 +413,9 @@ struct NativeChat {
 
   onBackPress(): boolean {
     if (this.signingOut) return true;
-    if (this.imagePreview) {
+    if (this.updateNotice) {
+      this.closeUpdateNotice(true);
+    } else if (this.imagePreview) {
       this.imagePreview = '';
     } else if (this.authorizing) {
       this.cancelAuthorization();
@@ -461,6 +479,7 @@ struct NativeChat {
       this.history = await this.storage.loadConversations(context);
       try {
         this.settings = await this.settingsStore.load(context);
+        if (this.updateNotice) this.presentUpdate(this.updateNotice.update);
         if (this.settings.signedOut) {
           this.account = null;
           await saveNativeAccount(null).catch(() => {});
@@ -970,7 +989,7 @@ struct NativeChat {
       this.resetBalance();
       this.stopVoice();
       this.closeMessageEditor();
-      this.replies.forEach((reply: NativeReply) => { this.cancelReply(reply.sessionId); });
+      this.cancelAllReplies();
       this.onboardingView = 'home';
       this.settingsKey = '';
       this.settingsVisible = false;
@@ -1328,14 +1347,38 @@ struct NativeChat {
     return this.selectedIds.length > 0 && this.selectedIds.every((id: string): boolean => !!this.session(id)?.pinnedAt);
   }
 
-  private cancelReply(id: string | null = this.history.activeId): void {
+  private stopReply(): void {
+    const reply = this.reply();
+    if (!reply || reply.stopped) return;
+    reply.stopped = true;
+    // Keep shared attachment uploads available to later requests.
+    if (reply.uploadingIds.length > 0) this.stoppedUploadReplies.set(reply.client, reply);
+    reply.stopPreparing?.();
+    reply.client.cancel();
+    reply.resumeRetry?.();
+  }
+
+  private cancelReplyUploads(reply: NativeReply): void {
+    this.stoppedUploadReplies.delete(reply.client);
+    reply.uploadingIds.forEach((fileId: string) => { this.attachments.cancelUpload(fileId); });
+  }
+
+  private cancelReply(id: string): void {
     const reply = this.reply(id);
     if (reply) {
       reply.stopped = true;
-      reply.uploadingIds.forEach((fileId: string) => { this.attachments.cancelUpload(fileId); });
+      this.cancelReplyUploads(reply);
       reply.client.cancel();
       reply.resumeRetry?.();
     }
+    this.stoppedUploadReplies.forEach((stopped: NativeReply): void => {
+      if (stopped.sessionId === id) this.cancelReplyUploads(stopped);
+    });
+  }
+
+  private cancelAllReplies(): void {
+    this.replies.forEach((reply: NativeReply) => { this.cancelReply(reply.sessionId); });
+    this.stoppedUploadReplies.forEach((reply: NativeReply) => { this.cancelReplyUploads(reply); });
   }
 
   private restoreDraft(id: string): void {
@@ -1629,7 +1672,14 @@ struct NativeChat {
     const usesFiles = !!config.accountToken || config.protocol === 'anthropic';
     const prepared = new Map<string, NativeChatFileRef>();
     if (usesFiles) {
-      await this.prepareReplyFiles(context, current, config, reply, path, prepared);
+      const stopped = new Promise<void>((resolve): void => {
+        reply.stopPreparing = (): void => { resolve(); };
+      });
+      try {
+        await Promise.race([this.prepareReplyFiles(context, current, config, reply, path, prepared), stopped]);
+      } finally {
+        reply.stopPreparing = undefined;
+      }
     }
     if (reply.stopped) return [];
     let previousReminder: string | undefined;
@@ -1735,13 +1785,19 @@ struct NativeChat {
           purpose: file.purpose, createdAt: file.createdAt, serverId, serverBinding: reply.attachmentBinding,
           archiveId: file.archiveId, local: file.local,
         };
-        if (this.settings.attachmentBinding === reply.attachmentBinding) {
-          this.updatePreparedAttachment(session.id, file.id, ready);
+        const keepResult = !reply.stopped || this.stoppedUploadReplies.has(reply.client);
+        if (keepResult && this.settings.attachmentBinding === reply.attachmentBinding) {
+          const updated = this.updatePreparedAttachment(session.id, file.id, ready);
+          if (updated && reply.stopped) void this.save(context);
         }
-        return { file: { serverId, isImage: file.isImage } };
+        return reply.stopped ? {} : { file: { serverId, isImage: file.isImage } };
       } finally {
         reply.uploadingIds = reply.uploadingIds.filter((id: string): boolean => id !== file.id);
-        this.paintLiveReplies();
+        if (reply.stopped) {
+          if (reply.uploadingIds.length === 0) this.stoppedUploadReplies.delete(reply.client);
+        } else {
+          this.paintLiveReplies();
+        }
       }
     } catch (cause) {
       if (reply.stopped) return {};
@@ -2852,7 +2908,7 @@ struct NativeChat {
   private composerAction() {
     if (this.reply()) {
       this.iconButton($r('app.media.native_stop'), this.label('停止生成', 'Stop generating'),
-        () => { this.stopVoice(); this.cancelReply(); }, this.compact() ? 28 : 34, 16,
+        () => { this.stopVoice(); this.stopReply(); }, this.compact() ? 28 : 34, 16,
         Color.White, $r('app.color.native_chat_blue'))
     } else if (this.canSendDraft()) {
       this.composerSendButton()
@@ -3351,7 +3407,7 @@ struct NativeChat {
       const onVerified = async (): Promise<void> => {
         this.stopVoice();
         const active = Array.from(this.replies);
-        active.forEach((reply: NativeReply) => { this.cancelReply(reply.sessionId); });
+        this.cancelAllReplies();
         await Promise.all(active.map((reply: NativeReply): Promise<void> => reply.completion ?? Promise.resolve()));
       };
       const sessions = importedUri ?
@@ -3568,36 +3624,48 @@ struct NativeChat {
   }
 
   private async resumeUpdateChecks(force: boolean = false): Promise<void> {
-    if (this.pendingUpdate && this.visible && !this.checkingUpdate && !this.authorizing && !this.backupBusy &&
+    if (this.pendingUpdate && this.visible && !this.updateNotice && !this.checkingUpdate &&
+      !this.authorizing && !this.backupBusy && !this.signingOut &&
       !isUpdateSnoozed(this.pendingUpdate, this.updatePreferences, Date.now())) {
-      // Refresh the release metadata while the cached dialog is visible.
-      void this.presentUpdate(this.pendingUpdate).catch(() => {});
+      this.presentUpdate(this.pendingUpdate);
     }
     if (force || Date.now() - this.updatePreferences.checkAt >= UPDATE_RESUME_MS) {
       await this.checkUpdate(true);
     }
   }
 
-  private async presentUpdate(update: NativeUpdateCheck): Promise<void> {
-    if (this.updateDialogOpen) return;
-    this.updateDialogOpen = true;
-    try {
-      const result = await this.getUIContext().getPromptAction().showDialog({
-        title: this.label(`发现新版本 v${update.latestVersion}`, `Version ${update.latestVersion} is available`),
-        message: `${this.label('当前版本', 'Current version')} v${update.currentVersion}\n\n${update.notes ||
-          this.label('包含体验优化与问题修复。', 'Includes improvements and bug fixes.')}`,
-        buttons: [{ text: this.label('暂不更新', "Not now"), color: '#61666B' }, { text: this.label('前往下载', "Download"), color: '#3964FE' }],
-      });
-      if (result.index === 1) {
-        await this.openLink(update.appGalleryUrl ?? update.downloadUrl ?? update.releaseUrl);
-      } else {
-        this.updatePreferences.dismissedVersion = update.latestVersion;
-        this.updatePreferences.dismissedAt = Date.now();
-        void this.updateSchedule.dismissed(this.host(), update.latestVersion, this.updatePreferences.dismissedAt).catch(() => {});
-      }
-    } finally {
-      this.updateDialogOpen = false;
+  private presentUpdate(update: NativeUpdateCheck): void {
+    const open = this.updateNotice !== null;
+    const compact = this.compact();
+    this.updateNotice = {
+      update,
+      locale: this.settings.locale,
+      fontScale: this.appFontScale(),
+      compact,
+      width: Math.max(1, Math.min(400, this.viewportWidth - (compact ? 16 : 32))),
+      maxHeight: Math.max(1, this.viewportHeight - (compact ? 16 : 24)),
+    };
+    if (!open) this.updateNoticeController.open();
+  }
+
+  private closeUpdateNotice(snooze: boolean, close: boolean = true): void {
+    const update = this.updateNotice?.update;
+    if (!update) return;
+    this.updateNotice = null;
+    if (close) this.updateNoticeController.close();
+    if (snooze) {
+      this.updatePreferences.dismissedVersion = update.latestVersion;
+      this.updatePreferences.dismissedAt = Date.now();
+      void this.updateSchedule.dismissed(this.host(), update.latestVersion, this.updatePreferences.dismissedAt)
+        .catch(() => {});
     }
+  }
+
+  private openUpdateDestination(): void {
+    const update = this.updateNotice?.update;
+    if (!update) return;
+    this.closeUpdateNotice(false);
+    void this.openLink(update.appGalleryUrl ?? update.downloadUrl ?? update.releaseUrl);
   }
 
   private async checkUpdate(silent: boolean = false, prompt: boolean = true): Promise<void> {
@@ -3611,14 +3679,15 @@ struct NativeChat {
       void this.updateSchedule.checked(this.host(), this.updatePreferences.checkAt, update).catch(() => {});
       this.pendingUpdate = update.hasUpdate ? update : null;
       if (!update.hasUpdate) {
+        this.closeUpdateNotice(false);
         if (!silent) {
           this.toast(this.label('当前已是最新版本', "You're using the latest version"));
         }
         return;
       }
-      if (!silent || (prompt && this.visible && !this.authorizing && !this.backupBusy &&
+      if (this.updateNotice || !silent || (prompt && this.visible && !this.authorizing && !this.backupBusy && !this.signingOut &&
         !isUpdateSnoozed(update, this.updatePreferences, Date.now()))) {
-        await this.presentUpdate(update);
+        this.presentUpdate(update);
       }
     } catch {
       if (!silent) {
@@ -4698,8 +4767,12 @@ struct NativeChat {
     .onDragLeave(() => { this.fileDropHint = null; })
     .onDrop((event: DragEvent) => { this.dropAttachments(event); })
     .onAreaChange((_old: Area, area: Area): void => {
-      this.viewportWidth = Number(area.width);
-      this.viewportHeight = Number(area.height);
+      const width = Number(area.width);
+      const height = Number(area.height);
+      const resized = width !== this.viewportWidth || height !== this.viewportHeight;
+      this.viewportWidth = width;
+      this.viewportHeight = height;
+      if (resized && this.updateNotice) this.presentUpdate(this.updateNotice.update);
       if (this.wide() && (this.drawerOpen || this.drawerDrag !== 0)) {
         this.drawerOpen = false;
         this.drawerDrag = 0;

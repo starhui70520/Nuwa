@@ -306,8 +306,10 @@ export class NativeUpdateSchedule {
 
   async dismissed(context: common.UIAbilityContext, version: string, at: number): Promise<void> {
     const store = await preferences.getPreferences(context, STORE_NAME);
-    await store.put('dismissedVersion', version);
-    await store.put('dismissedAt', at);
+    const previous = store.getSync('dismissedAt', 0);
+    if (typeof previous === 'number' && previous > at) return;
+    store.putSync('dismissedVersion', version);
+    store.putSync('dismissedAt', at);
     await store.flush();
   }
 }
