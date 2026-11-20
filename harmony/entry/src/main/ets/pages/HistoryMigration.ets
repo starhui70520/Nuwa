@@ -1,6 +1,5 @@
 import { common } from '@kit.AbilityKit';
 import { webview } from '@kit.ArkWeb';
-import { url } from '@kit.ArkTS';
 import { commitChatBackup, NativeChatBackup } from '../native/NativeChatBackup';
 import { NativeConversationState } from '../native/NativeConversation';
 import { NativeChatStorage } from '../native/NativeChatStorage';
@@ -20,6 +19,29 @@ const CHAT_ORIGIN = 'https://chat.deepseek.com';
 const CHAT_URL = CHAT_ORIGIN + '/';
 const MIGRATION_BRIDGE_PERMISSION =
   '{"javascriptProxyPermission":{"urlPermissionList":[{"scheme":"https","host":"chat.deepseek.com","port":"","path":""}]}}';
+const MIGRATION_DOWNLOAD_RETRY_DELAYS: number[] = [1000, 2000];
+
+interface MigrationDownloadProgress {
+  update: (item: webview.WebDownloadItem) => void;
+  fail: (item: webview.WebDownloadItem) => void;
+  finish: (item: webview.WebDownloadItem) => void;
+}
+
+let migrationResumeDelegate: webview.WebDownloadDelegate | undefined;
+let activeMigrationResumeProgress: MigrationDownloadProgress | undefined;
+
+function registerMigrationResumeProgress(progress: MigrationDownloadProgress): void {
+  // ArkWeb keeps the process-wide manager delegate from its first registration.
+  if (!migrationResumeDelegate) {
+    const delegate = new webview.WebDownloadDelegate();
+    delegate.onDownloadUpdated((item) => { activeMigrationResumeProgress?.update(item); });
+    delegate.onDownloadFailed((item) => { activeMigrationResumeProgress?.fail(item); });
+    delegate.onDownloadFinish((item) => { activeMigrationResumeProgress?.finish(item); });
+    webview.WebDownloadManager.setDownloadDelegate(delegate);
+    migrationResumeDelegate = delegate;
+  }
+  activeMigrationResumeProgress = progress;
+}
 
 class MigrationExportBridge {
   private onLoginDetected: () => void;
@@ -52,18 +74,28 @@ class MigrationExportBridge {
 @Component
 struct HistoryMigration {
   private readonly migrationController = new webview.WebviewController();
+  private readonly migrationPreparationController = new webview.WebviewController();
   private readonly downloadDelegate = new webview.WebDownloadDelegate();
   private readonly backup = new NativeChatBackup();
   private readonly conversationStorage = new NativeChatStorage();
   @State private importingMigration: boolean = false;
   @State private pendingMigrationAvailable: boolean = false;
   @State private migrationStatusText: string = '';
+  @State private migrationPreparing: boolean = false;
   private pageActive: boolean = false;
   private nativeMigrationDownload?: webview.WebDownloadItem;
+  private readonly migrationDownloadProgress: MigrationDownloadProgress = {
+    update: (item) => { this.updateNativeMigrationDownload(item); },
+    fail: (item) => { this.onNativeMigrationDownloadFailed(item); },
+    finish: (item) => { this.finishNativeMigrationDownload(item); },
+  };
+  private migrationDownloadRetryCount: number = 0;
+  private migrationDownloadRetryTimer: number = -1;
   private migrationAutoExportTriggered: boolean = false;
   private migrationForceReExport: boolean = false;
   private migrationClearSession: boolean = false;
   private migrationClearingSession: boolean = false;
+  private migrationResetHistory: boolean = false;
   private migrationPollTimer: number = -1;
 
   private migrationExportBridge: MigrationExportBridge = new MigrationExportBridge(
@@ -92,6 +124,7 @@ struct HistoryMigration {
     const params = this.getUIContext().getRouter().getParams() as MigrationRouteParams | undefined;
     this.migrationForceReExport = params?.forceReExport === true;
     this.migrationClearSession = params?.clearSession === true;
+    this.migrationPreparing = this.migrationClearSession;
     this.pageActive = true;
     this.migrationStatusText = this.migrationClearSession ? '正在切换账号…' :
       '请登录 DeepSeek 账号，登录成功后将自动辅助导出';
@@ -165,13 +198,14 @@ struct HistoryMigration {
     }
   }
 
-  private onMigrationPageEnd(): void {
-    if (this.importingMigration || this.pendingMigrationAvailable) return;
-    if (this.migrationClearSession) {
-      void this.clearMigrationSession();
-    } else {
-      this.checkMigrationLoginState();
+  private onMigrationPageEnd(address: string): void {
+    if (!this.pageActive || address === 'about:blank' || this.importingMigration || this.pendingMigrationAvailable ||
+      this.migrationClearSession || this.migrationClearingSession) return;
+    if (this.migrationResetHistory) {
+      this.migrationResetHistory = false;
+      this.migrationController.clearHistory();
     }
+    this.checkMigrationLoginState();
   }
 
   private switchMigrationAccount(): void {
@@ -182,32 +216,33 @@ struct HistoryMigration {
     this.migrationClearSession = true;
     this.migrationStatusText = '正在切换账号…';
     this.startMigrationLoginPoll();
-    try {
-      if (new url.URL(this.migrationController.getUrl()).origin === CHAT_ORIGIN) {
-        void this.clearMigrationSession();
-      } else {
-        this.migrationController.loadUrl(CHAT_URL);
-      }
-    } catch {
-      this.migrationStatusText = '未能打开 DeepSeek 网页，请重试';
-    }
+    void this.clearMigrationSession();
   }
 
   private async clearMigrationSession(): Promise<void> {
     if (this.migrationClearingSession || !this.pageActive) return;
     this.migrationClearingSession = true;
     try {
-      if (new url.URL(this.migrationController.getUrl()).origin !== CHAT_ORIGIN) return;
-      const script = "(function(){if(location.origin !== 'https://chat.deepseek.com') return;" +
-        "clearInterval(window.__dsappAutoExportTimer); window.__dsappAutoExportRunning = false;" +
-        "sessionStorage.clear(); localStorage.clear();})();";
-      await this.migrationController.runJavaScript(script);
+      const controller = this.migrationPreparing ? this.migrationPreparationController : this.migrationController;
+      const address = controller.getUrl();
+      if (address === CHAT_ORIGIN || address.startsWith(CHAT_URL)) {
+        const script = "(function(){if(location.origin !== " + JSON.stringify(CHAT_ORIGIN) + ") return;" +
+          "clearInterval(window.__dsappAutoExportTimer); window.__dsappAutoExportRunning = false;" +
+          "sessionStorage.clear(); localStorage.clear();})();";
+        await controller.runJavaScript(script);
+      }
+      controller.removeCache(true);
       await webview.WebCookieManager.clearAllCookies();
       webview.WebStorage.deleteOrigin(CHAT_ORIGIN);
       if (!this.pageActive) return;
-      this.migrationClearSession = false;
       this.migrationStatusText = '请登录要导入的 DeepSeek 账号';
-      this.migrationController.loadUrl(CHAT_URL);
+      if (this.migrationPreparing) {
+        this.migrationPreparing = false;
+      } else {
+        this.migrationResetHistory = true;
+        controller.loadUrl(CHAT_URL);
+      }
+      this.migrationClearSession = false;
     } catch {
       this.migrationStatusText = '未能切换账号，请重试';
     } finally {
@@ -225,16 +260,74 @@ struct HistoryMigration {
 
   private cancelNativeMigrationDownload(): void {
     const download = this.nativeMigrationDownload;
+    this.nativeMigrationDownload = undefined;
+    this.resetNativeMigrationRetry();
     if (!download) {
       return;
     }
-    this.nativeMigrationDownload = undefined;
     try {
       download.cancel();
     } catch {
       // The WebView can already have canceled when it detached.
     }
     this.clearNativePartialDownload();
+  }
+
+  private resetNativeMigrationRetry(): void {
+    if (this.migrationDownloadRetryTimer >= 0) {
+      clearTimeout(this.migrationDownloadRetryTimer);
+      this.migrationDownloadRetryTimer = -1;
+    }
+    this.migrationDownloadRetryCount = 0;
+    if (activeMigrationResumeProgress === this.migrationDownloadProgress) {
+      activeMigrationResumeProgress = undefined;
+    }
+  }
+
+  private failNativeMigrationDownload(): void {
+    this.cancelNativeMigrationDownload();
+    this.migrationStatusText = '下载导出包失败，请重新点击下载';
+  }
+
+  private retryNativeMigrationDownload(item: webview.WebDownloadItem): boolean {
+    if (this.migrationDownloadRetryTimer >= 0) return true;
+    if (this.migrationDownloadRetryCount >= MIGRATION_DOWNLOAD_RETRY_DELAYS.length ||
+      item.getState() !== webview.WebDownloadState.INTERRUPTED) return false;
+    const error = item.getLastErrorCode();
+    if (error !== webview.WebDownloadErrorCode.NETWORK_FAILED &&
+      error !== webview.WebDownloadErrorCode.NETWORK_TIMEOUT &&
+      error !== webview.WebDownloadErrorCode.NETWORK_DISCONNECTED &&
+      error !== webview.WebDownloadErrorCode.NETWORK_SERVER_DOWN &&
+      error !== webview.WebDownloadErrorCode.SERVER_UNREACHABLE &&
+      error !== webview.WebDownloadErrorCode.SERVER_CONTENT_LENGTH_MISMATCH) return false;
+
+    let serialized: Uint8Array;
+    try {
+      serialized = item.serialize();
+    } catch {
+      return false;
+    }
+    if (!serialized.length) return false;
+    const delay = MIGRATION_DOWNLOAD_RETRY_DELAYS[this.migrationDownloadRetryCount++];
+    this.nativeMigrationDownload = item;
+    this.migrationStatusText = '连接中断，正在重试下载导出包…';
+    this.migrationDownloadRetryTimer = setTimeout(() => {
+      this.migrationDownloadRetryTimer = -1;
+      if (!this.activeNativeMigrationDownload(item)) return;
+      try {
+        const resumed = webview.WebDownloadItem.deserialize(serialized);
+        if (!resumed.getGuid()) {
+          this.failNativeMigrationDownload();
+          return;
+        }
+        registerMigrationResumeProgress(this.migrationDownloadProgress);
+        this.nativeMigrationDownload = resumed;
+        webview.WebDownloadManager.resumeDownload(resumed);
+      } catch {
+        this.failNativeMigrationDownload();
+      }
+    }, delay);
+    return true;
   }
 
   private discardPendingMigration(): void {
@@ -288,6 +381,10 @@ struct HistoryMigration {
   }
 
   private startNativeMigrationDownload(item: webview.WebDownloadItem): void {
+    if (!this.pageActive) {
+      item.cancel();
+      return;
+    }
     const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
     if (this.importingMigration || this.nativeMigrationDownload || this.migrationClearSession ||
       this.migrationClearingSession || hasPendingNativeMigration(context)) {
@@ -311,43 +408,48 @@ struct HistoryMigration {
   }
 
   private activeNativeMigrationDownload(item: webview.WebDownloadItem): boolean {
-    return this.nativeMigrationDownload?.getGuid() === item.getGuid();
+    return this.pageActive && this.nativeMigrationDownload?.getGuid() === item.getGuid();
+  }
+
+  private updateNativeMigrationDownload(item: webview.WebDownloadItem): void {
+    if (!this.activeNativeMigrationDownload(item)) return;
+    this.nativeMigrationDownload = item;
+    if (item.getReceivedBytes() > MAX_FILE_BACKUP_BYTES) {
+      this.cancelNativeMigrationDownload();
+      this.migrationStatusText = NATIVE_MIGRATION_SIZE_ERROR;
+    }
+  }
+
+  private onNativeMigrationDownloadFailed(item: webview.WebDownloadItem): void {
+    if (!this.activeNativeMigrationDownload(item)) return;
+    if (item.getReceivedBytes() > MAX_FILE_BACKUP_BYTES) {
+      this.cancelNativeMigrationDownload();
+      this.migrationStatusText = NATIVE_MIGRATION_SIZE_ERROR;
+    } else if (!this.retryNativeMigrationDownload(item)) {
+      this.failNativeMigrationDownload();
+    }
+  }
+
+  private finishNativeMigrationDownload(item: webview.WebDownloadItem): void {
+    if (!this.activeNativeMigrationDownload(item)) return;
+    this.nativeMigrationDownload = undefined;
+    this.resetNativeMigrationRetry();
+    void this.importNativeDownload(item.getReceivedBytes());
   }
 
   private setupMigrationDownloadDelegate(): void {
     this.downloadDelegate.onBeforeDownload((item: webview.WebDownloadItem) => {
       this.startNativeMigrationDownload(item);
     });
-
-    this.downloadDelegate.onDownloadUpdated((item: webview.WebDownloadItem) => {
-      if (this.activeNativeMigrationDownload(item)) {
-        this.nativeMigrationDownload = item;
-        if (item.getReceivedBytes() > MAX_FILE_BACKUP_BYTES) {
-          this.cancelNativeMigrationDownload();
-          this.migrationStatusText = NATIVE_MIGRATION_SIZE_ERROR;
-        }
-      }
-    });
-
-    this.downloadDelegate.onDownloadFailed((item: webview.WebDownloadItem) => {
-      if (!this.activeNativeMigrationDownload(item)) return;
-      this.nativeMigrationDownload = undefined;
-      this.clearNativePartialDownload();
-      this.migrationStatusText = '下载导出包失败，请重新点击下载';
-    });
-
-    this.downloadDelegate.onDownloadFinish((item: webview.WebDownloadItem) => {
-      if (!this.activeNativeMigrationDownload(item)) return;
-      this.nativeMigrationDownload = undefined;
-      void this.importNativeDownload(item.getReceivedBytes());
-    });
-
+    this.downloadDelegate.onDownloadUpdated(this.migrationDownloadProgress.update);
+    this.downloadDelegate.onDownloadFailed(this.migrationDownloadProgress.fail);
+    this.downloadDelegate.onDownloadFinish(this.migrationDownloadProgress.finish);
     this.migrationController.setDownloadDelegate(this.downloadDelegate);
   }
 
   onBackPress(): boolean {
     if (this.importingMigration) return true;
-    if (this.pendingMigrationAvailable || !this.migrationController.accessBackward()) return false;
+    if (this.migrationPreparing || this.pendingMigrationAvailable || !this.migrationController.accessBackward()) return false;
     this.migrationController.backward();
     return true;
   }
@@ -402,29 +504,28 @@ struct HistoryMigration {
       .padding({ left: 14, right: 8, top: 10, bottom: 10 })
       .backgroundColor('#1D4ED8')
 
-      Web({
-        src: CHAT_URL,
-        controller: this.migrationController,
-      })
-        .width('100%')
-        .layoutWeight(1)
-        .javaScriptAccess(true)
-        .domStorageAccess(true)
-        .databaseAccess(true)
-        .mixedMode(MixedMode.Compatible)
-        .javaScriptProxy({
-          object: this.migrationExportBridge,
-          name: 'HarmonyMigrationBridge',
-          methodList: ['onLoggedIn', 'onStep', 'onWaitingExport', 'onAutoExportTimeout'],
-          controller: this.migrationController,
-          permission: MIGRATION_BRIDGE_PERMISSION,
-        })
-        .onControllerAttached(() => {
-          this.setupMigrationDownloadDelegate();
-        })
-        .onPageEnd(() => {
-          this.onMigrationPageEnd();
-        })
+      if (this.migrationPreparing) {
+        Web({ src: 'about:blank', controller: this.migrationPreparationController })
+          .width('100%').layoutWeight(1)
+          .onControllerAttached(() => { void this.clearMigrationSession(); })
+      } else {
+        Web({ src: CHAT_URL, controller: this.migrationController })
+          .width('100%')
+          .layoutWeight(1)
+          .javaScriptAccess(true)
+          .domStorageAccess(true)
+          .databaseAccess(true)
+          .mixedMode(MixedMode.Compatible)
+          .javaScriptProxy({
+            object: this.migrationExportBridge,
+            name: 'HarmonyMigrationBridge',
+            methodList: ['onLoggedIn', 'onStep', 'onWaitingExport', 'onAutoExportTimeout'],
+            controller: this.migrationController,
+            permission: MIGRATION_BRIDGE_PERMISSION,
+          })
+          .onControllerAttached(() => { this.setupMigrationDownloadDelegate(); })
+          .onPageEnd((event: OnPageEndEvent) => { this.onMigrationPageEnd(event.url); })
+      }
     }
     .width('100%')
     .height('100%')
