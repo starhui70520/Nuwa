@@ -5,6 +5,7 @@ import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { NativeChatSource, NativeChatCitation } from './NativeChatSources';
 import { fileIo } from '@kit.CoreFileKit';
 import { NativeAttachment } from './NativeChatAttachments';
+import { ensureNativeDirectory } from './NativeFileSystem';
 import { NativeFailedUpload, NativeReplyFailure } from './NativeReplyNotice';
 import { validNativeReadLinks } from './NativeReadLinks';
 import { isValidNativeToolTimeline } from './NativeToolTimeline';
@@ -390,7 +391,7 @@ async function commitHistory(filesDir: string, directory: string, previous: Sess
   const created: string[] = [];
   let published = false;
   if (!previous) {
-    await fileIo.mkdir(directory, true);
+    await ensureNativeDirectory(directory);
     await syncDirectory(filesDir);
   }
   try {

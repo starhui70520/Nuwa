@@ -1,7 +1,9 @@
 import { common } from '@kit.AbilityKit';
 import { LengthMetrics } from '@kit.ArkUI';
-import { pasteboard } from '@kit.BasicServicesKit';
+import { deviceInfo, pasteboard } from '@kit.BasicServicesKit';
+import { text } from '@kit.ArkGraphics2D';
 import { url } from '@kit.ArkTS';
+import { NativeChatSource, safeNativeSourceUrl } from './NativeChatSources';
 import { NativeLocale } from './NativeLocation';
 import { NativeMathEquation } from './NativeMathEquation';
 import {
@@ -55,6 +57,15 @@ interface NativeRenderedFormula {
   picture: NativeMathPicture;
 }
 
+interface NativeCitationAnchor {
+  paragraph: string;
+  source: NativeChatSource;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 @Component
 export struct NativeMarkdown {
   @Prop @Watch('scheduleMathPictures') content: string = '';
@@ -62,6 +73,8 @@ export struct NativeMarkdown {
   @Prop @Watch('scheduleMathPictures') muted: boolean = false;
   @Prop @Watch('scheduleMathPictures') disableLinks: boolean = false;
   @Prop hasCitations: boolean = false;
+  @Prop citationSources: NativeChatSource[] = [];
+  @Prop @Watch('dismissCitationPreview') citationHoverEnabled: boolean = false;
   @Prop locale: NativeLocale = 'zh-CN';
   @Prop @Watch('scheduleMathPictures') theme: NativeTheme = 'system';
   @Prop @Watch('scheduleMathPictures') loading: boolean = false;
@@ -70,6 +83,8 @@ export struct NativeMarkdown {
   @State private mermaidCodeIndices: number[] = [];
   @State private mathPictures: NativeRenderedFormula[] = [];
   @State private contentWidth: number = 0;
+  @State private citationAnchor: NativeCitationAnchor | undefined = undefined;
+  @State private citationPreviewVisible: boolean = false;
   private cachedCitationMode: boolean = false;
   private cachedLinkMode: boolean = false;
   private cachedContent: string = '\u0000';
@@ -82,6 +97,8 @@ export struct NativeMarkdown {
   private mathColor: string = '#0F1115';
   private mathDensity: number = 1;
   private mathFontRatio: number = 1;
+  private citationControllers: Map<string, TextController> = new Map<string, TextController>();
+  private citationTimer: number = -1;
 
   aboutToAppear(): void {
     // Chat List mounts only the displayed rows and its small render cache.
@@ -93,6 +110,8 @@ export struct NativeMarkdown {
     this.mathMounted = false;
     this.mathGeneration++;
     clearTimeout(this.mathTimer);
+    this.dismissCitationPreview();
+    this.citationControllers.clear();
   }
 
   private bodySize(): number {
@@ -795,13 +814,53 @@ export struct NativeMarkdown {
   }
 
   @Builder
-  private inlineText(value: string, size: number, maxWidth: number = 0, lineHeight?: number) {
-    Text() {
-      ForEach(this.inlineParts(value), (part: InlinePart) => {
-        if (part.citation !== undefined) {
+  private inlineText(paragraph: string, value: string, size: number, maxWidth: number = 0, lineHeight?: number) {
+    if (this.previewCitations(value)) {
+      Stack({ alignContent: Alignment.TopStart }) {
+        this.paragraphText(paragraph, value, size, maxWidth, lineHeight, this.citationController(paragraph))
+        if (this.citationAnchor?.paragraph === paragraph) {
+          Row() {}
+            .position({ x: this.citationAnchor?.x ?? 0, y: this.citationAnchor?.y ?? 0 })
+            .width(this.citationAnchor?.width ?? 0).height(this.citationAnchor?.height ?? 0)
+            .hitTestBehavior(HitTestMode.None).accessibilityLevel('no')
+            .bindPopup(this.citationPreviewVisible, {
+              builder: this.citationPreviewCard,
+              placement: Placement.Bottom, targetSpace: 6, enableArrow: false, mask: false,
+              autoCancel: false, focusable: false, popupColor: $r('app.color.native_chat_surface'),
+              backgroundBlurStyle: BlurStyle.NONE,
+            })
+        }
+      }
+      .width('100%')
+      .onAreaChange((oldArea: Area, area: Area) => {
+        if (this.citationAnchor?.paragraph === paragraph &&
+          (oldArea.width !== area.width || oldArea.height !== area.height)) {
+          this.dismissCitationPreview();
+        }
+      })
+    } else {
+      this.paragraphText(paragraph, value, size, maxWidth, lineHeight)
+    }
+  }
+
+  @Builder
+  private paragraphText(paragraph: string, value: string, size: number, maxWidth: number,
+    lineHeight?: number, controller?: TextController) {
+    Text(undefined, { controller: controller }) {
+      ForEach(this.inlineParts(value), (part: InlinePart, index: number) => {
+        if (part.citation !== undefined && controller) {
           Span(part.text).fontSize(11 * this.fontScale).fontWeight(FontWeight.Medium)
-            .fontColor($r('app.color.native_chat_blue_text')).backgroundColor($r('app.color.native_chat_field'))
-            .onClick(() => { this.onCitation(part.citation ?? 0); })
+            .fontColor($r('app.color.native_chat_blue_text'))
+            .textBackgroundStyle({ color: $r('app.color.native_chat_field'), radius: 4 })
+            .onClick(() => { this.activateCitation(part.citation ?? 0); })
+            .onHover((inside: boolean, event: HoverEvent) => {
+              this.hoverCitation(inside, event, paragraph, value, index, size);
+            })
+        } else if (part.citation !== undefined) {
+          Span(part.text).fontSize(11 * this.fontScale).fontWeight(FontWeight.Medium)
+            .fontColor($r('app.color.native_chat_blue_text'))
+            .textBackgroundStyle({ color: $r('app.color.native_chat_field'), radius: 4 })
+            .onClick(() => { this.activateCitation(part.citation ?? 0); })
         } else if (part.formula && this.mathPicture(part.formula, size, false, part.strong)) {
           ImageSpan(this.mathPicture(part.formula, size, false, part.strong)?.png ?? '')
             .width(this.inlineWidth(part.formula, size, part.strong, maxWidth))
@@ -835,6 +894,134 @@ export struct NativeMarkdown {
     .width('100%')
     .accessibilityText(this.inlineAccessibilityText(value))
     .copyOption(CopyOptions.LocalDevice)
+  }
+
+  private previewCitations(value: string): boolean {
+    return this.citationHoverEnabled && this.hasCitations && deviceInfo.sdkApiVersion >= 15 &&
+      this.inlineParts(value).some((part: InlinePart): boolean => part.citation !== undefined);
+  }
+
+  private citationController(paragraph: string): TextController {
+    const existing = this.citationControllers.get(paragraph);
+    if (existing) {
+      return existing;
+    }
+    const controller = new TextController();
+    this.citationControllers.set(paragraph, controller);
+    return controller;
+  }
+
+  private renderedPartLength(part: InlinePart, size: number): number {
+    if (part.formula && this.mathPicture(part.formula, size, false, part.strong)) {
+      return 1; // ImageSpan contributes one placeholder to the paragraph.
+    }
+    return part.math ? part.math.reduce((length: number, span: NativeMathSpan): number => length + span.text.length, 0) :
+      part.text.length;
+  }
+
+  private hoverCitation(inside: boolean, event: HoverEvent, paragraph: string, value: string,
+    index: number, size: number): void {
+    const controller = this.citationControllers.get(paragraph);
+    if (!this.citationHoverEnabled || !controller) {
+      return;
+    }
+    if (!inside) {
+      this.scheduleCitationDismiss();
+      return;
+    }
+    const parts = this.inlineParts(value);
+    const part = parts[index];
+    const source = this.citationSources.find((item: NativeChatSource): boolean => item.index === part?.citation);
+    if (!source || !safeNativeSourceUrl(source.url)) {
+      this.scheduleCitationDismiss();
+      return;
+    }
+    let start = 0;
+    for (let previous = 0; previous < index; previous++) {
+      start += this.renderedPartLength(parts[previous], size);
+    }
+    try {
+      const boxes = controller.getLayoutManager().getRectsForRange({ start: start, end: start + part.text.length },
+        text.RectWidthStyle.TIGHT, text.RectHeightStyle.TIGHT);
+      const ui = this.getUIContext();
+      const x = ui.vp2px(event.x ?? -1);
+      const y = ui.vp2px(event.y ?? -1);
+      const box = boxes.find((candidate: TextBox): boolean =>
+        x >= candidate.rect.left && x <= candidate.rect.right && y >= candidate.rect.top && y <= candidate.rect.bottom);
+      const rect = (box ?? (boxes.length === 1 ? boxes[0] : undefined))?.rect;
+      if (!rect || rect.right <= rect.left || rect.bottom <= rect.top) {
+        return;
+      }
+      this.dismissCitationPreview();
+      this.citationAnchor = {
+        paragraph: paragraph, source: source, x: ui.px2vp(rect.left), y: ui.px2vp(rect.top),
+        width: ui.px2vp(rect.right - rect.left), height: ui.px2vp(rect.bottom - rect.top),
+      };
+      this.citationTimer = setTimeout(() => { this.citationPreviewVisible = true; }, 300);
+    } catch {
+      // The paragraph can disappear or reflow during the hover event.
+      this.dismissCitationPreview();
+    }
+  }
+
+  private dismissCitationPreview(): void {
+    clearTimeout(this.citationTimer);
+    this.citationPreviewVisible = false;
+    this.citationAnchor = undefined;
+  }
+
+  private scheduleCitationDismiss(): void {
+    clearTimeout(this.citationTimer);
+    this.citationTimer = setTimeout(() => { this.dismissCitationPreview(); }, 100);
+  }
+
+  private activateCitation(index: number): void {
+    this.dismissCitationPreview();
+    this.onCitation(index);
+  }
+
+  private citationSourceDate(value: string | null): string {
+    if (!value) return '';
+    const date = new Date(value);
+    return Number.isFinite(date.getTime()) ? date.getFullYear().toString() + '/' +
+      (date.getMonth() + 1).toString().padStart(2, '0') + '/' + date.getDate().toString().padStart(2, '0') : value;
+  }
+
+  @Builder
+  private citationPreviewCard() {
+    if (this.citationAnchor) {
+      Button({ type: ButtonType.Normal, buttonStyle: ButtonStyleMode.TEXTUAL }) {
+        Column({ space: 5 }) {
+          Row({ space: 6 }) {
+            Image(safeNativeSourceUrl(this.citationAnchor.source.siteIcon) || $r('app.media.native_web_search'))
+              .alt($r('app.media.native_web_search')).width(16).height(16).borderRadius(4).draggable(false)
+            Text(this.citationAnchor.source.siteName).fontSize(12).fontColor($r('app.color.native_chat_secondary'))
+              .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).constraintSize({ maxWidth: '62%' })
+            if (this.citationAnchor.source.publishedAt) {
+              Text(this.citationSourceDate(this.citationAnchor.source.publishedAt)).fontSize(12)
+                .fontColor($r('app.color.native_chat_caption')).maxLines(1)
+            }
+          }
+          Text(this.citationAnchor.source.title).fontSize(15).fontWeight(FontWeight.Medium)
+            .fontColor($r('app.color.native_chat_primary')).maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
+          if (this.citationAnchor.source.snippet) {
+            Text(this.citationAnchor.source.snippet).fontSize(13).fontColor($r('app.color.native_chat_secondary'))
+              .maxLines(3).textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
+        }
+        .alignItems(HorizontalAlign.Start).width('100%')
+      }
+      .width(355).padding(16).borderRadius(12)
+      .border({ width: 1, color: $r('app.color.native_chat_stroke') })
+      .onClick(() => { this.activateCitation(this.citationAnchor?.source.index ?? 0); })
+      .onHover((inside: boolean) => {
+        if (inside) {
+          clearTimeout(this.citationTimer);
+        } else {
+          this.scheduleCitationDismiss();
+        }
+      })
+    }
   }
 
   private async copyCode(text: string, key: string): Promise<void> {
@@ -941,7 +1128,7 @@ export struct NativeMarkdown {
           formulaFontSize: (this.bodySize() + 1) * this.fontScale })
       }
     } else if (block.kind === 'heading') {
-      this.inlineText(`**${block.text}**`, this.headingSize(block.level), 0, this.headingLineHeight(block.level))
+      this.inlineText(index.toString(), `**${block.text}**`, this.headingSize(block.level), 0, this.headingLineHeight(block.level))
     } else if (block.kind === 'list') {
       Row({ space: 8 }) {
         Text(block.marker).fontSize(this.bodySize() * this.fontScale)
@@ -949,7 +1136,7 @@ export struct NativeMarkdown {
           .width(block.ordered ? Math.max(10, block.marker.length * 8) : 10)
           .fontColor($r('app.color.native_chat_secondary'))
         Column() {
-          this.inlineText(block.text, this.bodySize())
+          this.inlineText(index.toString(), block.text, this.bodySize())
         }
         .layoutWeight(1).alignItems(HorizontalAlign.Start)
       }
@@ -964,7 +1151,7 @@ export struct NativeMarkdown {
     } else if (block.kind === 'quote') {
       Row({ space: 14 }) {
         Text('│').fontSize(16).fontColor($r('app.color.native_chat_caption'))
-        this.inlineText(block.text, this.bodySize())
+        this.inlineText(index.toString(), block.text, this.bodySize())
       }
       .width('100%')
     } else if (block.kind === 'table') {
@@ -974,7 +1161,8 @@ export struct NativeMarkdown {
             Row({ space: 0 }) {
               ForEach(row, (cell: string, cellIndex: number) => {
                 Column() {
-                  this.inlineText(rowIndex === 0 && cell.length > 0 ? `**${cell}**` : cell,
+                  this.inlineText(index.toString() + ':' + rowIndex.toString() + ':' + cellIndex.toString(),
+                    rowIndex === 0 && cell.length > 0 ? `**${cell}**` : cell,
                     this.muted || rowIndex === 0 ? 14 : 13, 104)
                 }
                 .width(128)
@@ -990,7 +1178,7 @@ export struct NativeMarkdown {
       .scrollable(ScrollDirection.Horizontal)
       .scrollBar(BarState.Off)
     } else {
-      this.inlineText(block.text, this.bodySize())
+      this.inlineText(index.toString(), block.text, this.bodySize())
     }
   }
 

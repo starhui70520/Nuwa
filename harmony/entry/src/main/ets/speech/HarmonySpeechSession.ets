@@ -5,8 +5,7 @@ import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 const MAX_TITLE_LENGTH = 80;
 
 function speechTitle(text: string, fallback: string): string {
-  const sentence = /[^。！？.!?\n]+[。！？.!?]?/.exec(text)?.[0] ?? '';
-  const title = sentence.replace(/\s+/g, ' ').trim() || fallback;
+  const title = text.replace(/\s+/g, ' ').trim() || fallback;
   const characters = Array.from(title);
   return characters.length <= MAX_TITLE_LENGTH ? title : characters.slice(0, MAX_TITLE_LENGTH - 1).join('').trim() + '…';
 }

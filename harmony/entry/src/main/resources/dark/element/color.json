@@ -69,6 +69,10 @@
       "value": "#B3272730"
     },
     {
+      "name": "native_chat_toast",
+      "value": "#43454A"
+    },
+    {
       "name": "native_chat_error",
       "value": "#F25A5A"
     }

@@ -1,10 +1,23 @@
 import { audio } from '@kit.AudioKit';
+import { deviceInfo } from '@kit.BasicServicesKit';
+
+const PCM_SAMPLE_RATE = 24000;
+
+export interface HarmonySpeechPlaybackProgress {
+  playedSeconds: number;
+  bufferedSeconds: number;
+}
 
 export class HarmonySpeechPcm {
   private renderer?: audio.AudioRenderer;
   private stopped: boolean = false;
   private trailing: number = -1;
   private started: boolean = false;
+  private writtenFrames: number = 0;
+  private estimatedFrames: number = 0;
+  private estimateAt: number = -1;
+  private lastDevicePosition: number = 0;
+  private devicePositionOffset: number = 0;
   private readonly onPlaying: () => void;
   private readonly onInterrupted: () => void;
 
@@ -49,11 +62,43 @@ export class HarmonySpeechPcm {
         throw new Error('PCM write failed');
       }
       offset += written;
+      this.advanceEstimate();
+      this.writtenFrames += written / 2;
       if (!this.started && !this.stopped) {
         this.started = true;
         this.onPlaying();
       }
     }
+  }
+
+  progress(): HarmonySpeechPlaybackProgress {
+    this.advanceEstimate();
+    const renderer = this.renderer;
+    if (renderer && deviceInfo.sdkApiVersion >= 19) {
+      try {
+        const position = renderer.getAudioTimestampInfoSync().framePos;
+        if (Number.isFinite(position) && position >= 0) {
+          if (position < this.lastDevicePosition) this.devicePositionOffset += this.lastDevicePosition;
+          this.lastDevicePosition = position;
+          this.estimatedFrames = Math.min(this.writtenFrames, this.devicePositionOffset + position);
+        }
+      } catch {
+        // The device position is unavailable before playback starts or while the route is changing.
+      }
+    }
+    return {
+      playedSeconds: this.estimatedFrames / PCM_SAMPLE_RATE,
+      bufferedSeconds: this.writtenFrames / PCM_SAMPLE_RATE,
+    };
+  }
+
+  private advanceEstimate(): void {
+    const now = Date.now();
+    if (this.estimateAt >= 0) {
+      this.estimatedFrames = Math.min(this.writtenFrames,
+        this.estimatedFrames + Math.max(0, now - this.estimateAt) * PCM_SAMPLE_RATE / 1000);
+    }
+    this.estimateAt = now;
   }
 
   async drain(): Promise<void> {

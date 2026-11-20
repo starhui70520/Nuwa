@@ -19,7 +19,7 @@ import { recordNativeFeedbackLog } from '../native/NativeFeedbackService';
 import { NativeDeepSeekAccount, NativeDeepSeekAccountController, NativeDeepSeekBalance } from '../native/NativeDeepSeekAccount';
 import { NativeOAuthLoopbackServer } from '../native/NativeOAuthLoopbackServer';
 import { nativeCredentialError, NativeOnboarding, NativeOnboardingView } from '../native/NativeOnboarding';
-import { NativeAttachment, NativeAttachmentUploadError, NativeChatAttachments } from '../native/NativeChatAttachments';
+import { NativeAttachment, NativeAttachmentQuota, NativeAttachmentUploadError, NativeChatAttachments } from '../native/NativeChatAttachments';
 import {
   hasNativeClipboardAttachments, NativeClipboardAttachments, readNativeAttachmentClipboard, releaseNativeAttachmentClipboard,
 } from '../native/NativeAttachmentClipboard';
@@ -108,6 +108,7 @@ const EMPTY_TIMELINE: NativeToolTimelineView = { steps: [], answer: '', answerOf
 const MIGRATION_PREFERENCES = 'nuwa_native_migration';
 const MIGRATION_USED_KEY = 'one_click_used';
 const DEEPSEEK_DOCS_URL = 'https://api-docs.deepseek.com/zh-cn/';
+const DELETE_FILE_DOCS_URL = 'https://api-docs.deepseek.com/api/delete-file';
 const HISTORY_SAVE_RETRY_DELAYS = [1000, 2500];
 
 @Entry
@@ -129,6 +130,7 @@ struct NativeChat {
   };
   @State private draft: string = '';
   @State private draftFiles: NativeDraftAttachment[] = [];
+  @State private uploadQuotaText: string = '';
   @State private attachmentIntakeDraftId: string | null = null;
   @State private fileDropHint: 'attachment' | 'history' | null = null;
   @State private imagePreview: string = '';
@@ -210,6 +212,7 @@ struct NativeChat {
   private draftSaving: boolean = false;
   private draftDirty: boolean = false;
   private draftSaveTimer: number = -1;
+  private uploadQuotaTimer: number = -1;
   private readonly settingsStore = new NativeSettingsController();
   private readonly updateSchedule = new NativeUpdateSchedule();
   private updatePreferences: NativeUpdatePreferences = { checkAt: 0, dismissedAt: 0, dismissedVersion: '' };
@@ -329,6 +332,7 @@ struct NativeChat {
 
   onPageHide(): void {
     this.fileDropHint = null;
+    this.clearUploadQuota();
     this.sidebarSearch.cancel();
     this.visible = false;
     this.cancelHistorySaveRetry();
@@ -409,7 +413,25 @@ struct NativeChat {
   }
 
   private toast(message: string): void {
+    this.clearUploadQuota();
     this.getUIContext().getPromptAction().showToast({ message });
+  }
+
+  private showUploadQuota(quota: NativeAttachmentQuota): void {
+    this.clearUploadQuota();
+    this.uploadQuotaText = quota.kind === 'count' ?
+      this.label(`已上传文件数达到上限（${quota.limit} 个），可 `, `Uploaded file limit reached (${quota.limit} files). `) :
+      this.label(`已上传文件占用空间达到上限（${quota.limit}GB），可 `,
+        `Uploaded file storage limit reached (${quota.limit} GB). `);
+    this.uploadQuotaTimer = setTimeout(() => { this.clearUploadQuota(); }, 5000);
+  }
+
+  private clearUploadQuota(): void {
+    if (this.uploadQuotaTimer >= 0) {
+      clearTimeout(this.uploadQuotaTimer);
+      this.uploadQuotaTimer = -1;
+    }
+    if (this.uploadQuotaText) this.uploadQuotaText = '';
   }
 
   private async load(): Promise<void> {
@@ -1465,6 +1487,10 @@ struct NativeChat {
       const message = failure?.contentRejected ? this.label('解析失败', 'Parsing failed') :
         (failure?.status ?? 0) >= 500 ? this.label('服务器繁忙', 'Server busy') : this.label('上传失败', 'Upload failed');
       this.replaceDraftFile(draftId, item, 'failed', message, failure?.retryable ?? true);
+      if (failure?.quota && this.visible &&
+        this.draftItems(draftId).some((file: NativeDraftAttachment): boolean => file.item.id === item.id)) {
+        this.showUploadQuota(failure.quota);
+      }
     }
   }
 
@@ -2935,7 +2961,7 @@ struct NativeChat {
         streaming: message().status === 'pending' || message().status === 'streaming',
         thinking: message().thinking || undefined, stopped: message().status === 'stopped',
         hasResponse: !!this.assistantResponseText(message()),
-        messageId: message().id, activeSourceEntry: this.sourcePanelEntry,
+        messageId: message().id, activeSourceEntry: this.sourcePanelEntry, citationHoverEnabled: this.wide(),
         onSources: (entry: string, sources: NativeChatSource[]): void => { this.toggleSources(entry, sources); },
       })
     } else if (message().reasoning) {
@@ -2969,6 +2995,7 @@ struct NativeChat {
       NativeMarkdown({
         content: this.withCitationMarkers(message().content, message().citations ?? [], message().toolTimeline?.answerOffset ?? 0),
         fontScale: this.settings.chatFontSize / 16, hasCitations: !!message().citations?.length,
+        citationSources: message().sources ?? [], citationHoverEnabled: this.wide(),
         locale: this.settings.locale, theme: this.settings.theme,
         loading: message().status === 'pending' || message().status === 'streaming',
         onCitation: (index: number): void => { this.openCitation(message().sources ?? [], index); },
@@ -4258,6 +4285,37 @@ struct NativeChat {
   }
 
   @Builder
+  private uploadQuotaToast() {
+    Column() {
+      Row({ space: 7 }) {
+        Stack({ alignContent: Alignment.Center }) {
+          Text('!').lineHeight(13).fontSize(12).fontWeight(FontWeight.Bold)
+            .fontColor($r('app.color.native_chat_error'))
+        }
+        .width(16).height(16).borderRadius(8).margin({ top: 3 })
+        .border({ width: 1.3, color: $r('app.color.native_chat_error') })
+        .accessibilityLevel('no').hitTestBehavior(HitTestMode.None)
+        Text() {
+          Span(this.uploadQuotaText)
+          Span(this.label('删除文件', 'Delete files')).fontColor('#679EFE').onClick(() => {
+            this.clearUploadQuota();
+            void this.openLink(DELETE_FILE_DOCS_URL);
+          })
+        }
+        .fontSize(14).lineHeight(22).fontColor('#F5F5F5').layoutWeight(1)
+        .hitTestBehavior(HitTestMode.Transparent)
+      }
+      .alignItems(VerticalAlign.Top).width('100%').constraintSize({ maxWidth: 480 })
+      .padding({ top: 12, bottom: 12, left: 18, right: 18 }).borderRadius(12)
+      .backgroundColor($r('app.color.native_chat_toast'))
+      .shadow({ radius: 16, offsetY: 4, color: '#1A000000' })
+      .hitTestBehavior(HitTestMode.Transparent)
+    }
+    .width('100%').padding({ top: 40, left: 14, right: 14 })
+    .alignItems(HorizontalAlign.Center).hitTestBehavior(HitTestMode.Transparent)
+  }
+
+  @Builder
   private attachmentDragMask() {
     Column({ space: 16 }) {
       Image($r('app.media.native_drag_upload')).width(115).height(84).draggable(false)
@@ -4379,6 +4437,9 @@ struct NativeChat {
           })
         }
         .width('100%').height('100%')
+      }
+      if (this.uploadQuotaText) {
+        this.uploadQuotaToast()
       }
       if (this.fileDropHint && this.canReceiveAttachmentDrop()) {
         if (this.fileDropHint === 'history') {

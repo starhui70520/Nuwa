@@ -8,6 +8,7 @@ import { http } from '@kit.NetworkKit';
 import { NativeChatConfig } from './NativeChatClient';
 import { NativeBackupZipInput } from './NativeBackupZip';
 import type { NativeClipboardAttachments } from './NativeAttachmentClipboard';
+import { ensureNativeDirectory } from './NativeFileSystem';
 
 export interface NativeAttachment {
   id: string;
@@ -23,17 +24,33 @@ export interface NativeAttachment {
   local: boolean;
 }
 
+export interface NativeAttachmentQuota {
+  kind: 'count' | 'storage';
+  limit: string;
+}
+
 export class NativeAttachmentUploadError extends Error {
   readonly retryable: boolean;
   readonly status?: number;
   readonly contentRejected: boolean;
+  readonly quota?: NativeAttachmentQuota;
 
-  constructor(detail: string, retryable: boolean, status?: number, contentRejected: boolean = false) {
+  constructor(detail: string, retryable: boolean, status?: number, contentRejected: boolean = false,
+    quota?: NativeAttachmentQuota) {
     super(detail);
     this.retryable = retryable;
     this.status = status;
     this.contentRejected = contentRejected;
+    this.quota = quota;
   }
+}
+
+function attachmentQuota(result: string): NativeAttachmentQuota | undefined {
+  const message = result.slice(0, 8192);
+  const count = /User file count limit exceeded.*?limit (\d+)/i.exec(message);
+  if (count) return { kind: 'count', limit: count[1] };
+  const storage = /User storage quota exceeded.*?limit (\d+(?:\.\d+)?) GB/i.exec(message);
+  return storage ? { kind: 'storage', limit: storage[1] } : undefined;
 }
 
 function rejectedAttachmentContents(result: string): boolean {
@@ -421,7 +438,7 @@ export class NativeChatAttachments {
     if (count === 0) {
       return [];
     }
-    await fileIo.mkdir(directory(context), true);
+    await ensureNativeDirectory(directory(context));
     const attachments: NativeAttachment[] = [];
     try {
       for (const uri of uris) {
@@ -525,7 +542,7 @@ export class NativeChatAttachments {
       local: true,
     };
     const crc = expectedChecksum === undefined ? undefined : await zlib.createChecksum();
-    await fileIo.mkdir(directory(context), true);
+    await ensureNativeDirectory(directory(context));
     const path = attachmentPath(context, stored);
     const target = await fileIo.open(path, fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
     try {
@@ -688,9 +705,11 @@ export class NativeChatAttachments {
       rejectCanceled(transfer);
       const status = response.responseCode;
       if (status < 200 || status >= 300) {
-        const contentRejected = status === 400 && typeof response.result === 'string' && rejectedAttachmentContents(response.result);
+        const message = status === 400 && typeof response.result === 'string' ? response.result : '';
+        const contentRejected = !!message && rejectedAttachmentContents(message);
         throw new NativeAttachmentUploadError('附件上传失败（HTTP ' + status.toString() + '）。',
-          status === 429 || status >= 500, status >= 100 && status <= 599 ? status : undefined, contentRejected);
+          status === 429 || status >= 500, status >= 100 && status <= 599 ? status : undefined, contentRejected,
+          message ? attachmentQuota(message) : undefined);
       }
       let payload: UploadData;
       try {

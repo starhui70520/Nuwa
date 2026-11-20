@@ -2,6 +2,7 @@ import { common } from '@kit.AbilityKit';
 import { util } from '@kit.ArkTS';
 import { textToSpeech } from '@kit.CoreSpeechKit';
 import { HarmonyCloudSpeech, describeHarmonySpeechError } from './HarmonyCloudSpeech';
+import { HarmonySpeechLineTimeline, splitHarmonySpeechLines } from './HarmonySpeechLines';
 import { HarmonySpeechPcm } from './HarmonySpeechPcm';
 import { HarmonySpeechSession } from './HarmonySpeechSession';
 import {
@@ -11,6 +12,7 @@ import {
 
 const MAX_TEXT_LENGTH = 10000;
 const PLAYBACK_COMPLETE = 1;
+const CAPTION_INTERVAL_MS = 450;
 
 interface Playback {
   id: string;
@@ -25,6 +27,7 @@ interface Playback {
   cloudRoute?: HarmonySpeechRoute;
   cloud?: HarmonyCloudSpeech;
   pcm?: HarmonySpeechPcm;
+  captionTimer?: number;
 }
 
 function splitText(text: string): string[] {
@@ -63,7 +66,8 @@ export class HarmonyTextToSpeech {
 
   speak(id: string, text: string, locale: string, options?: HarmonySpeechOptions, context?: common.UIAbilityContext): void {
     this.stop();
-    const chunks = splitText(stripHarmonySpeechMarkdown(text));
+    const cleaned = stripHarmonySpeechMarkdown(text);
+    const chunks = context ? splitHarmonySpeechLines(cleaned) : splitText(cleaned);
     if (!chunks.length) {
       this.emit(id, 'error', 'failed');
       return;
@@ -93,6 +97,7 @@ export class HarmonyTextToSpeech {
       return;
     }
     this.active = undefined;
+    if (playback.captionTimer !== undefined) clearInterval(playback.captionTimer);
     if (playback.context) this.media.stop();
     playback.cloud?.cancel();
     playback.pcm?.stop();
@@ -244,8 +249,20 @@ export class HarmonyTextToSpeech {
       return;
     }
     const cloud = new HarmonyCloudSpeech();
-    const pcm = new HarmonySpeechPcm(
-      (): void => { this.markPlaying(playback); },
+    const captions = playback.context && playback.chunks.length > 1 ? new HarmonySpeechLineTimeline(playback.chunks) : undefined;
+    let streamEnded = false;
+    const pcm: HarmonySpeechPcm = new HarmonySpeechPcm(
+      (): void => {
+        this.markPlaying(playback);
+        if (captions && this.active === playback) {
+          playback.captionTimer = setInterval(() => {
+            if (this.active !== playback) return;
+            const progress = pcm.progress();
+            const line = captions.advance(progress.playedSeconds, progress.bufferedSeconds, streamEnded);
+            if (line) this.markPlaying(playback, line);
+          }, CAPTION_INTERVAL_MS);
+        }
+      },
       (): void => { this.finish(playback, 'done'); }
     );
     playback.cloud = cloud;
@@ -253,6 +270,7 @@ export class HarmonyTextToSpeech {
     try {
       await cloud.synthesize(route, playback.text, playback.voice, (data: ArrayBuffer): Promise<void> => pcm.write(data));
       if (this.active === playback) {
+        streamEnded = true;
         await pcm.drain();
         this.finish(playback, 'done');
       }

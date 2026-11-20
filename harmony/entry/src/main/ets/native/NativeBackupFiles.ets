@@ -2,6 +2,7 @@ import { common } from '@kit.AbilityKit';
 import { util } from '@kit.ArkTS';
 import { fileIo } from '@kit.CoreFileKit';
 import { NativeBackupZipInput, NativeBackupZipStreamEntry } from './NativeBackupZip';
+import { ensureNativeDirectory } from './NativeFileSystem';
 
 const IO_CHUNK = 256 * 1024;
 const IMAGE_DIRECTORY = 'nuwa-history-images';
@@ -104,7 +105,7 @@ export async function copyBackupFile(from: string, to: string): Promise<void> {
 export async function stageBackupImage(context: common.UIAbilityContext,
   entry: NativeBackupZipStreamEntry): Promise<string> {
   const id = util.generateRandomUUID(true);
-  await fileIo.mkdir(imageDirectory(context), true);
+  await ensureNativeDirectory(imageDirectory(context));
   const path = backupImagePath(context, id);
   try {
     await writeBackupFile(path, true, (write: (chunk: Uint8Array) => Promise<void>): Promise<void> =>

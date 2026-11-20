@@ -23,6 +23,7 @@ export struct NativeToolTimelinePanel {
   @Prop textOffset: number = 0;
   @Prop messageId: string = '';
   @Prop activeSourceEntry: string = '';
+  @Prop citationHoverEnabled: boolean = false;
   onSources: (entry: string, sources: NativeChatSource[]) => void =
     (_entry: string, _sources: NativeChatSource[]) => {};
   @State private expanded: boolean = true;
@@ -302,6 +303,7 @@ export struct NativeToolTimelinePanel {
         } else if (step.type === 'text') {
           NativeMarkdown({
             content: this.sourceText(step), fontScale: this.fontScale * 0.85,
+            locale: this.locale, citationSources: this.sources, citationHoverEnabled: this.citationHoverEnabled,
             hasCitations: this.citations.length > 0, onCitation: (index: number): void => { this.openCitation(index); },
           })
         } else if (step.type === 'thinking' && step.text) {
