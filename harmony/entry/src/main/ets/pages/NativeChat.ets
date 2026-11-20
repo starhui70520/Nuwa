@@ -1,6 +1,7 @@
 import { nativeIconTint } from '../native/NativeIconTint';
 import { NativeMessageCopyButton } from '../native/NativeMessageCopyButton';
 import { NativeReadAloudIndicator } from '../native/NativeReadAloudIndicator';
+import { NativeRecordingIndicator } from '../native/NativeRecordingIndicator';
 import {
   NativeDocumentCard, NATIVE_DOCUMENT_CARD_HEIGHT, NATIVE_DOCUMENT_CARD_WIDTH,
 } from '../native/NativeDocumentCard';
@@ -3157,14 +3158,7 @@ struct NativeChat {
     }
     Button({ type: ButtonType.Circle, buttonStyle: ButtonStyleMode.TEXTUAL }) {
       if (this.voiceInputPhase === 'recording') {
-        Stack() {
-          Circle().width(this.compact() ? 22 : 26).height(this.compact() ? 22 : 26)
-            .fill($r('app.color.native_chat_blue')).opacity(0.2)
-          Circle().width(this.compact() ? 18 : 22).height(this.compact() ? 18 : 22)
-            .fill($r('app.color.native_chat_blue')).opacity(0.75)
-          Image($r('app.media.native_mic_fill')).width(16).height(16).colorFilter(nativeIconTint(Color.White))
-        }
-        .width(this.compact() ? 22 : 26).height(this.compact() ? 22 : 26)
+        NativeRecordingIndicator({ diameter: this.compact() ? 22 : 26 })
       } else if (this.voiceInputPhase === 'transcribing' || this.voiceInputPhase === 'starting') {
         LoadingProgress().width(14).height(14).color($r('app.color.native_chat_action'))
       } else {
