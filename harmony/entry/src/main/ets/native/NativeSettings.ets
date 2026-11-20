@@ -43,6 +43,8 @@ export interface NativeSettings {
 
 const PREFERENCES_NAME: string = 'nuwa_native_settings';
 const API_KEY_ALIAS: string = 'nuwa_native_api_key';
+const SECONDARY_API_KEY_ALIAS: string = 'nuwa_native_api_key_secondary';
+const API_KEY_SLOT_PREFERENCE: string = 'apiKeySecondary';
 const DEFAULT_BASE_URL: string = 'https://api.deepseek.com';
 const DEFAULT_MODEL: string = 'deepseek-chat';
 const CREDENTIAL_BINDING_TAG: asset.Tag = asset.Tag.DATA_LABEL_NORMAL_1;
@@ -79,9 +81,11 @@ const writeCredentialDraft = async (store: preferences.Preferences, draft: Nativ
   await store.put('credentialDraft', draft ? JSON.stringify(draft) : '');
 };
 
-const readCredential = async (): Promise<StoredCredential | null> => {
+const keyAlias = (secondary: boolean): string => secondary ? SECONDARY_API_KEY_ALIAS : API_KEY_ALIAS;
+
+const readCredential = async (secondary: boolean): Promise<StoredCredential | null> => {
   const query: asset.AssetMap = new Map();
-  query.set(asset.Tag.ALIAS, encode(API_KEY_ALIAS));
+  query.set(asset.Tag.ALIAS, encode(keyAlias(secondary)));
   query.set(asset.Tag.RETURN_TYPE, asset.ReturnType.ALL);
   let matches: Array<asset.AssetMap>;
   try {
@@ -104,8 +108,8 @@ const readCredential = async (): Promise<StoredCredential | null> => {
   return { apiKey: decode(secret), binding: decode(binding) };
 };
 
-const writeApiKey = async (apiKey: string, binding: string): Promise<void> => {
-  const alias = encode(API_KEY_ALIAS);
+const writeApiKey = async (apiKey: string, binding: string, secondary: boolean): Promise<void> => {
+  const alias = encode(keyAlias(secondary));
   const query: asset.AssetMap = new Map();
   query.set(asset.Tag.ALIAS, alias);
   if (!apiKey) {
@@ -135,14 +139,20 @@ const writeApiKey = async (apiKey: string, binding: string): Promise<void> => {
   }
 };
 
+const clearStoredApiKeys = async (): Promise<void> => {
+  await writeApiKey('', '', false).catch(() => {});
+  await writeApiKey('', '', true).catch(() => {});
+};
+
 /** Persists non-secret preferences using Preferences and the API key using encrypted Asset Store Kit. */
 export class NativeSettingsController {
   async load(context: common.UIAbilityContext): Promise<NativeSettings> {
     await serializedWrites;
     const store = await preferences.getPreferences(context, PREFERENCES_NAME);
     const signedOut = await store.get('signedOut', false) === true;
-    const credential = signedOut ? null : await readCredential();
-    if (signedOut) await writeApiKey('', '').catch(() => {});
+    const secondary = await store.get(API_KEY_SLOT_PREFERENCE, false) === true;
+    const credential = signedOut ? null : await readCredential(secondary);
+    if (signedOut) await clearStoredApiKeys();
     const baseUrl = await store.get('baseUrl', DEFAULT_BASE_URL) as string;
     const model = await store.get('model', DEFAULT_MODEL) as string;
     const protocol = await store.get('protocol', 'openai') as string;
@@ -190,9 +200,15 @@ export class NativeSettingsController {
   async markSignedOut(context: common.UIAbilityContext): Promise<void> {
     const operation = serializedWrites.then(async (): Promise<void> => {
       const store = await preferences.getPreferences(context, PREFERENCES_NAME);
-      await store.put('signedOut', true);
-      await writeCredentialDraft(store, null);
-      await store.flush();
+      try {
+        await store.put('signedOut', true);
+        await writeCredentialDraft(store, null);
+        await store.flush();
+      } catch (error) {
+        await preferences.removePreferencesFromCache(context, PREFERENCES_NAME).catch(() => {});
+        throw error as Error;
+      }
+      await clearStoredApiKeys();
     });
     serializedWrites = operation.catch(() => {});
     return operation;
@@ -212,44 +228,56 @@ export class NativeSettingsController {
     manualPreference?: NativeManualPreference, verifiedCredential: boolean = false): Promise<void> {
     const operation = serializedWrites.then(async (): Promise<void> => {
       const store = await preferences.getPreferences(context, PREFERENCES_NAME);
-      const credential = await readCredential();
+      const currentSecondary = await store.get(API_KEY_SLOT_PREFERENCE, false) === true;
+      const credential = await readCredential(currentSecondary);
       const nextBinding = bindingFor(settings.baseUrl, settings.protocol);
-
-      if (!settings.apiKey) {
-        await writeApiKey('', '');
-      } else if (!credential || credential.apiKey !== settings.apiKey ||
-        (verifiedCredential && credential.binding !== nextBinding)) {
-        await writeApiKey(settings.apiKey, nextBinding);
-      }
       // Only verification can bind an unchanged key to new endpoint settings.
-      const writes = [
-        store.put('baseUrl', settings.baseUrl),
-        store.put('model', settings.model),
-        store.put('protocol', settings.protocol),
-        store.put('authMode', settings.authMode),
-        store.put('signedOut', settings.signedOut),
-        store.put('theme', settings.theme),
-        store.put('chatFontSize', settings.chatFontSize),
-        store.put('attachmentBinding', settings.attachmentBinding),
-        store.put('thinking', settings.thinking),
-        store.put('search', settings.search),
-        store.put('ttsMuted', settings.ttsMuted),
-        store.put('speechEngine', settings.speechEngine),
-        store.put('speechVoice', settings.speechVoice),
-        store.put('migrationPromptHandled', settings.migrationPromptHandled),
-        store.put('desktopSidebarCollapsed', settings.desktopSidebarCollapsed),
-      ];
-      if (verifiedCredential || settings.signedOut) {
-        writes.push(writeCredentialDraft(store, null));
+      const key = settings.signedOut ? '' : settings.apiKey;
+      const replaceKey = key ? !credential || credential.apiKey !== key ||
+        (verifiedCredential && credential.binding !== nextBinding) : credential !== null;
+      const nextSecondary = replaceKey ? !currentSecondary : currentSecondary;
+      // Keep the prior key usable until preferences persist the slot and its endpoint together.
+      if (replaceKey) await writeApiKey(key, nextBinding, nextSecondary);
+      try {
+        const writes = [
+          store.put(API_KEY_SLOT_PREFERENCE, nextSecondary),
+          store.put('baseUrl', settings.baseUrl),
+          store.put('model', settings.model),
+          store.put('protocol', settings.protocol),
+          store.put('authMode', settings.authMode),
+          store.put('signedOut', settings.signedOut),
+          store.put('theme', settings.theme),
+          store.put('chatFontSize', settings.chatFontSize),
+          store.put('attachmentBinding', settings.attachmentBinding),
+          store.put('thinking', settings.thinking),
+          store.put('search', settings.search),
+          store.put('ttsMuted', settings.ttsMuted),
+          store.put('speechEngine', settings.speechEngine),
+          store.put('speechVoice', settings.speechVoice),
+          store.put('migrationPromptHandled', settings.migrationPromptHandled),
+          store.put('desktopSidebarCollapsed', settings.desktopSidebarCollapsed),
+        ];
+        if (verifiedCredential || settings.signedOut) {
+          writes.push(writeCredentialDraft(store, null));
+        }
+        // Changing other settings must preserve both system defaults and the saved location hierarchy.
+        if (manualPreference === 'locale') {
+          writes.push(store.put('locale', settings.locale));
+        } else if (manualPreference === 'location') {
+          writes.push(store.put('location', JSON.stringify(settings.location)));
+        }
+        await Promise.all(writes);
+        await store.flush();
+      } catch (error) {
+        // A failed flush can leave a pending key. Keep both slots until a successful save.
+        await preferences.removePreferencesFromCache(context, PREFERENCES_NAME).catch(() => {});
+        throw error as Error;
       }
-      // Changing other settings must preserve both system defaults and the saved location hierarchy.
-      if (manualPreference === 'locale') {
-        writes.push(store.put('locale', settings.locale));
-      } else if (manualPreference === 'location') {
-        writes.push(store.put('location', JSON.stringify(settings.location)));
+      if (!key && (replaceKey || verifiedCredential || settings.signedOut)) {
+        await clearStoredApiKeys();
+      } else if (replaceKey || verifiedCredential) {
+        await writeApiKey('', '', !nextSecondary).catch(() => {});
       }
-      await Promise.all(writes);
-      await store.flush();
     });
     serializedWrites = operation.catch(() => {});
     return operation;
