@@ -8,6 +8,38 @@ import {
   NativeToolTimelineStep, NativeToolTimelineView,
 } from './NativeToolTimeline';
 
+const TIMELINE_STEP_SPACING = 6;
+const TIMELINE_SEARCH_ROW_HEIGHT = 34;
+const TIMELINE_RAIL_TOP = 31;
+
+@Component
+struct NativeTimelineRow {
+  @Prop last: boolean = false;
+  @Prop textStep: boolean = false;
+  @BuilderParam content: () => void = this.empty;
+  @State private rowHeight: number = 0;
+
+  @Builder
+  private empty() {}
+
+  private railHeight(): number {
+    return Math.max(0, this.rowHeight - (this.last ? 32 : 24 - TIMELINE_STEP_SPACING));
+  }
+
+  build() {
+    Stack({ alignContent: Alignment.TopStart }) {
+      this.content()
+      if ((!this.last || this.textStep) && this.railHeight() > 0) {
+        Rect().width(1).height(this.railHeight()).fill($r('app.color.native_chat_stroke'))
+          .position({ x: 7.5, y: TIMELINE_RAIL_TOP })
+          .hitTestBehavior(HitTestMode.None).accessibilityLevel('no')
+      }
+    }
+    .width('100%')
+    .onAreaChange((_old: Area, current: Area) => { this.rowHeight = Number(current.height); })
+  }
+}
+
 @Component
 export struct NativeToolTimelinePanel {
   @Prop view: NativeToolTimelineView = { steps: [], answer: '', answerOffset: 0 };
@@ -88,9 +120,8 @@ export struct NativeToolTimelinePanel {
     return this.text('正在思考', 'Thinking');
   }
 
-  private searchLabel(step: NativeToolTimelineStep): string {
+  private searchLabel(step: NativeToolTimelineStep, count: number): string {
     const queries = step.queries ?? [];
-    const count = step.resultUrls?.length ?? 0;
     if (step.status === 'wip') {
       if (queries.length > 0) {
         return this.text('搜索 ', 'Searching for ') + queries[this.tick % queries.length];
@@ -193,10 +224,6 @@ export struct NativeToolTimelinePanel {
     if (step.type === 'text' || step.type === 'thinking') {
       Circle().width(5).height(5).fill(this.currentTextStep(step, index).active ? $r('app.color.native_chat_blue') :
         $r('app.color.native_chat_caption')).margin({ top: 10 })
-    } else if (step.type === 'search') {
-      Image($r('app.media.native_search')).width(15).height(15).margin({ top: 4 })
-        .colorFilter(nativeIconTint(step.status === 'failed' ? $r('app.color.native_chat_caption') :
-          $r('app.color.native_chat_secondary')))
     } else {
       Image($r('app.media.native_web_search')).width(15).height(15).margin({ top: 4 })
         .colorFilter(nativeIconTint($r('app.color.native_chat_secondary')))
@@ -204,28 +231,42 @@ export struct NativeToolTimelinePanel {
   }
 
   @Builder
-  private searchRow(step: NativeToolTimelineStep) {
-    if (step.status !== 'wip' && (step.resultUrls?.length ?? 0) > 0) {
-      Button({ type: ButtonType.Capsule, buttonStyle: ButtonStyleMode.TEXTUAL }) {
-        Row({ space: 6 }) {
-          Text(this.searchLabel(step)).fontSize(13 * this.fontScale).fontColor($r('app.color.native_chat_secondary'))
-            .maxLines(2).textAlign(TextAlign.Start)
-          NativeSourceThumbnails({
-            sources: this.searchSources(step.resultUrls ?? []),
-            borderTint: this.activeSourceEntry === this.sourceEntry(step) ?
-              $r('app.color.native_chat_field') : $r('app.color.native_chat_bg'),
-          })
-        }
+  private searchRowContent(step: NativeToolTimelineStep, matches: NativeChatSource[]) {
+    Row({ space: 6 }) {
+      Row() {
+        Image(step.status === 'failed' ? $r('app.media.native_search_warning') : $r('app.media.native_search'))
+          .width(14).height(14).draggable(false).accessibilityLevel('no')
+          .colorFilter(nativeIconTint($r('app.color.native_chat_secondary')))
       }
-      .padding(0).height(24)
+      .width(16).flexShrink(0).justifyContent(FlexAlign.Center)
+      Text(this.searchLabel(step, matches.length)).fontSize(13 * this.fontScale)
+        .fontColor($r('app.color.native_chat_secondary')).maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis }).textAlign(TextAlign.Start).flexShrink(1)
+      if (step.status !== 'wip' && step.status !== 'failed' && matches.length > 0) {
+        NativeSourceThumbnails({
+          sources: matches,
+          borderTint: this.activeSourceEntry === this.sourceEntry(step) ?
+            $r('app.color.native_chat_field') : $r('app.color.native_chat_bg'),
+        })
+      }
+    }
+    .height(TIMELINE_SEARCH_ROW_HEIGHT)
+  }
+
+  @Builder
+  private searchRow(step: NativeToolTimelineStep, matches: NativeChatSource[]) {
+    if (step.status !== 'wip' && matches.length > 0) {
+      Button({ type: ButtonType.Capsule, buttonStyle: ButtonStyleMode.TEXTUAL }) {
+        this.searchRowContent(step, matches)
+      }
+      .padding(0).height(TIMELINE_SEARCH_ROW_HEIGHT).constraintSize({ maxWidth: '100%' })
       .backgroundColor(this.activeSourceEntry === this.sourceEntry(step) ? $r('app.color.native_chat_field') :
         Color.Transparent)
-      .onClick((): void => { this.showSources(step, step.resultUrls ?? []); })
+      .accessibilityText(this.searchLabel(step, matches.length))
+      .accessibilitySelected(this.activeSourceEntry === this.sourceEntry(step))
+      .onClick((): void => { this.onSources(this.sourceEntry(step), matches); })
     } else {
-      Text(this.searchLabel(step)).fontSize(13 * this.fontScale)
-        .fontColor($r('app.color.native_chat_secondary')).maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis }).textAlign(TextAlign.Start)
-        .width('100%').padding({ top: 3 })
+      this.searchRowContent(step, matches)
     }
   }
 
@@ -297,13 +338,11 @@ export struct NativeToolTimelinePanel {
   }
 
   @Builder
-  private stepRow(step: NativeToolTimelineStep, index: number) {
+  private detailRow(step: NativeToolTimelineStep, index: number) {
     Row({ space: 7 }) {
       Column() { this.marker(step, index) }.width(16).alignItems(HorizontalAlign.Center)
       Column() {
-        if (step.type === 'search') {
-          this.searchRow(step)
-        } else if (step.type === 'open' || step.type === 'read_link') {
+        if (step.type === 'open' || step.type === 'read_link') {
           this.pageRow(step)
         } else if (step.type === 'find') {
           this.findRow(step)
@@ -329,7 +368,7 @@ export struct NativeToolTimelinePanel {
 
   build() {
     if (this.view.steps.length > 0 || (this.hasThinking() && this.streaming)) {
-      Column({ space: 6 }) {
+      Column({ space: TIMELINE_STEP_SPACING }) {
         if (this.hasThinking()) {
           Button({ type: ButtonType.Normal, buttonStyle: ButtonStyleMode.TEXTUAL }) {
             Row({ space: 6 }) {
@@ -346,7 +385,17 @@ export struct NativeToolTimelinePanel {
         }
         if (this.expanded || !this.hasThinking()) {
           ForEach(this.view.steps, (step: NativeToolTimelineStep, index: number) => {
-            Column() { this.stepRow(step, index) }.width('100%')
+            NativeTimelineRow({
+              last: index === this.view.steps.length - 1,
+              textStep: step.type === 'text' || step.type === 'thinking',
+              content: () => {
+                if (step.type === 'search') {
+                  this.searchRow(step, this.searchSources(step.resultUrls ?? []))
+                } else {
+                  this.detailRow(step, index)
+                }
+              },
+            })
           }, (step: NativeToolTimelineStep, _index: number): string => this.stepKey(step))
         }
       }
