@@ -5665,10 +5665,7 @@ struct NativeChat {
         }
         .height('100%').layoutWeight(1)
         if (this.wide() && this.sourcePanelEntry) {
-          Column() { this.sourcesSheet() }
-          .width(this.desktopSourcesWidth()).height('100%')
-          .backgroundColor($r('app.color.native_chat_bg'))
-          .border({ width: { left: 1 }, color: $r('app.color.native_chat_stroke') })
+          Blank().width(this.desktopSourcesWidth()).height('100%')
         }
       }
       .width('100%').height('100%').translate({ x: this.drawerProgress() * this.drawerWidth() })
@@ -5676,9 +5673,12 @@ struct NativeChat {
       .borderRadius(this.drawerProgress() > 0 ? 24 : 0).clip(this.drawerProgress() > 0)
       .accessibilityLevel(this.chatLinkUrl ? 'no-hide-descendants' : 'auto')
       NativeMathRendererHost()
-      if (!this.wide() && this.sourcePanelEntry) {
+      if (this.sourcePanelEntry) {
         Column() { this.sourcesSheet() }
-        .width('100%').height('100%').backgroundColor($r('app.color.native_chat_bg'))
+        .width(this.wide() ? this.desktopSourcesWidth() : '100%').height('100%')
+        .position({ top: 0, right: 0 })
+        .backgroundColor($r('app.color.native_chat_bg'))
+        .border({ width: { left: this.wide() ? 1 : 0 }, color: $r('app.color.native_chat_stroke') })
         .accessibilityLevel(this.chatLinkUrl ? 'no-hide-descendants' : 'auto')
       }
       if (this.authorizing) {
