@@ -30,6 +30,7 @@ struct ChatComposerView: View {
     @State private var pressing = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.nuwaFontScale) private var fontScale
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
     @State private var showPhotoPicker = false
 
@@ -59,10 +60,10 @@ struct ChatComposerView: View {
                     TextField(L10n.t("placeholder", locale: locale), text: $text, axis: .vertical)
                         .focused($isFocused)
                         .lineLimit(1...6)
-                        .font(.system(size: 16))
+                        .font(NuwaFont.body(fontScale))
                         .foregroundStyle(Color.nuwaLabelPrimary)
                         .submitLabel(.return)
-                        .frame(minHeight: 38, alignment: .topLeading)
+                        .frame(minHeight: max(38, 22 + 16 * fontScale), alignment: .topLeading)
                         .padding(.horizontal, 6)
                         .padding(.top, 4)
                 }
@@ -177,11 +178,11 @@ struct ChatComposerView: View {
                             .foregroundStyle(Color.nuwaBrandText)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(item.file.name)
-                                .font(.system(size: 12, weight: .medium))
+                                .font(NuwaFont.badge(fontScale))
                                 .foregroundStyle(Color.nuwaLabelPrimary)
                                 .lineLimit(1)
                             Text(statusSubtitle(item))
-                                .font(.system(size: 10))
+                                .font(NuwaFont.sized(10, scale: fontScale))
                                 .foregroundStyle(isFailed(item.status) ? .red : Color.nuwaLabelTertiary)
                         }
                     }
@@ -247,17 +248,17 @@ struct ChatComposerView: View {
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-                    HStack(spacing: 5) {
-                        Image(systemName: systemImage)
-                            .font(.system(size: 13.5, weight: .semibold))
-                        Text(title)
-                            .font(NuwaFont.pill)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.85)
-                    }
-                    .foregroundStyle(selected ? Color.nuwaBrandText : Color.nuwaLabelPrimary)
-                    .padding(.horizontal, 11)
-                    .padding(.vertical, 6.5)
+            HStack(spacing: 5) {
+                Image(systemName: systemImage)
+                    .font(NuwaFont.sized(13.5, weight: .semibold, scale: fontScale))
+                Text(title)
+                    .font(NuwaFont.pill(fontScale))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            .foregroundStyle(selected ? Color.nuwaBrandText : Color.nuwaLabelPrimary)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 6.5)
             .nuwaPillSurface(selected: selected)
             .frame(minHeight: 34)
             .contentShape(Rectangle())
@@ -344,6 +345,7 @@ private struct VoiceSpectrumBar: View {
     let level: Float
     let seconds: Int
     let onCancel: () -> Void
+    @Environment(\.nuwaFontScale) private var fontScale
 
     var body: some View {
         HStack(spacing: 12) {
@@ -370,7 +372,7 @@ private struct VoiceSpectrumBar: View {
             .frame(maxWidth: .infinity)
 
             Text("录音中 \(seconds)s")
-                .font(.system(size: 12, weight: .medium).monospacedDigit())
+                .font(NuwaFont.badge(fontScale).monospacedDigit())
                 .foregroundStyle(Color.nuwaLabelSecondary)
         }
         .padding(.horizontal, 4)

@@ -82,21 +82,59 @@ enum AttachmentStore {
         return UIImage(data: data)
     }
 
+    /// Sniffs actual file magic bytes for DeepSeek Messages API natively supported image formats
+    /// (JPEG / PNG / GIF / WebP), matching Android `6ba574f` (`sniffApiSupportedImageMime`).
+    static func sniffApiSupportedImageMime(_ data: Data) -> String? {
+        guard data.count >= 4 else { return nil }
+        let header = [UInt8](data.prefix(12))
+        if header.count >= 3 && header[0] == 0xFF && header[1] == 0xD8 && header[2] == 0xFF {
+            return "image/jpeg"
+        }
+        if header.count >= 8
+            && header[0] == 0x89 && header[1] == 0x50 && header[2] == 0x4E && header[3] == 0x47
+            && header[4] == 0x0D && header[5] == 0x0A && header[6] == 0x1A && header[7] == 0x0A {
+            return "image/png"
+        }
+        if header.count >= 6 {
+            let prefix6 = String(bytes: header.prefix(6), encoding: .ascii)
+            if prefix6 == "GIF87a" || prefix6 == "GIF89a" {
+                return "image/gif"
+            }
+        }
+        if header.count >= 12 {
+            let riff = String(bytes: header[0..<4], encoding: .ascii)
+            let webp = String(bytes: header[8..<12], encoding: .ascii)
+            if riff == "RIFF" && webp == "WEBP" {
+                return "image/webp"
+            }
+        }
+        return nil
+    }
+
+    /// Transcodes any unsupported image format (HEIC / HEIF / AVIF / BMP / TIFF / etc., regardless of filename)
+    /// to JPEG (`0.92`) before upload so DeepSeek Messages API never rejects it (`6ba574f`).
+    static func normalizeImageForUpload(data: Data, fileName: String) -> (data: Data, fileName: String, mimeType: String) {
+        if let supportedMime = sniffApiSupportedImageMime(data) {
+            return (data, fileName, supportedMime)
+        }
+        if let uiImage = UIImage(data: data), let jpeg = uiImage.jpegData(compressionQuality: 0.92), !jpeg.isEmpty {
+            let stem = (fileName as NSString).deletingPathExtension
+            let nextName = stem.isEmpty ? "\(fileName).jpg" : "\(stem).jpg"
+            return (jpeg, nextName, "image/jpeg")
+        }
+        return (data, fileName, inferMimeType(fileName: fileName, isImage: true))
+    }
+
     static func saveLocally(data: Data, originalName: String, isImage: Bool) throws -> (FileAttachment, Data) {
         var finalData = data
         var finalName = originalName
         var mimeType = inferMimeType(fileName: originalName, isImage: isImage)
 
         if isImage {
-            let ext = fileExtension(of: originalName)
-            if ext == "heic" || ext == "heif" || ext == "bmp" || mimeType == "image/heic" {
-                if let uiImage = UIImage(data: data), let jpeg = uiImage.jpegData(compressionQuality: 0.88) {
-                    finalData = jpeg
-                    let stem = (originalName as NSString).deletingPathExtension
-                    finalName = "\(stem).jpg"
-                    mimeType = "image/jpeg"
-                }
-            }
+            let normalized = normalizeImageForUpload(data: data, fileName: originalName)
+            finalData = normalized.data
+            finalName = normalized.fileName
+            mimeType = normalized.mimeType
         }
 
         let id = UUID().uuidString

@@ -13,6 +13,7 @@ struct ChatView: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.nuwaFontScale) private var fontScale
 
     @State private var drawerOpen = false
     @SceneStorage("chat.sidebarVisible") private var sidebarVisible = true
@@ -57,8 +58,12 @@ struct ChatView: View {
                     let fullFrame = fullGeo.frame(in: .named("nuwaRoot"))
                     let topSafe = max(0, safeFrame.minY - fullFrame.minY)
                     let bottomSafe = max(0, fullFrame.maxY - safeFrame.maxY)
+                    let leadingSafe = max(0, safeFrame.minX - fullFrame.minX)
+                    let trailingSafe = max(0, fullFrame.maxX - safeFrame.maxX)
                     let wide = fullGeo.size.width >= 680
-                    let drawerWidth = wide ? min(fullGeo.size.width * 0.31, 300) : min(fullGeo.size.width * 0.82, 310)
+                    let drawerWidth = wide
+                        ? min(fullGeo.size.width * 0.35, 300 + leadingSafe)
+                        : min(fullGeo.size.width * 0.82, 310 + leadingSafe)
                     let showSidebar = wide ? sidebarVisible : drawerOpen
 
                     ZStack(alignment: .leading) {
@@ -91,6 +96,7 @@ struct ChatView: View {
                             )
                             .padding(.top, topSafe)
                             .padding(.bottom, bottomSafe)
+                            .padding(.leading, leadingSafe)
                             .task {
                                 if wide { await settings.refreshBalance() }
                             }
@@ -99,7 +105,9 @@ struct ChatView: View {
                                 sidebarShown: showSidebar,
                                 drawerModal: !wide && drawerOpen,
                                 topSafe: topSafe,
-                                bottomSafe: bottomSafe
+                                bottomSafe: bottomSafe,
+                                leadingSafe: (wide && sidebarVisible) ? 0 : leadingSafe,
+                                trailingSafe: trailingSafe
                             ) {
                                 if wide {
                                     sidebarVisible.toggle()
@@ -138,7 +146,7 @@ struct ChatView: View {
                     }
                     .onChange(of: wide) { _, _ in closeDrawer() }
                 }
-                .ignoresSafeArea(.container, edges: .vertical)
+                .ignoresSafeArea(.container, edges: .all)
             }
             .coordinateSpace(name: "nuwaRoot")
         }
@@ -164,6 +172,7 @@ struct ChatView: View {
         }
         .sheet(isPresented: $showSettings) {
             SettingsView(settings: settings, chatStore: chatStore)
+                .environment(\.nuwaFontScale, fontScale)
         }
         .sheet(isPresented: $showMigrationWeb) {
             DeepSeekMigrationSheet { filePath, _ in
@@ -182,6 +191,7 @@ struct ChatView: View {
                 SearchSourcesPanel(items: results, locale: settings.locale) {
                     searchPanelResults = nil
                 }
+                .environment(\.nuwaFontScale, fontScale)
                 .presentationDragIndicator(.visible)
                 .padding(.top, 12)
             }
@@ -197,7 +207,11 @@ struct ChatView: View {
                 Task {
                     do {
                         let count = try await chatStore.importFromFile(url)
-                        chatStore.showToast(count == 1 ? "已导入 1 个对话" : "已导入 \(count) 个对话")
+                        if count == 0 {
+                            chatStore.showToast("本地已是最新记录，未覆盖任何对话")
+                        } else {
+                            chatStore.showToast(count == 1 ? "已导入 1 个对话" : "已导入 \(count) 个对话")
+                        }
                     } catch {
                         chatStore.showToast("导入失败：\(error.localizedDescription)")
                     }
@@ -245,6 +259,8 @@ struct ChatView: View {
         drawerModal: Bool,
         topSafe: CGFloat,
         bottomSafe: CGFloat,
+        leadingSafe: CGFloat,
+        trailingSafe: CGFloat,
         onToggleSidebar: @escaping () -> Void
     ) -> some View {
         let session = chatStore.activeSession
@@ -297,6 +313,8 @@ struct ChatView: View {
             }
             .safeAreaPadding(.top, topSafe)
             .safeAreaPadding(.bottom, bottomSafe)
+            .safeAreaPadding(.leading, leadingSafe)
+            .safeAreaPadding(.trailing, trailingSafe)
         } else {
             legacyMainSurface(
                 session: session,
@@ -307,6 +325,8 @@ struct ChatView: View {
                 allowComposerPress: allowComposerPress,
                 topSafe: topSafe,
                 bottomSafe: bottomSafe,
+                leadingSafe: leadingSafe,
+                trailingSafe: trailingSafe,
                 onToggleSidebar: onToggleSidebar
             )
         }
@@ -320,6 +340,8 @@ struct ChatView: View {
             allowComposerPress: allowComposerPress,
             topSafe: topSafe,
             bottomSafe: bottomSafe,
+            leadingSafe: leadingSafe,
+            trailingSafe: trailingSafe,
             onToggleSidebar: onToggleSidebar
         )
         #endif
@@ -368,6 +390,19 @@ struct ChatView: View {
         }
     }
 
+    private var importBannerText: String {
+        if let progress = chatStore.importProgress {
+            if progress.phase == .merging {
+                return "正在写入本地数据库（共 \(progress.sessions) 个会话）..."
+            }
+            if progress.sessions > 0 {
+                let imgPart = progress.images > 0 ? "，\(progress.images) 个附件" : ""
+                return "正在导入：已读取 \(progress.sessions) 个会话\(imgPart)..."
+            }
+        }
+        return "正在导入并合并历史对话，请稍候..."
+    }
+
     private func topHeaderBar(
         hasMessages: Bool,
         sessionTitle: String,
@@ -381,11 +416,13 @@ struct ChatView: View {
                     ProgressView()
                         .tint(.white)
                         .controlSize(.small)
-                    Text("正在导入并合并历史对话，请稍候...")
-                        .font(NuwaFont.pill)
+                    Text(importBannerText)
+                        .font(NuwaFont.pill(fontScale))
                         .foregroundStyle(.white)
+                        .lineLimit(1)
                 }
                 .frame(maxWidth: .infinity)
+                .padding(.horizontal, 12)
                 .padding(.vertical, 8)
                 .background(Color.nuwaBrand)
             }
@@ -443,7 +480,7 @@ struct ChatView: View {
 
     private func toastPill(_ toast: String) -> some View {
         Text(toast)
-            .font(NuwaFont.pill)
+            .font(NuwaFont.pill(fontScale))
             .foregroundStyle(Color.nuwaLabelPrimary)
             .padding(.horizontal, 16)
             .padding(.vertical, 9)
@@ -463,6 +500,8 @@ struct ChatView: View {
         allowComposerPress: Bool,
         topSafe: CGFloat,
         bottomSafe: CGFloat,
+        leadingSafe: CGFloat,
+        trailingSafe: CGFloat,
         onToggleSidebar: @escaping () -> Void
     ) -> some View {
         ZStack {
@@ -475,6 +514,8 @@ struct ChatView: View {
                 bottomSafe: bottomSafe,
                 onToggleSidebar: onToggleSidebar
             )
+            .padding(.leading, leadingSafe)
+            .padding(.trailing, trailingSafe)
 
             VStack(spacing: 0) {
                 Spacer(minLength: 0)
@@ -483,6 +524,8 @@ struct ChatView: View {
                     allowComposerPress: allowComposerPress,
                     onToggleSidebar: onToggleSidebar
                 )
+                .padding(.leading, leadingSafe)
+                .padding(.trailing, trailingSafe)
                 .background(heightReader { height in
                     if height > 0, abs(composerHeight - height) > 0.5 {
                         composerHeight = height
@@ -513,6 +556,8 @@ struct ChatView: View {
                     drawerModal: drawerModal,
                     onToggleSidebar: onToggleSidebar
                 )
+                .padding(.leading, leadingSafe)
+                .padding(.trailing, trailingSafe)
                 .background(heightReader { height in
                     if height > 0, abs(headerHeight - height) > 0.5 {
                         headerHeight = height
@@ -556,7 +601,7 @@ struct ChatView: View {
                 .shadow(color: Color.black.opacity(0.08), radius: 14, x: 0, y: 4)
 
             Text(L10n.t("welcome", locale: settings.locale))
-                .font(.system(size: 20, weight: .semibold))
+                .font(NuwaFont.sized(20, weight: .semibold, scale: fontScale))
                 .foregroundStyle(Color.nuwaLabelPrimary)
                 .multilineTextAlignment(.center)
             Spacer()
@@ -643,7 +688,7 @@ struct ChatView: View {
                                 editingMessageId = nil
                             } label: {
                                 Text(L10n.t("cancel", locale: settings.locale))
-                                    .font(.system(size: 13, weight: .medium))
+                                    .font(NuwaFont.captionMedium(fontScale))
                                     .foregroundStyle(Color.nuwaLabelSecondary)
                                     .padding(.horizontal, 14)
                                     .padding(.vertical, 7)
@@ -658,7 +703,7 @@ struct ChatView: View {
                                 editingMessageId = nil
                             } label: {
                                 Text("发送")
-                                    .font(.system(size: 13, weight: .semibold))
+                                    .font(NuwaFont.sized(13, weight: .semibold, scale: fontScale))
                                     .foregroundStyle(.white)
                                     .padding(.horizontal, 16)
                                     .padding(.vertical, 7)
@@ -767,7 +812,7 @@ struct ChatView: View {
                         ProgressView()
                             .controlSize(.small)
                         Text(L10n.t("thinkingNow", locale: settings.locale))
-                            .font(.subheadline)
+                            .font(NuwaFont.sublabel(fontScale))
                             .foregroundStyle(Color.nuwaLabelSecondary)
                     }
                 }
@@ -775,24 +820,24 @@ struct ChatView: View {
                 if let error = message.errorMessage {
                     VStack(alignment: .leading, spacing: 8) {
                         Label(error, systemImage: "exclamationmark.triangle.fill")
-                            .font(.footnote)
+                            .font(NuwaFont.caption(fontScale))
                             .foregroundStyle(.red)
                         HStack(spacing: 12) {
                             if error.contains("API Key") || error.contains("401") {
                                 Button("更换 API Key") { showSettings = true }
-                                    .font(.caption.weight(.semibold))
+                                    .font(NuwaFont.sized(12, weight: .semibold, scale: fontScale))
                                     .foregroundStyle(Color.nuwaBrandText)
                             }
                             if error.contains("余额不足") || error.contains("402") {
                                 Button("前往充值") { openURL(topUpURL) }
-                                    .font(.caption.weight(.semibold))
+                                    .font(NuwaFont.sized(12, weight: .semibold, scale: fontScale))
                                     .foregroundStyle(Color.nuwaBrandText)
                             }
                             if !chatStore.isGenerating {
                                 Button("重试") {
                                     chatStore.regenerateReply(messageId: message.id, settings: settings)
                                 }
-                                .font(.caption.weight(.semibold))
+                                .font(NuwaFont.sized(12, weight: .semibold, scale: fontScale))
                                 .foregroundStyle(Color.nuwaBrandText)
                             }
                         }
@@ -810,7 +855,7 @@ struct ChatView: View {
                         Text(settings.locale == .enUS
                             ? "AI-generated content. Verify important information."
                             : "本回答由 AI 生成，内容仅供参考，请仔细甄别")
-                            .font(.footnote.italic())
+                            .font(NuwaFont.caption(fontScale).italic())
                             .foregroundStyle(Color.nuwaLabelTertiary)
                     }
 
@@ -844,10 +889,10 @@ struct ChatView: View {
                                 chatStore.continueReply(messageId: message.id, settings: settings)
                             } label: {
                                 Text(L10n.t("continueGen", locale: settings.locale))
-                                    .font(.caption.weight(.medium))
+                                    .font(NuwaFont.badge(fontScale))
                                     .foregroundStyle(Color.nuwaBrandText)
                                     .padding(.horizontal, 10)
-                                    .frame(height: 28)
+                                    .frame(minHeight: 28)
                                     .nuwaPillSurface(selected: true)
                             }
                             .buttonStyle(NuwaTactileButtonStyle())
@@ -911,11 +956,11 @@ struct ChatView: View {
                                     .foregroundStyle(Color.nuwaBrandText)
                                 VStack(alignment: .leading, spacing: 1) {
                                     Text(file.name)
-                                        .font(.system(size: 12, weight: .medium))
+                                        .font(NuwaFont.badge(fontScale))
                                         .foregroundStyle(Color.nuwaLabelPrimary)
                                         .lineLimit(1)
                                     Text(AttachmentStore.formatByteSize(file.size))
-                                        .font(.system(size: 10))
+                                        .font(NuwaFont.sized(10, scale: fontScale))
                                         .foregroundStyle(Color.nuwaLabelTertiary)
                                 }
                             }
@@ -1230,6 +1275,7 @@ private struct ChatHeaderView: View {
     let onCreateNewSession: () -> Void
     let onToast: (String) -> Void
 
+    @Environment(\.nuwaFontScale) private var fontScale
 
     var body: some View {
         HStack(spacing: 10) {
@@ -1251,7 +1297,7 @@ private struct ChatHeaderView: View {
             if hasMessages {
                 let displayTitle = sessionTitle.isEmpty ? L10n.t("untitledChat", locale: settings.locale) : sessionTitle
                 Text(displayTitle)
-                    .font(NuwaFont.navTitle)
+                    .font(NuwaFont.navTitle(fontScale))
                     .foregroundStyle(Color.nuwaLabelPrimary)
                     .lineLimit(1)
                     .frame(maxWidth: .infinity, alignment: .leading)

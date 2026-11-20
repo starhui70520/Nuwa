@@ -198,6 +198,16 @@ final class LiveReplyStore: ObservableObject {
     var revision: Int = 0
 }
 
+struct ImportProgress: Equatable {
+    enum Phase: Equatable {
+        case reading
+        case merging
+    }
+    let phase: Phase
+    let sessions: Int
+    let images: Int
+}
+
 @MainActor
 final class ChatStore: ObservableObject {
     @Published private(set) var sessions: [ChatSession] = [] {
@@ -208,6 +218,7 @@ final class ChatStore: ObservableObject {
     }
     @Published var isGenerating = false
     @Published private(set) var importingHistory = false
+    @Published private(set) var importProgress: ImportProgress?
     @Published var toastMessage: String?
     @Published private(set) var historyLoaded = false
     @Published private(set) var historyLoadFailed = false
@@ -625,13 +636,16 @@ final class ChatStore: ObservableObject {
         for file in liveQuestion.files where file.serverId == nil {
             try Task.checkCancellation()
             guard let url = AttachmentStore.localURL(for: file),
-                  let data = try? Data(contentsOf: url)
+                  let rawData = try? Data(contentsOf: url)
             else { continue }
-            let purpose = AttachmentStore.uploadPurpose(fileName: file.name, isImage: file.isImage)
+            let normalized = file.isImage
+                ? AttachmentStore.normalizeImageForUpload(data: rawData, fileName: file.name)
+                : (data: rawData, fileName: file.name, mimeType: file.mimeType)
+            let purpose = AttachmentStore.uploadPurpose(fileName: normalized.fileName, isImage: file.isImage)
             let serverId = try await AIClient.uploadFile(
-                data: data,
-                fileName: file.name,
-                mimeType: file.mimeType,
+                data: normalized.data,
+                fileName: normalized.fileName,
+                mimeType: normalized.mimeType,
                 purpose: purpose,
                 secret: secret,
                 useAccount: useAccount,
@@ -647,13 +661,16 @@ final class ChatStore: ObservableObject {
             for file in msg.files where file.serverId == nil && uploadedMap[file.id] == nil {
                 try Task.checkCancellation()
                 guard let url = AttachmentStore.localURL(for: file),
-                      let data = try? Data(contentsOf: url)
+                      let rawData = try? Data(contentsOf: url)
                 else { continue }
-                let purpose = AttachmentStore.uploadPurpose(fileName: file.name, isImage: file.isImage)
+                let normalized = file.isImage
+                    ? AttachmentStore.normalizeImageForUpload(data: rawData, fileName: file.name)
+                    : (data: rawData, fileName: file.name, mimeType: file.mimeType)
+                let purpose = AttachmentStore.uploadPurpose(fileName: normalized.fileName, isImage: file.isImage)
                 if let serverId = try? await AIClient.uploadFile(
-                    data: data,
-                    fileName: file.name,
-                    mimeType: file.mimeType,
+                    data: normalized.data,
+                    fileName: normalized.fileName,
+                    mimeType: normalized.mimeType,
                     purpose: purpose,
                     secret: secret,
                     useAccount: useAccount,
@@ -1005,13 +1022,21 @@ final class ChatStore: ObservableObject {
         guard historyLoaded else { throw HistoryUnavailable() }
         guard !importingHistory else { throw HistoryImportInProgress() }
         importingHistory = true
-        defer { importingHistory = false }
-        let parsed: [ChatSession] = try await Task.detached(priority: .userInitiated) {
+        importProgress = ImportProgress(phase: .reading, sessions: 0, images: 0)
+        defer {
+            importingHistory = false
+            importProgress = nil
+        }
+        let parsed: [ChatSession] = try await Task.detached(priority: .userInitiated) { [weak self] in
             let accessed = url.startAccessingSecurityScopedResource()
             defer { if accessed { url.stopAccessingSecurityScopedResource() } }
             let data = try Data(contentsOf: url, options: .mappedIfSafe)
             if data.count >= 4 && data[0] == 0x50 && data[1] == 0x4B && data[2] == 0x03 && data[3] == 0x04 {
-                return try DeepSeekZipImporter.parseZipData(data)
+                return try DeepSeekZipImporter.parseZipData(data) { sessionsCount, imagesCount in
+                    Task { @MainActor [weak self] in
+                        self?.importProgress = ImportProgress(phase: .reading, sessions: sessionsCount, images: imagesCount)
+                    }
+                }
             }
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
@@ -1022,6 +1047,12 @@ final class ChatStore: ObservableObject {
                 return normalized
             }
         }.value
+        let current = importProgress
+        importProgress = ImportProgress(
+            phase: .merging,
+            sessions: max(parsed.count, current?.sessions ?? 0),
+            images: current?.images ?? 0
+        )
         return try await commitImportedSessions(parsed)
     }
 
@@ -1035,7 +1066,11 @@ final class ChatStore: ObservableObject {
                     UserDefaults.standard.removeObject(forKey: MigrationWebViewController.keyPendingPath)
                     UserDefaults.standard.removeObject(forKey: MigrationWebViewController.keyPendingName)
                 }
-                showToast(count == 1 ? "已导入 1 个对话" : "已导入 \(count) 个对话")
+                if count == 0 {
+                    showToast("本地已是最新记录，未覆盖任何对话")
+                } else {
+                    showToast(count == 1 ? "已导入 1 个对话" : "已导入 \(count) 个对话")
+                }
                 succeeded = true
             } catch {
                 AppLogStore.shared.record(.error, source: "migration.import", message: error.localizedDescription)
@@ -1109,30 +1144,119 @@ final class ChatStore: ObservableObject {
         return merged.count
     }
 
+    private static func messageSignature(_ message: ChatMessage) -> String {
+        if message.role == .user {
+            let files = message.files.map { "\($0.name):\($0.size)" }.joined(separator: ",")
+            return "U:\(message.content)|\(files)"
+        }
+        let textFromBlocks = message.blocks.compactMap { block -> String? in
+            if case .text(_, let text, _, _) = block { return text }
+            return nil
+        }.joined(separator: "\n")
+        let text = textFromBlocks.isEmpty ? message.content : textFromBlocks
+        return "A:\(text)"
+    }
+
+    /// Computes root-to-node path signatures for every message in a session tree (`7d41c2b`),
+    /// accurately detecting whether local and imported sessions diverged.
+    private static func buildSessionPathSignatures(_ session: ChatSession) -> Set<String> {
+        var normalized = session
+        normalized.ensureTreeNormalized()
+        let byId = Dictionary(uniqueKeysWithValues: normalized.messages.map { ($0.id, $0) })
+        var memo: [UUID: String] = [:]
+        let maxDepth = normalized.messages.count
+
+        func resolve(_ message: ChatMessage, depth: Int) -> String {
+            if let cached = memo[message.id] { return cached }
+            let parentPath: String
+            if let pid = message.parentId, depth < maxDepth, let parent = byId[pid] {
+                parentPath = resolve(parent, depth: depth + 1)
+            } else {
+                parentPath = ""
+            }
+            let path = "\(parentPath)>\(messageSignature(message))"
+            memo[message.id] = path
+            return path
+        }
+
+        var paths = Set<String>()
+        paths.reserveCapacity(normalized.messages.count)
+        for message in normalized.messages {
+            paths.insert(resolve(message, depth: 0))
+        }
+        return paths
+    }
+
+    private static func withBranchPrefix(_ title: String, prefix: String) -> String {
+        var base = title
+        if base.hasPrefix("N分支·") || base.hasPrefix("D分支·") {
+            base = String(base.dropFirst(4))
+        }
+        let clean = base.trimmingCharacters(in: .whitespacesAndNewlines)
+        return "\(prefix)\(clean.isEmpty ? "未命名对话" : clean)"
+    }
+
+    /// Protected incremental merge matching Android `v0.1.21` (`7d41c2b`):
+    /// 1. Incoming behind or equal to local -> skip without overwriting local.
+    /// 2. Incoming strictly ahead and local has no unique messages -> overwrite with incoming (preserving pin).
+    /// 3. Both local and incoming added distinct messages -> branch into `N分支·` (local) and `D分支·` (new ID).
     private func mergeSessions(_ incoming: [ChatSession]) -> (sessions: [ChatSession], count: Int, changed: Bool) {
         var merged = sessions
         var existingById = Dictionary(uniqueKeysWithValues: merged.enumerated().map { ($1.id, $0) })
         var importedCount = 0
         var changed = false
+
         for item in incoming {
-            if let idx = existingById[item.id] {
-                if item.updatedAt > merged[idx].updatedAt || item.messages.count > merged[idx].messages.count {
-                    merged[idx].title = item.title
-                    merged[idx].rootMessageId = item.rootMessageId
-                    merged[idx].messages = item.messages
-                    merged[idx].updatedAt = max(merged[idx].updatedAt, item.updatedAt)
-                    if item.isPinned {
-                        merged[idx].isPinned = true
-                        merged[idx].pinnedAt = merged[idx].pinnedAt ?? item.pinnedAt ?? item.updatedAt
-                    }
-                    changed = true
-                }
-            } else {
+            guard let idx = existingById[item.id] else {
                 existingById[item.id] = merged.count
                 merged.append(item)
                 importedCount += 1
                 changed = true
+                continue
             }
+
+            let existing = merged[idx]
+            let localPaths = Self.buildSessionPathSignatures(existing)
+            let incomingPaths = Self.buildSessionPathSignatures(item)
+            let localHasExtra = localPaths.contains { !incomingPaths.contains($0) }
+            let incomingHasExtra = incomingPaths.contains { !localPaths.contains($0) }
+
+            if !incomingHasExtra {
+                // Rule 1: Imported record is behind or equal to local -> skip.
+                continue
+            }
+
+            if !localHasExtra {
+                // Rule 2: Imported record strictly has more than local -> overwrite cleanly, preserving pin state.
+                merged[idx].title = item.title
+                merged[idx].rootMessageId = item.rootMessageId
+                merged[idx].messages = item.messages
+                merged[idx].updatedAt = max(existing.updatedAt, item.updatedAt)
+                if existing.isPinned || item.isPinned {
+                    merged[idx].isPinned = true
+                    merged[idx].pinnedAt = existing.pinnedAt ?? item.pinnedAt ?? item.updatedAt
+                }
+                importedCount += 1
+                changed = true
+                continue
+            }
+
+            // Rule 3: Diverged -> preserve both as independent N/D branches.
+            merged[idx].title = Self.withBranchPrefix(existing.title, prefix: "N分支·")
+            let incomingBranched = ChatSession(
+                id: UUID(),
+                title: Self.withBranchPrefix(item.title, prefix: "D分支·"),
+                rootMessageId: item.rootMessageId,
+                messages: item.messages,
+                createdAt: item.createdAt,
+                updatedAt: item.updatedAt,
+                isPinned: item.isPinned,
+                pinnedAt: item.pinnedAt
+            )
+            existingById[incomingBranched.id] = merged.count
+            merged.append(incomingBranched)
+            importedCount += 1
+            changed = true
         }
         return (merged, importedCount, changed)
     }

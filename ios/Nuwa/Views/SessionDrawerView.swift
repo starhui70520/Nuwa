@@ -24,6 +24,7 @@ struct SessionDrawerView: View {
     let onOpenSettings: () -> Void
 
     @Environment(\.openURL) private var openURL
+    @Environment(\.nuwaFontScale) private var fontScale
     @State private var searchText = ""
     @State private var searchResult: (query: String, ids: Set<UUID>)?
     @State private var selectMode = false
@@ -110,7 +111,7 @@ struct SessionDrawerView: View {
             if selectMode {
                 HStack(spacing: 12) {
                     Text(loc == .enUS ? "\(validSelectedIds.count) selected" : "已选择 \(validSelectedIds.count) 个对话")
-                        .font(NuwaFont.navTitle)
+                        .font(NuwaFont.navTitle(fontScale))
                         .foregroundStyle(Color.nuwaLabelPrimary)
                     Spacer()
                     Button {
@@ -127,17 +128,17 @@ struct SessionDrawerView: View {
                     .buttonStyle(NuwaTactileButtonStyle())
                     .accessibilityLabel("退出多选")
                 }
-                .frame(minHeight: 44)
+                .frame(minHeight: max(44, 28 + 16 * fontScale))
                 .padding(.horizontal, 16)
                 .padding(.top, 10)
                 .padding(.bottom, 12)
             } else {
                 HStack(spacing: 10) {
                     Image(systemName: "magnifyingglass")
-                        .font(.system(size: 15.5, weight: .regular))
+                        .font(NuwaFont.sized(15.5, weight: .regular, scale: fontScale))
                         .foregroundStyle(Color.nuwaLabelTertiary)
                     TextField(L10n.t("searchPlaceholder", locale: loc), text: $searchText)
-                        .font(NuwaFont.control)
+                        .font(NuwaFont.control(fontScale))
                         .foregroundStyle(Color.nuwaLabelPrimary)
                     if !searchText.isEmpty {
                         Button {
@@ -151,7 +152,7 @@ struct SessionDrawerView: View {
                     }
                 }
                 .padding(.horizontal, 14)
-                .frame(height: 44)
+                .frame(minHeight: max(44, 28 + 16 * fontScale))
                 .background(Color.nuwaSidebarSearchFill, in: Capsule())
                 .overlay(Capsule().strokeBorder(Color.nuwaControlBorder, lineWidth: 0.85))
                 .padding(.horizontal, 16)
@@ -164,10 +165,10 @@ struct SessionDrawerView: View {
                 VStack(spacing: 10) {
                     Spacer()
                     Text(L10n.t("emptyTitle", locale: loc))
-                        .font(NuwaFont.bodyMedium)
+                        .font(NuwaFont.bodyMedium(fontScale))
                         .foregroundStyle(Color.nuwaLabelPrimary)
                     Text(L10n.t("emptySubtitle", locale: loc))
-                        .font(NuwaFont.sublabel)
+                        .font(NuwaFont.sublabel(fontScale))
                         .foregroundStyle(Color.nuwaLabelTertiary)
                         .multilineTextAlignment(.center)
                     Button {
@@ -175,10 +176,10 @@ struct SessionDrawerView: View {
                         onClose()
                     } label: {
                         Text(L10n.t("newChat", locale: loc))
-                            .font(NuwaFont.pill)
+                            .font(NuwaFont.pill(fontScale))
                             .foregroundStyle(.white)
                             .padding(.horizontal, 20)
-                            .frame(height: 40)
+                            .frame(minHeight: max(40, 26 + 14 * fontScale))
                             .background(Color.nuwaBrand, in: Capsule())
                             .contentShape(Capsule())
                     }
@@ -195,7 +196,7 @@ struct SessionDrawerView: View {
                         ProgressView().controlSize(.small)
                     } else {
                         Text(L10n.t("emptySearch", locale: loc))
-                            .font(NuwaFont.sublabel)
+                            .font(NuwaFont.sublabel(fontScale))
                             .foregroundStyle(Color.nuwaLabelTertiary)
                     }
                     Spacer()
@@ -207,7 +208,7 @@ struct SessionDrawerView: View {
                         ForEach(Array(groups.enumerated()), id: \.element.id) { groupIdx, group in
                             HStack(alignment: .center) {
                                 Text(group.title)
-                                    .font(NuwaFont.sectionHeader)
+                                    .font(NuwaFont.sectionHeader(fontScale))
                                     .foregroundStyle(Color.nuwaLabelTertiary)
                                 Spacer()
                                 if groupIdx == 0 && !selectMode {
@@ -248,9 +249,9 @@ struct SessionDrawerView: View {
                     } label: {
                         HStack(spacing: 6) {
                             Image(systemName: allSelectedPinned ? "pin.slash" : "pin")
-                                .font(.system(size: 15, weight: .medium))
+                                .font(NuwaFont.sized(15, weight: .medium, scale: fontScale))
                             Text(L10n.t(allSelectedPinned ? "unpin" : "pin", locale: loc))
-                                .font(NuwaFont.controlMedium)
+                                .font(NuwaFont.controlMedium(fontScale))
                         }
                         .foregroundStyle(validSelectedIds.isEmpty ? Color.nuwaLabelTertiary : Color.nuwaLabelPrimary)
                         .frame(maxWidth: .infinity, minHeight: 44)
@@ -268,9 +269,9 @@ struct SessionDrawerView: View {
                     } label: {
                         HStack(spacing: 6) {
                             Image(systemName: "trash")
-                                .font(.system(size: 15, weight: .medium))
+                                .font(NuwaFont.sized(15, weight: .medium, scale: fontScale))
                             Text(L10n.t("delete", locale: loc))
-                                .font(NuwaFont.controlMedium)
+                                .font(NuwaFont.controlMedium(fontScale))
                         }
                         .foregroundStyle(validSelectedIds.isEmpty ? Color.nuwaLabelTertiary : .red)
                         .frame(maxWidth: .infinity, minHeight: 44)
@@ -283,7 +284,7 @@ struct SessionDrawerView: View {
                 .padding(.top, 8)
                 .padding(.bottom, 12)
             } else {
-                HStack(spacing: 12) {
+                HStack(spacing: 8) {
                     Button {
                         onOpenSettings()
                     } label: {
@@ -294,43 +295,52 @@ struct SessionDrawerView: View {
                                 .frame(width: 34, height: 34)
                                 .clipShape(Circle())
 
-                            HStack(spacing: 8) {
-                                Text(settings.profileDisplayName)
-                                    .font(.system(size: 15.5, weight: .medium))
-                                    .foregroundStyle(Color.nuwaLabelPrimary)
-                                    .lineLimit(1)
+                            Text(settings.profileDisplayName)
+                                .font(NuwaFont.sized(15.5, weight: .medium, scale: fontScale))
+                                .foregroundStyle(Color.nuwaLabelPrimary)
+                                .lineLimit(1)
+                        }
+                        .frame(minHeight: 50, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(NuwaTactileButtonStyle(pressedScale: 0.98))
 
-                                if let balance = settings.deepSeekBalanceText {
-                                    Text(balance)
-                                        .font(NuwaFont.badge.monospacedDigit())
-                                        .foregroundStyle(settings.isBalanceLow ? .red : Color.nuwaBrandText)
-                                        .padding(.horizontal, 7)
-                                        .padding(.vertical, 2)
-                                        .background(
-                                            (settings.isBalanceLow ? Color.red : Color.nuwaBrand).opacity(0.14),
-                                            in: Capsule()
-                                        )
-                                        .lineLimit(1)
-                                        .onTapGesture {
-                                            openURL(topUpURL)
-                                        }
-                                }
-                            }
+                    if let balance = settings.deepSeekBalanceText {
+                        Button {
+                            openURL(topUpURL)
+                        } label: {
+                            Text(balance)
+                                .font(NuwaFont.badge(fontScale).monospacedDigit())
+                                .foregroundStyle(settings.isBalanceLow ? .red : Color.nuwaBrandText)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(
+                                    (settings.isBalanceLow ? Color.red : Color.nuwaBrand).opacity(0.14),
+                                    in: Capsule()
+                                )
+                                .lineLimit(1)
+                                .contentShape(Capsule())
+                        }
+                        .buttonStyle(NuwaTactileButtonStyle(pressedScale: 0.95))
+                        .accessibilityLabel(L10n.t("topUp", locale: loc))
+                    }
 
-                            Spacer(minLength: 6)
-
+                    Button {
+                        onOpenSettings()
+                    } label: {
+                        HStack {
+                            Spacer(minLength: 4)
                             Image(systemName: "ellipsis")
                                 .font(.system(size: 16, weight: .medium))
                                 .foregroundStyle(Color.nuwaLabelTertiary)
                         }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 8)
-                        .frame(maxWidth: .infinity, minHeight: 50, alignment: .leading)
+                        .frame(maxWidth: .infinity, minHeight: 50)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(NuwaTactileButtonStyle(pressedScale: 0.98))
+                    .accessibilityLabel(L10n.t("settings", locale: loc))
                 }
-                .padding(.horizontal, 14)
+                .padding(.horizontal, 22)
                 .padding(.top, 6)
                 .padding(.bottom, 10)
             }
@@ -408,7 +418,7 @@ struct SessionDrawerView: View {
             }
 
             Text(session.title.isEmpty ? L10n.t("untitledChat", locale: loc) : session.title)
-                .font(isActive ? NuwaFont.rowTitleMedium : NuwaFont.rowTitle)
+                .font(isActive ? NuwaFont.rowTitleMedium(fontScale) : NuwaFont.rowTitle(fontScale))
                 .foregroundStyle(isActive ? Color.nuwaBrandText : Color.nuwaLabelPrimary)
                 .lineLimit(1)
 
@@ -428,7 +438,8 @@ struct SessionDrawerView: View {
         }
         .padding(.leading, 14)
         .padding(.trailing, isActive && !selectMode ? 8 : 14)
-        .frame(maxWidth: .infinity, minHeight: 46, alignment: .leading)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, minHeight: max(46, 30 + 16 * fontScale), alignment: .leading)
         .background(
             isActive ? Color.nuwaSidebarActive : (selectMode && isSelected ? Color.nuwaSidebarActive.opacity(0.65) : Color.clear),
             in: RoundedRectangle(cornerRadius: 16, style: .continuous)
@@ -440,12 +451,6 @@ struct SessionDrawerView: View {
             } else {
                 onSelectSession(session.id)
                 onClose()
-            }
-        }
-        .onLongPressGesture(minimumDuration: 0.45) {
-            if !selectMode {
-                triggerLightHaptic()
-                enterSelectMode(initialId: session.id)
             }
         }
         .contextMenu {

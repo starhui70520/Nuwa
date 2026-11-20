@@ -534,6 +534,7 @@ enum AIClient {
         if !(200...299).contains(http.statusCode) {
             let error = AIClientError.httpError(http.statusCode, try await collectErrorText(from: bytes))
             if let (messageIndex, blockIndex) = error.unsupportedImageIndices(),
+               payloadMessages.indices.contains(messageIndex),
                messageIndex <= questionIndex,
                let blocks = payloadMessages[messageIndex]["content"] as? [[String: Any]],
                blocks.indices.contains(blockIndex), blocks[blockIndex]["type"] as? String == "image",

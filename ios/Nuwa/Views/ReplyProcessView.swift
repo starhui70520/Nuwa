@@ -28,7 +28,7 @@ struct ReplyProcessView: View {
                             .rotationEffect(.degrees(expanded ? 90 : 0))
                             .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: expanded)
                     }
-                    .font(.system(size: max(14, fontSize - 1), weight: .medium))
+                    .font(.system(size: fontSize * 0.9375, weight: .medium))
                     .frame(minHeight: 34)
                     .contentShape(Rectangle())
                 }
@@ -76,14 +76,14 @@ struct ReplyProcessView: View {
             HStack(alignment: .top, spacing: 6) {
                 Circle().fill(active ? Color.nuwaBrandText : .nuwaLabelTertiary)
                     .frame(width: 5, height: 5).frame(width: 16, height: 21)
-                MarkdownMessageView(text: text, fontSize: max(13.5, fontSize - 1.5), isStreaming: active, onCopyCode: onCopyCode)
+                MarkdownMessageView(text: text, fontSize: fontSize * 0.875, isStreaming: active, onCopyCode: onCopyCode)
                     .equatable()
             }
             .padding(.vertical, 4)
         case .search(let search):
-            SearchStepRow(search: search, stopped: reply.stopped, fontSize: max(13.5, fontSize - 1.5), locale: locale, showResults: showResults)
+            SearchStepRow(search: search, stopped: reply.stopped, fontSize: fontSize * 0.875, locale: locale, showResults: showResults)
         case .pages(let action, let pages):
-            PageStepRow(action: action, pages: pages, fontSize: max(13.5, fontSize - 1.5), locale: locale, showResults: showResults)
+            PageStepRow(action: action, pages: pages, fontSize: fontSize * 0.875, locale: locale, showResults: showResults)
         }
     }
 }
@@ -271,13 +271,15 @@ struct SearchSourcesButton: View {
     let items: [WebSearchResultItem]
     let locale: AppLocale
     let action: () -> Void
+    @Environment(\.nuwaFontScale) private var fontScale
+
     var body: some View {
         Button(action: action) {
             HStack(spacing: 6) {
                 SourceThumbnails(items: items)
                 Text(L10n.count(items.count, singular: "messageSearchSummary", plural: "messageSearchSummaries", locale: locale))
             }
-            .font(.footnote)
+            .font(NuwaFont.caption(fontScale))
             .foregroundStyle(Color.nuwaLabelSecondary)
             .frame(minHeight: 32)
             .contentShape(Rectangle())
@@ -290,11 +292,13 @@ struct SearchSourcesPanel: View {
     let items: [WebSearchResultItem]
     let locale: AppLocale
     let dismiss: () -> Void
+    @Environment(\.nuwaFontScale) private var fontScale
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text(L10n.t("searchResults", locale: locale)).font(.headline)
+                Text(L10n.t("searchResults", locale: locale))
+                    .font(NuwaFont.navTitle(fontScale))
                     .accessibilityAddTraits(.isHeader)
                 Spacer()
                 Button(action: dismiss) {
@@ -319,11 +323,11 @@ struct SearchSourcesPanel: View {
                                             Text(age).lineLimit(1)
                                         }
                                     }
-                                    .font(.caption).foregroundStyle(Color.nuwaLabelTertiary)
+                                    .font(NuwaFont.badge(fontScale)).foregroundStyle(Color.nuwaLabelTertiary)
                                     Text(item.title.isEmpty ? item.url : item.title)
-                                        .font(.subheadline.weight(.medium)).lineLimit(2)
+                                        .font(NuwaFont.controlMedium(fontScale)).lineLimit(2)
                                     if let snippet = item.snippet, !snippet.isEmpty {
-                                        Text(snippet).font(.footnote).foregroundStyle(Color.nuwaLabelSecondary).lineLimit(3)
+                                        Text(snippet).font(NuwaFont.caption(fontScale)).foregroundStyle(Color.nuwaLabelSecondary).lineLimit(3)
                                     }
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)

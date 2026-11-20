@@ -23,6 +23,11 @@ final class MigrationWebViewController: UIViewController, WKNavigationDelegate, 
     private var completed = false
     private var autoExportTriggered = false
     private var pendingStorageClear = false
+    private var needsInPageStorageClear = false
+    private var downloadProgressObs: NSKeyValueObservation?
+    private var downloadRetryCount = 0
+    private var downloadSuggestedName = "deepseek_data.zip"
+    private let maxDownloadRetries = 3
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -94,14 +99,14 @@ final class MigrationWebViewController: UIViewController, WKNavigationDelegate, 
             banner.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             banner.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             banner.heightAnchor.constraint(equalToConstant: 44),
-            guideLabel.leadingAnchor.constraint(equalTo: banner.leadingAnchor, constant: 10),
+            guideLabel.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 10),
             guideLabel.centerYAnchor.constraint(equalTo: banner.centerYAnchor),
             guideLabel.trailingAnchor.constraint(lessThanOrEqualTo: switchButton.leadingAnchor, constant: -6),
             switchButton.trailingAnchor.constraint(equalTo: autoButton.leadingAnchor, constant: -8),
             switchButton.centerYAnchor.constraint(equalTo: banner.centerYAnchor),
             autoButton.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -8),
             autoButton.centerYAnchor.constraint(equalTo: banner.centerYAnchor),
-            closeButton.trailingAnchor.constraint(equalTo: banner.trailingAnchor, constant: -10),
+            closeButton.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -10),
             closeButton.centerYAnchor.constraint(equalTo: banner.centerYAnchor),
             wv.topAnchor.constraint(equalTo: banner.bottomAnchor),
             wv.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -136,21 +141,41 @@ final class MigrationWebViewController: UIViewController, WKNavigationDelegate, 
     private func clearDeepSeekSessionAndReload() {
         autoExportTriggered = false
         pendingStorageClear = true
+        needsInPageStorageClear = true
         guideLabel.text = "正在清除当前登录态，请稍候..."
 
+        URLCache.shared.removeAllCachedResponses()
+        if let sharedCookies = HTTPCookieStorage.shared.cookies {
+            for cookie in sharedCookies where cookie.domain.lowercased().contains("deepseek") {
+                HTTPCookieStorage.shared.deleteCookie(cookie)
+            }
+        }
+
         let dataTypes = WKWebsiteDataStore.allWebsiteDataTypes()
-        let store = WKWebsiteDataStore.default()
-        store.fetchDataRecords(ofTypes: dataTypes) { [weak self] records in
-            let deepSeekRecords = records.filter { $0.displayName.lowercased().contains("deepseek") }
-            store.removeData(ofTypes: dataTypes, for: deepSeekRecords) {
-                DispatchQueue.main.async {
-                    guard let self else { return }
-                    self.pendingStorageClear = false
-                    self.guideLabel.text = "已清除登录态，请登录目标 DeepSeek 账号"
-                    if let url = URL(string: Self.targetUrl) {
-                        var req = URLRequest(url: url)
-                        req.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-                        self.webView?.load(req)
+        let store = webView?.configuration.websiteDataStore ?? WKWebsiteDataStore.default()
+        store.httpCookieStore.getAllCookies { [weak self] cookies in
+            let group = DispatchGroup()
+            for cookie in cookies where cookie.domain.lowercased().contains("deepseek") {
+                group.enter()
+                store.httpCookieStore.delete(cookie) { group.leave() }
+            }
+            group.notify(queue: .main) {
+                store.fetchDataRecords(ofTypes: dataTypes) { [weak self] records in
+                    let deepSeekRecords = records.filter { $0.displayName.lowercased().contains("deepseek") }
+                    let targets = deepSeekRecords.isEmpty ? records : deepSeekRecords
+                    store.removeData(ofTypes: dataTypes, for: targets) {
+                        DispatchQueue.main.async {
+                            guard let self else { return }
+                            self.guideLabel.text = "已清除登录态，请登录目标 DeepSeek 账号"
+                            if let url = URL(string: Self.targetUrl) {
+                                var req = URLRequest(url: url)
+                                req.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+                                self.webView?.load(req)
+                            } else {
+                                self.pendingStorageClear = false
+                                self.needsInPageStorageClear = false
+                            }
+                        }
                     }
                 }
             }
@@ -444,32 +469,139 @@ final class MigrationWebViewController: UIViewController, WKNavigationDelegate, 
     }
 
     func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
-        download.delegate = self
+        downloadRetryCount = 0
+        observeDownload(download)
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        if needsInPageStorageClear, let host = webView.url?.host?.lowercased(), host.contains("deepseek.com") {
+            needsInPageStorageClear = false
+            let clearJs = """
+            (function(){
+                try { localStorage.clear(); sessionStorage.clear(); } catch(e) {}
+                try {
+                    if (window.indexedDB && indexedDB.databases) {
+                        indexedDB.databases().then(function(ds) {
+                            ds.forEach(function(d) { if (d && d.name) indexedDB.deleteDatabase(d.name); });
+                        }).catch(function(){});
+                    }
+                } catch(e) {}
+                setTimeout(function(){ location.replace('\(Self.targetUrl)'); }, 80);
+            })();
+            """
+            webView.evaluateJavaScript(clearJs) { [weak self] _, _ in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                    self?.pendingStorageClear = false
+                }
+            }
+            return
+        }
+        if pendingStorageClear {
+            pendingStorageClear = false
+        }
         if !autoExportTriggered && !pendingStorageClear {
             checkLoginState()
         }
     }
 
-    // MARK: - WKDownloadDelegate
+    // MARK: - WKDownloadDelegate (Progress + Resumable Retry + ZIP Verification per c064904)
+
+    private func observeDownload(_ download: WKDownload) {
+        download.delegate = self
+        downloadProgressObs?.invalidate()
+        downloadProgressObs = download.progress.observe(\.fractionCompleted, options: [.new]) { [weak self] progress, _ in
+            let completedBytes = progress.completedUnitCount
+            let totalBytes = progress.totalUnitCount
+            DispatchQueue.main.async {
+                guard let self, !self.completed else { return }
+                let curMB = Double(completedBytes) / (1024.0 * 1024.0)
+                if totalBytes > 0 {
+                    let totMB = Double(totalBytes) / (1024.0 * 1024.0)
+                    let pct = min(99, Int((Double(completedBytes) * 100.0) / Double(totalBytes)))
+                    self.guideLabel.text = String(format: "正在下载导出包 %d%% (%.1f/%.1f MB)...", pct, curMB, totMB)
+                } else if completedBytes > 0 {
+                    self.guideLabel.text = String(format: "正在下载导出包 (%.1f MB)...", curMB)
+                }
+            }
+        }
+    }
 
     func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String) async -> URL? {
+        let safeName = suggestedFilename.lowercased().hasSuffix(".zip") ? suggestedFilename : "deepseek_data.zip"
+        await MainActor.run {
+            self.downloadSuggestedName = safeName
+            self.guideLabel.text = "正在下载导出包..."
+        }
         let dest = FileManager.default.temporaryDirectory.appendingPathComponent("pending_migration.zip")
         try? FileManager.default.removeItem(at: dest)
         return dest
     }
 
     func downloadDidFinish(_ download: WKDownload) {
+        downloadProgressObs?.invalidate()
+        downloadProgressObs = nil
         let dest = FileManager.default.temporaryDirectory.appendingPathComponent("pending_migration.zip")
-        finishWithFile(dest, fileName: "deepseek_data.zip")
+        guard Self.isValidZipArchive(at: dest) else {
+            try? FileManager.default.removeItem(at: dest)
+            Task { @MainActor [weak self] in
+                self?.guideLabel.text = "下载到的不是有效 ZIP 导出包，请重新点击页面上的「下载」"
+                AppLogStore.shared.record(.error, source: "migration.download", message: "Downloaded file failed ZIP magic/EOCD check")
+            }
+            return
+        }
+        finishWithFile(dest, fileName: downloadSuggestedName)
     }
 
     func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
-        DispatchQueue.main.async { [weak self] in
-            self?.guideLabel.text = "下载接管失败: \(error.localizedDescription)"
+        downloadProgressObs?.invalidate()
+        downloadProgressObs = nil
+        Task { @MainActor [weak self] in
+            guard let self, !self.completed else { return }
+            AppLogStore.shared.record(
+                .error,
+                source: "migration.download",
+                message: "Download failed (attempt \(self.downloadRetryCount + 1)/\(self.maxDownloadRetries)): \(error.localizedDescription)"
+            )
+            if let resumeData, self.downloadRetryCount < self.maxDownloadRetries, let webView = self.webView {
+                self.downloadRetryCount += 1
+                self.guideLabel.text = "网络波动，正在自动续传重试 (\(self.downloadRetryCount)/\(self.maxDownloadRetries))..."
+                let delaySeconds = self.downloadRetryCount
+                Task { @MainActor [weak self, weak webView] in
+                    try? await Task.sleep(for: .seconds(delaySeconds))
+                    guard let self, let webView, !self.completed else { return }
+                    webView.resumeDownload(fromResumeData: resumeData) { [weak self] resumed in
+                        self?.observeDownload(resumed)
+                    }
+                }
+            } else {
+                self.guideLabel.text = "下载未完成，请保持网络稳定后重新点击页面上的「下载」"
+            }
         }
+    }
+
+    private static func isValidZipArchive(at url: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let fileSize = attrs[.size] as? Int,
+              fileSize >= 22
+        else { return false }
+        guard let header = try? handle.read(upToCount: 4),
+              header.count == 4,
+              header[0] == 0x50, header[1] == 0x4B, header[2] == 0x03, header[3] == 0x04
+        else { return false }
+        let tailLen = min(fileSize, 65557)
+        let seekOffset = UInt64(fileSize - tailLen)
+        guard (try? handle.seek(toOffset: seekOffset)) != nil,
+              let tail = try? handle.read(upToCount: tailLen),
+              tail.count >= 22
+        else { return false }
+        for i in stride(from: tail.count - 22, through: 0, by: -1) {
+            if tail[i] == 0x50 && tail[i + 1] == 0x4B && tail[i + 2] == 0x05 && tail[i + 3] == 0x06 {
+                return true
+            }
+        }
+        return false
     }
 
     // MARK: - JS 桥回调
@@ -492,13 +624,15 @@ final class MigrationWebViewController: UIViewController, WKNavigationDelegate, 
                 self?.guideLabel.text = "已触发官方导出，正在等待生成导出包（约需 1-3 分钟，生成后将自动下载）..."
             }
         case "onAutoExportTimeout":
-            DispatchQueue.main.async { [weak self] in
+            Task { @MainActor [weak self] in
                 self?.guideLabel.text = "未定位到按钮，请手动点「设置 → 数据管理 → 导出/下载」"
+                AppLogStore.shared.record(.warn, source: "migration.autoExport", message: "Auto export timed out")
             }
         case "onBlobDownloaded":
             guard let base64 = body["data"] as? String,
                   let data = Data(base64Encoded: base64) else {
                 guideLabel.text = "解析导出包失败"
+                AppLogStore.shared.record(.error, source: "migration.blob", message: "Invalid base64 payload from blob download")
                 return
             }
             let fileName = (body["name"] as? String)?.lowercased().hasSuffix(".zip") == true
@@ -506,13 +640,22 @@ final class MigrationWebViewController: UIViewController, WKNavigationDelegate, 
                 : "deepseek_data.zip"
             let dest = FileManager.default.temporaryDirectory.appendingPathComponent("pending_migration.zip")
             do {
-                try data.write(to: dest)
+                try data.write(to: dest, options: [.atomic])
+                guard Self.isValidZipArchive(at: dest) else {
+                    try? FileManager.default.removeItem(at: dest)
+                    guideLabel.text = "下载到的不是有效 ZIP 导出包，请重试"
+                    AppLogStore.shared.record(.error, source: "migration.blob", message: "Blob payload failed ZIP magic/EOCD check (\(data.count) bytes)")
+                    return
+                }
                 finishWithFile(dest, fileName: fileName)
             } catch {
                 guideLabel.text = "解析导出包失败"
+                AppLogStore.shared.record(.error, source: "migration.blob", message: error.localizedDescription)
             }
         case "onBlobError":
-            guideLabel.text = "导出失败: \(body["error"] as? String ?? "")"
+            let err = body["error"] as? String ?? ""
+            guideLabel.text = "导出失败: \(err)"
+            AppLogStore.shared.record(.error, source: "migration.blob", message: err)
         default:
             break
         }
@@ -529,6 +672,8 @@ final class MigrationWebViewController: UIViewController, WKNavigationDelegate, 
     }
 
     private func finish(filePath: String?, fileName: String?) {
+        downloadProgressObs?.invalidate()
+        downloadProgressObs = nil
         loginPollTimer?.invalidate()
         loginPollTimer = nil
         dismiss(animated: true) { [weak self] in
@@ -537,6 +682,7 @@ final class MigrationWebViewController: UIViewController, WKNavigationDelegate, 
     }
 
     deinit {
+        downloadProgressObs?.invalidate()
         loginPollTimer?.invalidate()
     }
 }

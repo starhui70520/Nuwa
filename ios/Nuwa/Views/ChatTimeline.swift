@@ -362,6 +362,7 @@ private final class TimelineCell<Row: View>: UICollectionViewCell {
         contentConfiguration = UIHostingConfiguration {
             row
                 .environment(\.colorScheme, key.colorScheme)
+                .environment(\.nuwaFontScale, CGFloat(key.fontSize / 16.0))
                 .id(key.message.id)
         }
         .margins(.all, 0)

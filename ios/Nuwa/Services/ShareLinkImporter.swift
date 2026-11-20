@@ -55,14 +55,29 @@ enum ShareLinkImporter {
             throw ShareLinkImportError.networkError("HTTP \(code)")
         }
 
-        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let dataNode = root["data"] as? [String: Any],
-              let bizData = dataNode["biz_data"] as? [String: Any],
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw ShareLinkImportError.networkError("解析分享数据失败")
+        }
+        let code = root["code"] as? Int
+        let dataNode = root["data"] as? [String: Any]
+        let bizCode = dataNode?["biz_code"] as? Int
+        if code != 0 || bizCode != 0 {
+            let errMsg = (dataNode?["biz_msg"] as? String)
+                ?? (root["msg"] as? String)
+                ?? "分享链接已失效或无法访问"
+            throw ShareLinkImportError.networkError(errMsg)
+        }
+        guard let bizData = dataNode?["biz_data"] as? [String: Any],
               let rawMessages = bizData["messages"] as? [[String: Any]],
               !rawMessages.isEmpty
         else {
-            let msg = ((try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["msg"] as? String) ?? "分享链接可能已过期"
-            throw ShareLinkImportError.networkError(msg)
+            throw ShareLinkImportError.emptyConversation
+        }
+
+        let sortedMessages = rawMessages.sorted { lhs, rhs in
+            let idL = (lhs["message_id"] as? Int) ?? (lhs["id"] as? Int) ?? 0
+            let idR = (rhs["message_id"] as? Int) ?? (rhs["id"] as? Int) ?? 0
+            return idL < idR
         }
 
         let rawTitle = (bizData["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -71,7 +86,7 @@ enum ShareLinkImporter {
         var firstUserText = ""
         let now = Date()
 
-        for item in rawMessages {
+        for item in sortedMessages {
             let numId = (item["message_id"] as? Int) ?? (item["id"] as? Int)
             guard let numId else { continue }
             let localId = UUID()
@@ -148,14 +163,26 @@ enum ShareLinkImporter {
             }
         }
         let rootId = messages.first(where: { $0.parentId == nil })?.id ?? messages.first?.id
-        let title = (rawTitle?.isEmpty == false) ? rawTitle! : String(firstUserText.prefix(24))
+        let trimmedTitle = rawTitle ?? ""
+        let isGenericTitle = trimmedTitle.isEmpty
+            || trimmedTitle == "Shared Conversation"
+            || trimmedTitle == "来自分享的对话"
+        let collapsedUserText = firstUserText
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        let title = isGenericTitle
+            ? (collapsedUserText.isEmpty ? "分享导入的对话" : String(collapsedUserText.prefix(28)))
+            : trimmedTitle
+        let firstTs = messages.first?.createdAt ?? now
+        let lastTs = messages.last?.createdAt ?? now
 
         return ChatSession(
-            title: title.isEmpty ? "分享对话" : title,
+            title: title,
             rootMessageId: rootId,
             messages: messages,
-            createdAt: messages.first?.createdAt ?? now,
-            updatedAt: messages.last?.createdAt ?? now
+            createdAt: firstTs,
+            updatedAt: max(now, lastTs)
         )
     }
 

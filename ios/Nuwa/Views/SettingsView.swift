@@ -72,6 +72,10 @@ struct SettingsView: View {
     private let docsURL = URL(string: "https://api-docs.deepseek.com/zh-cn/")!
     private let topUpURL = URL(string: "https://platform.deepseek.com/top_up")!
 
+    private var fontScale: CGFloat {
+        CGFloat(settings.chatFontSize / 16.0)
+    }
+
     private var sheetBg: Color {
         colorScheme == .dark
             ? Color(red: 18 / 255, green: 19 / 255, blue: 22 / 255)
@@ -119,7 +123,7 @@ struct SettingsView: View {
                     }
 
                     Text(pageTitle)
-                        .font(.system(size: 17, weight: .semibold))
+                        .font(NuwaFont.navTitle(fontScale))
                         .foregroundStyle(Color.nuwaLabelPrimary)
                         .frame(maxWidth: .infinity)
 
@@ -161,6 +165,7 @@ struct SettingsView: View {
                 migrationChooser
             }
         }
+        .environment(\.nuwaFontScale, fontScale)
         .task {
             apiKeyDraft = settings.apiKey
             await settings.refreshBalance()
@@ -182,6 +187,7 @@ struct SettingsView: View {
                 migrationOptions = nil
                 if let filePath {
                     chatStore.importFromFilePath(filePath)
+                    dismiss()
                 }
             }
             .ignoresSafeArea()
@@ -210,7 +216,11 @@ struct SettingsView: View {
                 Task {
                     do {
                         let count = try await chatStore.importFromFile(url)
-                        chatStore.showToast(count == 1 ? "已导入 1 个对话" : "已导入 \(count) 个对话")
+                        if count == 0 {
+                            chatStore.showToast("本地已是最新记录，未覆盖任何对话")
+                        } else {
+                            chatStore.showToast(count == 1 ? "已导入 1 个对话" : "已导入 \(count) 个对话")
+                        }
                     } catch {
                         chatStore.showToast("导入失败：\(error.localizedDescription)")
                     }
@@ -328,7 +338,10 @@ struct SettingsView: View {
             pickerRow(icon: "textformat.size", label: L10n.t("fontSize", locale: loc)) {
                 Picker("字体大小", selection: $settings.chatFontSize) {
                     ForEach(SettingsStore.fontSizeOptions, id: \.self) { size in
-                        Text(size == 16 ? "16px（默认）" : "\(Int(size))px").tag(size)
+                        let label = size == 16
+                            ? (loc == .enUS ? "16px (Default)" : "16px（默认）")
+                            : "\(Int(size))px"
+                        Text(label).tag(size)
                     }
                 }
                 .labelsHidden()
@@ -376,7 +389,7 @@ struct SettingsView: View {
             }
         }
         Text("自动模式在配置 API Key 时优先云端朗读，否则无缝使用 iOS 原生语音服务")
-            .font(.system(size: 12))
+            .font(NuwaFont.badge(fontScale))
             .foregroundStyle(Color.nuwaLabelTertiary)
             .padding(.horizontal, 12)
             .padding(.top, 6)
@@ -385,19 +398,20 @@ struct SettingsView: View {
         groupCard {
             HStack(spacing: 12) {
                 Image(systemName: "info.circle")
-                    .font(.system(size: 16))
+                    .font(NuwaFont.sized(16, scale: fontScale))
                     .foregroundStyle(Color.nuwaLabelSecondary)
                     .frame(width: 22)
                 Text(L10n.t("version", locale: loc))
-                    .font(.system(size: 15))
+                    .font(NuwaFont.rowTitle(fontScale))
                     .foregroundStyle(Color.nuwaLabelPrimary)
                 Spacer()
                 Text("v\(AppUpdateService.currentVersion) (\(AppUpdateService.buildNumber))")
-                    .font(.system(size: 14))
+                    .font(NuwaFont.control(fontScale))
                     .foregroundStyle(Color.nuwaLabelTertiary)
             }
             .padding(.horizontal, 16)
-            .frame(minHeight: 50)
+            .padding(.vertical, 10)
+            .frame(minHeight: max(52, 36 + 16 * fontScale))
             rowDivider
             navRow(
                 icon: "arrow.down.circle",
@@ -441,16 +455,17 @@ struct SettingsView: View {
             } label: {
                 HStack(spacing: 12) {
                     Image(systemName: "rectangle.portrait.and.arrow.right")
-                        .font(.system(size: 16))
+                        .font(NuwaFont.sized(16, scale: fontScale))
                         .foregroundStyle(.red)
                         .frame(width: 22)
                     Text(L10n.t("signOut", locale: loc))
-                        .font(.system(size: 15, weight: .medium))
+                        .font(NuwaFont.rowTitleMedium(fontScale))
                         .foregroundStyle(.red)
                     Spacer()
                 }
                 .padding(.horizontal, 16)
-                .frame(minHeight: 50)
+                .padding(.vertical, 10)
+                .frame(minHeight: max(52, 36 + 16 * fontScale))
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -467,17 +482,17 @@ struct SettingsView: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("DeepSeek API 账号")
-                            .font(.system(size: 15, weight: .semibold))
+                            .font(NuwaFont.controlMedium(fontScale))
                             .foregroundStyle(Color.nuwaLabelPrimary)
                         if !settings.dshToken.isEmpty {
                             Text(settings.isUsingDeepSeekAccount
                                  ? "当前生效：\(settings.dshAccountLabel.isEmpty ? "DeepSeek API 账号" : settings.dshAccountLabel)"
                                  : "已登录（当前使用自定义 API Key）")
-                                .font(.system(size: 12))
+                                .font(NuwaFont.badge(fontScale))
                                 .foregroundStyle(Color.nuwaLabelTertiary)
                         } else {
                             Text("通过 DeepSeek 开放平台授权登录，免手动复制 API Key")
-                                .font(.system(size: 12))
+                                .font(NuwaFont.badge(fontScale))
                                 .foregroundStyle(Color.nuwaLabelTertiary)
                         }
                     }
@@ -486,7 +501,7 @@ struct SettingsView: View {
                         Button("账号登录") {
                             showDeepSeekAuth = true
                         }
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(NuwaFont.sized(13, weight: .semibold, scale: fontScale))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 8)
@@ -498,7 +513,7 @@ struct SettingsView: View {
                                     settings.authMode = .deepseekAccount
                                     Task { await settings.refreshBalance(force: true) }
                                 }
-                                .font(.system(size: 13, weight: .medium))
+                                .font(NuwaFont.captionMedium(fontScale))
                                 .foregroundStyle(Color.nuwaBrandText)
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 7)
@@ -508,7 +523,7 @@ struct SettingsView: View {
                             Button("退出") {
                                 settings.signOutDeepSeekAccount()
                             }
-                            .font(.system(size: 13, weight: .medium))
+                            .font(NuwaFont.captionMedium(fontScale))
                             .foregroundStyle(.red)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 7)
@@ -533,7 +548,7 @@ struct SettingsView: View {
                                 settings.applyPreset(preset)
                             } label: {
                                 Text(preset.name)
-                                    .font(.system(size: 12, weight: .medium))
+                                    .font(NuwaFont.badge(fontScale))
                                     .foregroundStyle(selected ? Color.nuwaBrandText : Color.nuwaLabelPrimary)
                                     .padding(.horizontal, 10)
                                     .padding(.vertical, 6)
@@ -546,7 +561,7 @@ struct SettingsView: View {
 
                 HStack {
                     Text("接口协议")
-                        .font(.system(size: 14))
+                        .font(NuwaFont.sublabel(fontScale))
                         .foregroundStyle(Color.nuwaLabelPrimary)
                     Spacer()
                     Picker("接口协议", selection: $settings.apiProtocol) {
@@ -556,6 +571,7 @@ struct SettingsView: View {
                     }
                     .labelsHidden()
                     .pickerStyle(.menu)
+                    .font(NuwaFont.control(fontScale))
                 }
 
                 labeledInput("API 地址 (Base URL)", placeholder: "https://api.deepseek.com", text: $settings.apiBaseUrl)
@@ -563,7 +579,7 @@ struct SettingsView: View {
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text("API Key")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(NuwaFont.captionMedium(fontScale))
                         .foregroundStyle(Color.nuwaLabelSecondary)
                     HStack {
                         Group {
@@ -575,7 +591,7 @@ struct SettingsView: View {
                         }
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                        .font(.system(size: 14))
+                        .font(NuwaFont.sublabel(fontScale))
 
                         Button {
                             showApiKey.toggle()
@@ -586,13 +602,13 @@ struct SettingsView: View {
                         .buttonStyle(.plain)
                     }
                     .padding(.horizontal, 12)
-                    .frame(height: 42)
+                    .frame(minHeight: max(42, 28 + 14 * fontScale))
                     .background(sheetBg, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
 
                 if let keyVerifyError {
                     Text(keyVerifyError)
-                        .font(.footnote)
+                        .font(NuwaFont.caption(fontScale))
                         .foregroundStyle(.red)
                 }
 
@@ -604,11 +620,11 @@ struct SettingsView: View {
                             ProgressView().tint(.white).controlSize(.small)
                         }
                         Text(verifyingKey ? "正在验证..." : "验证并保存 API Key")
-                            .font(.system(size: 14, weight: .semibold))
+                            .font(NuwaFont.sized(14, weight: .semibold, scale: fontScale))
                     }
                     .foregroundStyle(.white)
                     .frame(maxWidth: .infinity)
-                    .frame(height: 42)
+                    .frame(minHeight: max(42, 28 + 14 * fontScale))
                     .background(
                         (verifyingKey || apiKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                             ? Color.nuwaBrand.opacity(0.4)
@@ -625,14 +641,33 @@ struct SettingsView: View {
 
     // MARK: - Subpage: 数据管理
 
+    private var importProgressSubtitle: String {
+        guard chatStore.importingHistory else {
+            return "支持 DeepSeek 官方导出 ZIP 或 Nuwa JSON，按 ID 增量合并"
+        }
+        if let progress = chatStore.importProgress {
+            if progress.phase == .merging {
+                return "正在写入本地数据库（共 \(progress.sessions) 个会话）…"
+            }
+            if progress.sessions > 0 {
+                let imgPart = progress.images > 0 ? "，\(progress.images) 个附件" : ""
+                return "正在导入：已读取 \(progress.sessions) 个会话\(imgPart)…"
+            }
+        }
+        return "正在解析归档文件，请稍候…"
+    }
+
     @ViewBuilder
     private var dataPage: some View {
+        let loc = settings.locale
+        let historyBusy = chatStore.importingHistory
         groupCard {
             actionCell(
-                title: "一键迁移 DeepSeek 历史",
+                title: L10n.t("oneClickMigrate", locale: loc),
                 subtitle: "登录官方网页端自动触发导出并合并到本机",
                 buttonTitle: "一键导入",
-                primary: true
+                primary: true,
+                disabled: historyBusy
             ) {
                 if settings.hasUsedOneClickMigration || !chatStore.sessions.isEmpty {
                     showMigrationChooser = true
@@ -642,9 +677,10 @@ struct SettingsView: View {
             }
             rowDivider
             actionCell(
-                title: "通过分享链接导入",
+                title: L10n.t("shareLinkImport", locale: loc),
                 subtitle: "粘贴官方 DeepSeek 分享链接或分享 ID，将对话保存到本机",
-                buttonTitle: importingShareLink ? "导入中..." : "链接导入"
+                buttonTitle: importingShareLink ? "导入中..." : "链接导入",
+                disabled: historyBusy || importingShareLink
             ) {
                 if !importingShareLink {
                     showShareLinkAlert = true
@@ -652,17 +688,19 @@ struct SettingsView: View {
             }
             rowDivider
             actionCell(
-                title: "导入历史对话",
-                subtitle: "支持 DeepSeek 官方导出 ZIP 或 Nuwa JSON，按 ID 增量合并",
-                buttonTitle: "导入"
+                title: L10n.t("importHistory", locale: loc),
+                subtitle: importProgressSubtitle,
+                buttonTitle: historyBusy ? "导入中…" : "导入",
+                disabled: historyBusy
             ) {
                 isImporting = true
             }
             rowDivider
             actionCell(
-                title: "导出所有历史对话",
+                title: L10n.t("exportHistory", locale: loc),
                 subtitle: "导出标准 DeepSeek 格式 ZIP，可备份到 iCloud Drive 或导入其他端",
-                buttonTitle: "备份到 iCloud"
+                buttonTitle: "备份到 iCloud",
+                disabled: historyBusy
             ) {
                 Task {
                     do {
@@ -677,11 +715,11 @@ struct SettingsView: View {
             rowDivider
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("自动备份到 iCloud")
-                        .font(NuwaFont.rowTitleMedium)
+                    Text(L10n.t("icloudAutoBackup", locale: loc))
+                        .font(NuwaFont.rowTitleMedium(fontScale))
                         .foregroundStyle(Color.nuwaLabelPrimary)
                     Text("开启后每次进入应用自动将最新 ZIP 快照写入 iCloud Drive")
-                        .font(NuwaFont.caption)
+                        .font(NuwaFont.caption(fontScale))
                         .foregroundStyle(Color.nuwaLabelTertiary)
                 }
                 Spacer(minLength: 8)
@@ -705,10 +743,11 @@ struct SettingsView: View {
 
         groupCard {
             actionCell(
-                title: "删除所有对话",
+                title: L10n.t("deleteAll", locale: loc),
                 subtitle: "清空本机全部历史会话，保留 API Key 与设置",
-                buttonTitle: "删除",
-                destructive: true
+                buttonTitle: L10n.t("delete", locale: loc),
+                destructive: true,
+                disabled: historyBusy
             ) {
                 showDeleteAllConfirm = true
             }
@@ -725,7 +764,7 @@ struct SettingsView: View {
             VStack(spacing: 0) {
                 HStack {
                     Text("国家 / 地区")
-                        .font(NuwaFont.rowTitle)
+                        .font(NuwaFont.rowTitle(fontScale))
                         .foregroundStyle(Color.nuwaLabelPrimary)
                     Spacer()
                     Picker("国家/地区", selection: Binding(
@@ -747,15 +786,16 @@ struct SettingsView: View {
                     }
                     .labelsHidden()
                     .pickerStyle(.menu)
+                    .font(NuwaFont.control(fontScale))
                 }
                 .padding(.horizontal, 16)
-                .frame(minHeight: 50)
+                .frame(minHeight: max(50, 34 + 16 * fontScale))
 
                 if settings.location?.region == "CN" {
                     rowDivider
                     HStack {
                         Text("省份 / 直辖市")
-                            .font(NuwaFont.rowTitle)
+                            .font(NuwaFont.rowTitle(fontScale))
                             .foregroundStyle(Color.nuwaLabelPrimary)
                         Spacer()
                         Picker("省份", selection: Binding(
@@ -771,16 +811,17 @@ struct SettingsView: View {
                         }
                         .labelsHidden()
                         .pickerStyle(.menu)
+                        .font(NuwaFont.control(fontScale))
                     }
                     .padding(.horizontal, 16)
-                    .frame(minHeight: 50)
+                    .frame(minHeight: max(50, 34 + 16 * fontScale))
 
                     if let prov = LocationCatalog.chinaProvinces.first(where: { $0.name == settings.location?.province }),
                        prov.cities.count > 1 {
                         rowDivider
                         HStack {
                             Text("城市")
-                                .font(NuwaFont.rowTitle)
+                                .font(NuwaFont.rowTitle(fontScale))
                                 .foregroundStyle(Color.nuwaLabelPrimary)
                             Spacer()
                             Picker("城市", selection: Binding(
@@ -795,15 +836,16 @@ struct SettingsView: View {
                             }
                             .labelsHidden()
                             .pickerStyle(.menu)
+                            .font(NuwaFont.control(fontScale))
                         }
                         .padding(.horizontal, 16)
-                        .frame(minHeight: 50)
+                        .frame(minHeight: max(50, 34 + 16 * fontScale))
                     }
                 }
             }
         }
         Text("位置信息仅在联网搜索与本地上下文提醒时随本轮请求发送，用于提供更准确的本地天气与资讯。")
-            .font(NuwaFont.caption)
+            .font(NuwaFont.caption(fontScale))
             .foregroundStyle(Color.nuwaLabelTertiary)
             .padding(.horizontal, 12)
             .padding(.top, 8)
@@ -817,17 +859,19 @@ struct SettingsView: View {
             HStack {
                 Spacer()
                 ProgressView("正在加载更新日志...")
+                    .font(NuwaFont.sublabel(fontScale))
                     .padding(.vertical, 40)
                 Spacer()
             }
         } else if changelogFailed {
             VStack(spacing: 12) {
                 Text("加载更新日志失败，请稍后重试")
-                    .font(.system(size: 14))
+                    .font(NuwaFont.sublabel(fontScale))
                     .foregroundStyle(Color.nuwaLabelSecondary)
                 Button("重试") {
                     Task { await loadChangelog() }
                 }
+                .font(NuwaFont.pill(fontScale))
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
                 .nuwaPillSurface()
@@ -842,15 +886,15 @@ struct SettingsView: View {
                         VStack(alignment: .leading, spacing: 6) {
                             HStack {
                                 Text("v\(item.version)")
-                                    .font(.system(size: 15, weight: .semibold))
+                                    .font(NuwaFont.sized(15, weight: .semibold, scale: fontScale))
                                     .foregroundStyle(Color.nuwaLabelPrimary)
                                 Spacer()
                                 Text(String(item.createdAt.prefix(10)))
-                                    .font(.system(size: 12))
+                                    .font(NuwaFont.badge(fontScale))
                                     .foregroundStyle(Color.nuwaLabelTertiary)
                             }
                             Text(item.changelog.isEmpty ? "包含体验优化与问题修复。" : item.changelog)
-                                .font(.system(size: 13))
+                                .font(NuwaFont.caption(fontScale))
                                 .foregroundStyle(Color.nuwaLabelSecondary)
                                 .lineSpacing(3)
                         }
@@ -866,7 +910,7 @@ struct SettingsView: View {
 
     private func groupTitle(_ text: String) -> some View {
         Text(text)
-            .font(NuwaFont.sectionHeader)
+            .font(NuwaFont.sectionHeader(fontScale))
             .foregroundStyle(Color.nuwaLabelTertiary)
             .padding(.horizontal, 12)
             .padding(.top, 14)
@@ -896,16 +940,16 @@ struct SettingsView: View {
         Button(action: action) {
             HStack(spacing: 12) {
                 Image(systemName: icon)
-                    .font(.system(size: 16))
+                    .font(NuwaFont.sized(16, scale: fontScale))
                     .foregroundStyle(Color.nuwaLabelSecondary)
                     .frame(width: 22)
                 Text(label)
-                    .font(NuwaFont.rowTitle)
+                    .font(NuwaFont.rowTitle(fontScale))
                     .foregroundStyle(Color.nuwaLabelPrimary)
                 Spacer(minLength: 8)
                 if let value {
                     Text(value)
-                        .font(valueAccent ? NuwaFont.controlMedium : NuwaFont.control)
+                        .font(valueAccent ? NuwaFont.controlMedium(fontScale) : NuwaFont.control(fontScale))
                         .foregroundStyle(valueDanger ? .red : (valueAccent ? Color.nuwaBrandText : Color.nuwaLabelTertiary))
                         .lineLimit(1)
                 }
@@ -914,7 +958,8 @@ struct SettingsView: View {
                     .foregroundStyle(Color.nuwaLabelTertiary.opacity(0.7))
             }
             .padding(.horizontal, 16)
-            .frame(minHeight: 52)
+            .padding(.vertical, 10)
+            .frame(minHeight: max(52, 36 + 16 * fontScale))
             .contentShape(Rectangle())
         }
         .buttonStyle(NuwaTactileButtonStyle(pressedScale: 0.99))
@@ -923,18 +968,20 @@ struct SettingsView: View {
     private func pickerRow<Control: View>(icon: String, label: String, @ViewBuilder control: () -> Control) -> some View {
         HStack(spacing: 12) {
             Image(systemName: icon)
-                .font(.system(size: 16))
+                .font(NuwaFont.sized(16, scale: fontScale))
                 .foregroundStyle(Color.nuwaLabelSecondary)
                 .frame(width: 22)
             Text(label)
-                .font(NuwaFont.rowTitle)
+                .font(NuwaFont.rowTitle(fontScale))
                 .foregroundStyle(Color.nuwaLabelPrimary)
             Spacer()
             control()
+                .font(NuwaFont.control(fontScale))
                 .tint(Color.nuwaLabelSecondary)
         }
         .padding(.horizontal, 16)
-        .frame(minHeight: 52)
+        .padding(.vertical, 8)
+        .frame(minHeight: max(52, 36 + 16 * fontScale))
     }
 
     private func actionCell(
@@ -943,21 +990,22 @@ struct SettingsView: View {
         buttonTitle: String,
         primary: Bool = false,
         destructive: Bool = false,
+        disabled: Bool = false,
         action: @escaping () -> Void
     ) -> some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
-                    .font(NuwaFont.rowTitleMedium)
+                    .font(NuwaFont.rowTitleMedium(fontScale))
                     .foregroundStyle(Color.nuwaLabelPrimary)
                 Text(subtitle)
-                    .font(NuwaFont.caption)
+                    .font(NuwaFont.caption(fontScale))
                     .foregroundStyle(Color.nuwaLabelTertiary)
             }
             Spacer(minLength: 8)
             Button(action: action) {
                 Text(buttonTitle)
-                    .font(NuwaFont.pill)
+                    .font(NuwaFont.pill(fontScale))
                     .foregroundStyle(primary ? .white : (destructive ? .red : Color.nuwaLabelPrimary))
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
@@ -967,9 +1015,11 @@ struct SettingsView: View {
                         }
                     }
                     .modifier(OptionalGlassCapsule(enabled: !primary, tint: destructive ? .red : nil))
+                    .opacity(disabled ? 0.5 : 1)
                     .contentShape(Capsule())
             }
             .buttonStyle(NuwaTactileButtonStyle())
+            .disabled(disabled)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
@@ -978,14 +1028,14 @@ struct SettingsView: View {
     private func labeledInput(_ label: String, placeholder: String, text: Binding<String>) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(label)
-                .font(.system(size: 13, weight: .medium))
+                .font(NuwaFont.captionMedium(fontScale))
                 .foregroundStyle(Color.nuwaLabelSecondary)
             TextField(placeholder, text: text)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-                .font(.system(size: 14))
+                .font(NuwaFont.sublabel(fontScale))
                 .padding(.horizontal, 12)
-                .frame(height: 42)
+                .frame(minHeight: max(42, 28 + 14 * fontScale))
                 .background(sheetBg, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
     }
@@ -995,7 +1045,7 @@ struct SettingsView: View {
         let content = VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text(english ? "Choose Migration Method" : "选择迁移方式")
-                    .font(.headline)
+                    .font(NuwaFont.navTitle(fontScale))
                     .accessibilityAddTraits(.isHeader)
                 Spacer()
                 Button {
@@ -1013,7 +1063,7 @@ struct SettingsView: View {
             Text(english
                 ? "You already have local conversations. Continue with the current account or switch accounts."
                 : "检测到本地已有会话记录，请选择继续当前账号导出或切换账号。")
-                .font(.subheadline)
+                .font(NuwaFont.sublabel(fontScale))
                 .foregroundStyle(Color.nuwaLabelSecondary)
                 .padding(.bottom, 4)
 
@@ -1052,12 +1102,12 @@ struct SettingsView: View {
         let shape = RoundedRectangle(cornerRadius: 14)
         return Button(action: action) {
             Text(title)
-                .font(.subheadline.weight(primary ? .semibold : .medium))
+                .font(NuwaFont.sized(15, weight: primary ? .semibold : .medium, scale: fontScale))
                 .foregroundStyle(primary ? .white : Color.nuwaLabelPrimary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 12)
-                .frame(maxWidth: .infinity, minHeight: 46)
+                .frame(maxWidth: .infinity, minHeight: max(46, 30 + 16 * fontScale))
                 .background(primary ? Color.nuwaBrand : Color.clear, in: shape)
                 .overlay(shape.strokeBorder(primary ? .clear : Color.nuwaControlBorder))
                 .contentShape(shape)

@@ -109,7 +109,7 @@ enum DeepSeekZipExporter {
             let visible = session.visibleMessages()
             let currentId = visible.last.flatMap { numIdByUUID[$0.id] } ?? 0
 
-            let sessionObj: [String: Any] = [
+            var sessionObj: [String: Any] = [
                 "id": sessionIdStr,
                 "title": session.title.isEmpty ? NSNull() : session.title,
                 "pinned": session.isPinned,
@@ -118,6 +118,9 @@ enum DeepSeekZipExporter {
                 "current_message_id": currentId,
                 "messages": exportedMessages,
             ]
+            if let pinnedAt = session.pinnedAt {
+                sessionObj["pinned_at"] = iso.string(from: pinnedAt)
+            }
             let sData = try JSONSerialization.data(withJSONObject: sessionObj)
             entries.append(Entry(path: "chat_sessions/\(sessionIdStr).json", data: sData))
 

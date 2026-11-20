@@ -5,6 +5,7 @@ import UIKit
 struct FeedbackReportView: View {
     @ObservedObject var settings: SettingsStore
     @ObservedObject private var logStore = AppLogStore.shared
+    @Environment(\.nuwaFontScale) private var fontScale
 
     @State private var issueType = AppLogStore.issueTypeOptions[0]
     @State private var descriptionText = ""
@@ -24,16 +25,16 @@ struct FeedbackReportView: View {
             if let reportCode {
                 VStack(spacing: 14) {
                     Text("日志上报成功")
-                        .font(.system(size: 17, weight: .semibold))
+                        .font(NuwaFont.navTitle(fontScale))
                         .foregroundStyle(Color.nuwaLabelPrimary)
 
                     Text("请将下方记录码发给开发者，我们会根据记录码快速定位并修复您遇到的问题。")
-                        .font(.system(size: 13))
+                        .font(NuwaFont.caption(fontScale))
                         .foregroundStyle(Color.nuwaLabelSecondary)
                         .multilineTextAlignment(.center)
 
                     Text(reportCode)
-                        .font(.system(size: 22, weight: .bold, design: .monospaced))
+                        .font(NuwaFont.sized(22, weight: .bold, design: .monospaced, scale: fontScale))
                         .foregroundStyle(Color.nuwaLabelPrimary)
                         .textSelection(.enabled)
                         .padding(.horizontal, 16)
@@ -48,7 +49,7 @@ struct FeedbackReportView: View {
                             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { copied = false }
                         } label: {
                             Text(copied ? "已复制记录码" : "复制记录码")
-                                .font(.system(size: 14, weight: .semibold))
+                                .font(NuwaFont.sized(14, weight: .semibold, scale: fontScale))
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 18)
                                 .padding(.vertical, 10)
@@ -62,7 +63,7 @@ struct FeedbackReportView: View {
                             submitError = nil
                         } label: {
                             Text("继续提交")
-                                .font(.system(size: 14, weight: .medium))
+                                .font(NuwaFont.pill(fontScale))
                                 .foregroundStyle(Color.nuwaLabelPrimary)
                                 .padding(.horizontal, 16)
                                 .padding(.vertical, 10)
@@ -76,7 +77,7 @@ struct FeedbackReportView: View {
             } else {
                 VStack(alignment: .leading, spacing: 14) {
                     Text("遇到的问题")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(NuwaFont.captionMedium(fontScale))
                         .foregroundStyle(Color.nuwaLabelSecondary)
 
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), spacing: 8)], alignment: .leading, spacing: 8) {
@@ -86,7 +87,7 @@ struct FeedbackReportView: View {
                                 issueType = opt
                             } label: {
                                 Text(opt)
-                                    .font(.system(size: 12, weight: selected ? .semibold : .regular))
+                                    .font(NuwaFont.sized(12, weight: selected ? .semibold : .regular, scale: fontScale))
                                     .foregroundStyle(selected ? Color.nuwaBrandText : Color.nuwaLabelPrimary)
                                     .padding(.horizontal, 10)
                                     .padding(.vertical, 7)
@@ -99,33 +100,33 @@ struct FeedbackReportView: View {
 
                     VStack(alignment: .leading, spacing: 6) {
                         Text("详细描述")
-                            .font(.system(size: 13, weight: .medium))
+                            .font(NuwaFont.captionMedium(fontScale))
                             .foregroundStyle(Color.nuwaLabelSecondary)
                         TextField("请描述复现步骤或异常现象...", text: $descriptionText, axis: .vertical)
                             .lineLimit(3...6)
-                            .font(.system(size: 14))
+                            .font(NuwaFont.sublabel(fontScale))
                             .padding(12)
                             .background(fieldBg, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                     }
 
                     VStack(alignment: .leading, spacing: 6) {
                         Text("联系方式（可选）")
-                            .font(.system(size: 13, weight: .medium))
+                            .font(NuwaFont.captionMedium(fontScale))
                             .foregroundStyle(Color.nuwaLabelSecondary)
                         TextField("邮箱 / 微信 / GitHub ID", text: $contactText)
-                            .font(.system(size: 14))
+                            .font(NuwaFont.sublabel(fontScale))
                             .padding(.horizontal, 12)
-                            .frame(height: 42)
+                            .frame(minHeight: max(42, 28 + 14 * fontScale))
                             .background(fieldBg, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                     }
 
                     Toggle(isOn: $includeLogs) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("附带最近运行日志（\(logStore.logs.count) 条）")
-                                .font(.system(size: 14))
+                                .font(NuwaFont.sublabel(fontScale))
                                 .foregroundStyle(Color.nuwaLabelPrimary)
                             Text("已自动脱敏 API Key 与令牌")
-                                .font(.system(size: 12))
+                                .font(NuwaFont.badge(fontScale))
                                 .foregroundStyle(Color.nuwaLabelTertiary)
                         }
                     }
@@ -137,7 +138,7 @@ struct FeedbackReportView: View {
                         } label: {
                             HStack {
                                 Text(showLogPreview ? "收起日志预览" : "查看即将上传的日志")
-                                    .font(.system(size: 12, weight: .medium))
+                                    .font(NuwaFont.badge(fontScale))
                                     .foregroundStyle(Color.nuwaBrandText)
                                 Spacer()
                                 Image(systemName: showLogPreview ? "chevron.up" : "chevron.down")
@@ -151,7 +152,7 @@ struct FeedbackReportView: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 ForEach(logStore.logs.suffix(15)) { entry in
                                     Text("[\(entry.level.rawValue.uppercased())] \(entry.source): \(entry.message)")
-                                        .font(.system(size: 11, design: .monospaced))
+                                        .font(NuwaFont.sized(11, design: .monospaced, scale: fontScale))
                                         .foregroundStyle(Color.nuwaLabelSecondary)
                                         .lineLimit(2)
                                 }
@@ -164,7 +165,7 @@ struct FeedbackReportView: View {
 
                     if let submitError {
                         Text(submitError)
-                            .font(.footnote)
+                            .font(NuwaFont.caption(fontScale))
                             .foregroundStyle(.red)
                     }
 
@@ -176,11 +177,11 @@ struct FeedbackReportView: View {
                                 ProgressView().tint(.white).controlSize(.small)
                             }
                             Text(submitting ? "正在上报..." : "提交反馈并生成记录码")
-                                .font(.system(size: 15, weight: .semibold))
+                                .font(NuwaFont.sized(15, weight: .semibold, scale: fontScale))
                         }
                         .foregroundStyle(.white)
                         .frame(maxWidth: .infinity)
-                        .frame(height: 46)
+                        .frame(minHeight: max(46, 30 + 16 * fontScale))
                         .background(
                             (submitting || descriptionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                                 ? Color.nuwaBrand.opacity(0.4)

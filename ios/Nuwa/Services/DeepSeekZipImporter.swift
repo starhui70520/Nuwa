@@ -34,7 +34,10 @@ enum DeepSeekZipImporter {
         let localHeaderOffset: Int
     }
 
-    static func parseZipData(_ data: Data) throws -> [ChatSession] {
+    static func parseZipData(
+        _ data: Data,
+        onProgress: ((_ sessions: Int, _ images: Int) -> Void)? = nil
+    ) throws -> [ChatSession] {
         let entries = try readCentralDirectory(from: data)
         let manifest = entries.filter { $0.path == "manifest.json" }
         var isV3 = false
@@ -52,6 +55,10 @@ enum DeepSeekZipImporter {
         var entriesByNFCPath: [String: ZipEntry] = [:]
         for entry in entries {
             let path = entry.path.precomposedStringWithCanonicalMapping
+            // Skip third-party derivative metadata (e.g. yejian / macOS resource forks) per Android 520f6e2
+            if path == "yejian_meta.json" || path.hasPrefix("yejian/") || path.hasPrefix("__MACOSX/") {
+                continue
+            }
             if entriesByNFCPath.updateValue(entry, forKey: path) != nil, isV3 {
                 throw DeepSeekZipError.invalidArchive
             }
@@ -65,26 +72,38 @@ enum DeepSeekZipImporter {
         defer { try? FileManager.default.removeItem(at: staging) }
         var sessionIds = Set<String>()
         var sessions: [ChatSession] = []
+        var imageCount = 0
 
         for entry in entries {
-            let lower = entry.path.lowercased()
+            let path = entry.path
+            if path == "yejian_meta.json" || path.hasPrefix("yejian/") || path.hasPrefix("__MACOSX/") {
+                continue
+            }
+            let lower = path.lowercased()
             if lower.hasPrefix("chat_sessions/") && lower.hasSuffix(".json") && !lower.contains("_files/") {
+                var extractedInSession = 0
                 if let entryData = try? extractEntry(entry, from: data),
                    let session = parseSessionFile(
-                    entryData, path: entry.path, zipData: data, entriesByPath: entriesByNFCPath,
-                    staging: staging, strict: isV3
+                    entryData, path: path, zipData: data, entriesByPath: entriesByNFCPath,
+                    staging: staging, strict: isV3, extractedImagesCount: &extractedInSession
                    ) {
                     sessions.append(session)
-                    sessionIds.insert(String(entry.path.dropFirst("chat_sessions/".count).dropLast(".json".count)))
+                    imageCount += extractedInSession
+                    sessionIds.insert(String(path.dropFirst("chat_sessions/".count).dropLast(".json".count)))
+                    if sessions.count % 10 == 0 || extractedInSession > 0 {
+                        onProgress?(sessions.count, imageCount)
+                    }
                 } else if isV3 {
                     throw DeepSeekZipError.invalidArchive
                 }
             } else if !isV3 && (lower == "conversations.json" || lower.hasSuffix("/conversations.json")) {
                 if let entryData = try? extractEntry(entry, from: data) {
                     sessions.append(contentsOf: parseLegacyConversations(entryData))
+                    onProgress?(sessions.count, imageCount)
                 }
             }
         }
+        onProgress?(sessions.count, imageCount)
 
         if isV3 {
             guard let index,
@@ -326,7 +345,8 @@ enum DeepSeekZipImporter {
         zipData: Data,
         entriesByPath: [String: ZipEntry],
         staging: URL,
-        strict: Bool
+        strict: Bool,
+        extractedImagesCount: inout Int
     ) -> ChatSession? {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let rawMessages = obj["messages"] as? [[String: Any]]
@@ -337,6 +357,7 @@ enum DeepSeekZipImporter {
         let updatedAt = parseDate(obj["updated_at"] as? String)
         let externalId = obj["id"] as? String
         let isPinned = (obj["pinned"] as? Bool) ?? false
+        let pinnedAt: Date? = (obj["pinned_at"] as? String).map(parseDate) ?? (isPinned ? updatedAt : nil)
         if strict {
             guard let externalId, !externalId.isEmpty, !externalId.contains("/"),
                   path == "chat_sessions/\(externalId).json"
@@ -644,6 +665,7 @@ enum DeepSeekZipImporter {
             return nil
         }
 
+        extractedImagesCount = importedImages.count
         let sessionId = externalId.flatMap(UUID.init(uuidString:)) ?? stableUUID(for: externalId ?? UUID().uuidString)
         return ChatSession(
             id: sessionId,
@@ -652,7 +674,8 @@ enum DeepSeekZipImporter {
             messages: messages,
             createdAt: createdAt,
             updatedAt: updatedAt,
-            isPinned: isPinned
+            isPinned: isPinned,
+            pinnedAt: pinnedAt
         )
     }
 

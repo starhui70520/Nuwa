@@ -118,21 +118,47 @@ extension Color {
     })
 }
 
-/// Unified global typography scale matching Nuwa Android 0.1.31 mobile proportions and iOS readability.
+private struct NuwaFontScaleKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 1.0
+}
+
+extension EnvironmentValues {
+    /// Global app typography scale (`settings.chatFontSize / 16.0`), matching Android's root `rem` scaling (`e4ee844`).
+    var nuwaFontScale: CGFloat {
+        get { self[NuwaFontScaleKey.self] }
+        set { self[NuwaFontScaleKey.self] = newValue }
+    }
+}
+
+/// Unified global typography scale matching Nuwa Android 0.1.31 `rem` proportions.
+/// Every token scales proportionally with `nuwaFontScale` (`chatFontSize / 16.0`, 12px..22px).
 enum NuwaFont {
-    static let navTitle = Font.system(size: 17, weight: .semibold)
-    static let body = Font.system(size: 16, weight: .regular)
-    static let bodyMedium = Font.system(size: 16, weight: .medium)
-    static let rowTitle = Font.system(size: 16, weight: .regular)
-    static let rowTitleMedium = Font.system(size: 16, weight: .medium)
-    static let control = Font.system(size: 15, weight: .regular)
-    static let controlMedium = Font.system(size: 15, weight: .medium)
-    static let pill = Font.system(size: 14, weight: .medium)
-    static let sublabel = Font.system(size: 14, weight: .regular)
-    static let sectionHeader = Font.system(size: 13, weight: .medium)
-    static let caption = Font.system(size: 13, weight: .regular)
-    static let captionMedium = Font.system(size: 13, weight: .medium)
-    static let badge = Font.system(size: 12, weight: .medium)
+    static func clampedScale(_ scale: CGFloat) -> CGFloat {
+        min(1.5, max(0.75, scale))
+    }
+
+    static func sized(
+        _ base: CGFloat,
+        weight: Font.Weight = .regular,
+        design: Font.Design = .default,
+        scale: CGFloat = 1.0
+    ) -> Font {
+        .system(size: base * clampedScale(scale), weight: weight, design: design)
+    }
+
+    static func navTitle(_ scale: CGFloat = 1.0) -> Font { .system(size: 17 * clampedScale(scale), weight: .semibold) }
+    static func body(_ scale: CGFloat = 1.0) -> Font { .system(size: 16 * clampedScale(scale), weight: .regular) }
+    static func bodyMedium(_ scale: CGFloat = 1.0) -> Font { .system(size: 16 * clampedScale(scale), weight: .medium) }
+    static func rowTitle(_ scale: CGFloat = 1.0) -> Font { .system(size: 16 * clampedScale(scale), weight: .regular) }
+    static func rowTitleMedium(_ scale: CGFloat = 1.0) -> Font { .system(size: 16 * clampedScale(scale), weight: .medium) }
+    static func control(_ scale: CGFloat = 1.0) -> Font { .system(size: 15 * clampedScale(scale), weight: .regular) }
+    static func controlMedium(_ scale: CGFloat = 1.0) -> Font { .system(size: 15 * clampedScale(scale), weight: .medium) }
+    static func pill(_ scale: CGFloat = 1.0) -> Font { .system(size: 14 * clampedScale(scale), weight: .medium) }
+    static func sublabel(_ scale: CGFloat = 1.0) -> Font { .system(size: 14 * clampedScale(scale), weight: .regular) }
+    static func sectionHeader(_ scale: CGFloat = 1.0) -> Font { .system(size: 13 * clampedScale(scale), weight: .medium) }
+    static func caption(_ scale: CGFloat = 1.0) -> Font { .system(size: 13 * clampedScale(scale), weight: .regular) }
+    static func captionMedium(_ scale: CGFloat = 1.0) -> Font { .system(size: 13 * clampedScale(scale), weight: .medium) }
+    static func badge(_ scale: CGFloat = 1.0) -> Font { .system(size: 12 * clampedScale(scale), weight: .medium) }
 }
 
 /// Crisp, zero-latency tactile press button style that never conflicts with Liquid Glass or ScrollViews.

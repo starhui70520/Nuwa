@@ -619,6 +619,7 @@ struct MarkdownMessageView: View, Equatable {
 
     @Environment(\.openURL) private var openURL
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.nuwaFontScale) private var fontScale
 
     static func == (lhs: MarkdownMessageView, rhs: MarkdownMessageView) -> Bool {
         lhs.text == rhs.text && lhs.fontSize == rhs.fontSize && lhs.citations == rhs.citations
@@ -640,7 +641,7 @@ struct MarkdownMessageView: View, Equatable {
             ForEach(blocks) { block in
                 switch block {
                 case .heading(_, let level, let attributed):
-                    let size: CGFloat = level == 1 ? fontSize + 6 : (level == 2 ? fontSize + 4 : (level == 3 ? fontSize + 2 : fontSize))
+                    let size: CGFloat = level == 1 ? fontSize * 1.5 : (level == 2 ? fontSize * 1.375 : (level == 3 ? fontSize * 1.25 : fontSize))
                     Text(attributed)
                         .font(.system(size: size, weight: level <= 3 ? .bold : .semibold))
                         .foregroundStyle(Color.nuwaLabelPrimary)
@@ -651,7 +652,7 @@ struct MarkdownMessageView: View, Equatable {
                     Text(attributed)
                         .font(.system(size: fontSize))
                         .foregroundStyle(Color.nuwaLabelPrimary)
-                        .lineSpacing(6)
+                        .lineSpacing(max(4, fontSize * 0.375))
                         .modifier(ConditionalTextSelection(enabled: !isStreaming))
                         .fixedSize(horizontal: false, vertical: true)
 
@@ -664,7 +665,7 @@ struct MarkdownMessageView: View, Equatable {
                         Text(attributed)
                             .font(.system(size: fontSize))
                             .foregroundStyle(Color.nuwaLabelPrimary)
-                            .lineSpacing(6)
+                            .lineSpacing(max(4, fontSize * 0.375))
                             .modifier(ConditionalTextSelection(enabled: !isStreaming))
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -675,22 +676,22 @@ struct MarkdownMessageView: View, Equatable {
                             .fill(Color.nuwaBrand.opacity(0.6))
                             .frame(width: 3)
                         Text(attributed)
-                            .font(.system(size: fontSize - 0.5))
+                            .font(.system(size: fontSize * 0.9375))
                             .foregroundStyle(Color.nuwaLabelSecondary)
-                            .lineSpacing(4)
+                            .lineSpacing(max(3, fontSize * 0.25))
                             .modifier(ConditionalTextSelection(enabled: !isStreaming))
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     .padding(.vertical, 4)
 
                 case .code(_, let language, let code):
-                    CodeBlockView(language: language, code: code, fontSize: max(13, fontSize - 2.5), isStreaming: isStreaming, onCopy: onCopyCode)
+                    CodeBlockView(language: language, code: code, fontSize: fontSize * 0.8125, isStreaming: isStreaming, onCopy: onCopyCode)
 
                 case .math(_, let formula):
                     LatexRendererView(formula: formula, baseFontSize: fontSize, isStreaming: isStreaming)
 
                 case .table(_, let headers, let rows):
-                    MarkdownTableView(headers: headers, rows: rows, fontSize: max(14, fontSize - 1), darkMode: darkMode)
+                    MarkdownTableView(headers: headers, rows: rows, fontSize: fontSize * 0.9375, darkMode: darkMode)
 
                 case .divider:
                     Divider()
@@ -709,12 +710,12 @@ struct MarkdownMessageView: View, Equatable {
                             } label: {
                                 HStack(spacing: 4) {
                                     Text("\(idx + 1)")
-                                        .font(.system(size: 10, weight: .bold))
+                                        .font(NuwaFont.sized(10, weight: .bold, scale: fontScale))
                                         .foregroundStyle(.white)
-                                        .frame(width: 16, height: 16)
+                                        .frame(width: max(16, 16 * fontScale), height: max(16, 16 * fontScale))
                                         .background(Color.nuwaBrand, in: Circle())
                                     Text(cite.title ?? URL(string: cite.url)?.host ?? "来源")
-                                        .font(.system(size: 12))
+                                        .font(NuwaFont.sized(12, scale: fontScale))
                                         .foregroundStyle(Color.nuwaLabelSecondary)
                                         .lineLimit(1)
                                 }
@@ -799,6 +800,7 @@ private struct CodeBlockView: View {
     let onCopy: (String) -> Void
 
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.nuwaFontScale) private var fontScale
     @State private var copied = false
 
     var body: some View {
@@ -809,7 +811,7 @@ private struct CodeBlockView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text(language.isEmpty ? "code" : language.lowercased())
-                    .font(.system(size: 12.5, weight: .medium, design: .monospaced))
+                    .font(NuwaFont.sized(12.5, weight: .medium, design: .monospaced, scale: fontScale))
                     .foregroundStyle(Color.nuwaLabelSecondary)
                 Spacer()
                 Button {
@@ -822,9 +824,9 @@ private struct CodeBlockView: View {
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                            .font(.system(size: 11.5, weight: .medium))
+                            .font(NuwaFont.sized(11.5, weight: .medium, scale: fontScale))
                         Text(copied ? "已复制" : "复制")
-                            .font(.system(size: 12.5, weight: .medium))
+                            .font(NuwaFont.sized(12.5, weight: .medium, scale: fontScale))
                     }
                     .foregroundStyle(copied ? .green : Color.nuwaLabelSecondary)
                     .padding(.horizontal, 6)
@@ -870,6 +872,8 @@ struct BranchSwitcherView: View {
     let versionInfo: MessageVersionInfo
     let onSelect: (UUID) -> Void
 
+    @Environment(\.nuwaFontScale) private var fontScale
+
     var body: some View {
         if versionInfo.count > 1 {
             HStack(spacing: 2) {
@@ -879,7 +883,7 @@ struct BranchSwitcherView: View {
                     }
                 } label: {
                     Image(systemName: "chevron.left")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(NuwaFont.sized(11, weight: .semibold, scale: fontScale))
                         .foregroundStyle(versionInfo.index > 0 ? Color.nuwaLabelSecondary : Color.nuwaLabelTertiary.opacity(0.4))
                         .frame(width: 24, height: 24)
                         .contentShape(Rectangle())
@@ -888,7 +892,7 @@ struct BranchSwitcherView: View {
                 .disabled(versionInfo.index == 0)
 
                 Text("\(versionInfo.index + 1)/\(versionInfo.count)")
-                    .font(.system(size: 12, weight: .medium).monospacedDigit())
+                    .font(NuwaFont.badge(fontScale).monospacedDigit())
                     .foregroundStyle(Color.nuwaLabelSecondary)
 
                 Button {
@@ -897,7 +901,7 @@ struct BranchSwitcherView: View {
                     }
                 } label: {
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(NuwaFont.sized(11, weight: .semibold, scale: fontScale))
                         .foregroundStyle(versionInfo.index + 1 < versionInfo.count ? Color.nuwaLabelSecondary : Color.nuwaLabelTertiary.opacity(0.4))
                         .frame(width: 24, height: 24)
                         .contentShape(Rectangle())
@@ -906,7 +910,7 @@ struct BranchSwitcherView: View {
                 .disabled(versionInfo.index + 1 >= versionInfo.count)
             }
             .padding(.horizontal, 6)
-            .frame(height: 28)
+            .frame(minHeight: 28)
             .nuwaPillSurface()
         }
     }

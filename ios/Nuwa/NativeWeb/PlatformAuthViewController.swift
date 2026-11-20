@@ -104,9 +104,10 @@ final class PlatformAuthViewController: UIViewController, WKNavigationDelegate {
             banner.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             banner.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             banner.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            statusLabel.leadingAnchor.constraint(equalTo: banner.leadingAnchor, constant: 14),
+            statusLabel.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 14),
             statusLabel.centerYAnchor.constraint(equalTo: banner.centerYAnchor),
-            closeButton.trailingAnchor.constraint(equalTo: banner.trailingAnchor, constant: -8),
+            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: closeButton.leadingAnchor, constant: -8),
+            closeButton.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -10),
             closeButton.centerYAnchor.constraint(equalTo: banner.centerYAnchor),
             banner.heightAnchor.constraint(equalToConstant: 44),
             wv.topAnchor.constraint(equalTo: banner.bottomAnchor),
@@ -238,16 +239,28 @@ final class PlatformAuthViewController: UIViewController, WKNavigationDelegate {
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw NSError(domain: "PlatformAuth", code: (response as? HTTPURLResponse)?.statusCode ?? -1, userInfo: nil)
+        guard let http = response as? HTTPURLResponse else {
+            throw NSError(domain: "PlatformAuth", code: -1, userInfo: [NSLocalizedDescriptionKey: "无效响应"])
+        }
+        if http.statusCode == 429 {
+            await AppLogStore.shared.record(.warn, source: "platformAuth.\(method)", message: "HTTP 429 rate limited")
+            throw NSError(domain: "PlatformAuth", code: 429, userInfo: [NSLocalizedDescriptionKey: "请求过于频繁，请稍后再试（HTTP 429）"])
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            await AppLogStore.shared.record(.error, source: "platformAuth.\(method)", message: "HTTP \(http.statusCode)")
+            throw NSError(domain: "PlatformAuth", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "开放平台授权失败（HTTP \(http.statusCode)）"])
         }
         guard let envelope = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               (envelope["code"] as? Int) == 0 else {
-            throw NSError(domain: "PlatformAuth", code: -2, userInfo: nil)
+            let msg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["msg"] as? String
+            await AppLogStore.shared.record(.error, source: "platformAuth.\(method)", message: msg ?? "envelope error")
+            throw NSError(domain: "PlatformAuth", code: -2, userInfo: [NSLocalizedDescriptionKey: msg ?? "开放平台授权失败"])
         }
         guard let bizData = envelope["data"] as? [String: Any],
               (bizData["biz_code"] as? Int) == 0 else {
-            throw NSError(domain: "PlatformAuth", code: -3, userInfo: nil)
+            let bizMsg = (envelope["data"] as? [String: Any])?["biz_msg"] as? String
+            await AppLogStore.shared.record(.error, source: "platformAuth.\(method)", message: bizMsg ?? "biz error")
+            throw NSError(domain: "PlatformAuth", code: -3, userInfo: [NSLocalizedDescriptionKey: bizMsg ?? "开放平台授权校验失败"])
         }
         return bizData["biz_data"] as? [String: Any] ?? [:]
     }
