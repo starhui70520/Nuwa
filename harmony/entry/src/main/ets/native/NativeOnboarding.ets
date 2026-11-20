@@ -101,7 +101,7 @@ export struct NativeOnboarding {
   @Builder
   private action(label: () => string, primary: boolean, enabled: () => boolean, click: () => void) {
     Button(label(), { type: ButtonType.Capsule })
-      .width('100%').height(this.compact ? 37 : 50).fontSize(this.compact ? 13 : 15).fontWeight(FontWeight.Medium)
+      .width('100%').height(this.compact ? 36 : 50).fontSize(this.compact ? 13 : 15).fontWeight(FontWeight.Medium)
       .fontColor(primary ? Color.White : $r('app.color.native_chat_primary'))
       .backgroundColor(primary ? $r('app.color.native_chat_blue') : $r('app.color.native_chat_bg'))
       .border({ width: 1, color: primary ? $r('app.color.native_chat_blue') : $r('app.color.native_chat_stroke') })
@@ -112,12 +112,13 @@ export struct NativeOnboarding {
   private field(label: () => string, value: () => string, hint: () => string, input: InputType,
     change: (value: string) => void) {
     Column({ space: 6 }) {
-      Text(label()).fontSize(12).fontColor($r('app.color.native_chat_secondary')).padding({ left: 6 })
+      Text(label()).fontSize(12).lineHeight(16).fontColor($r('app.color.native_chat_secondary')).padding({ left: 6 })
       TextInput({ text: value(), placeholder: hint() })
-        .width('100%').height(this.compact ? 34 : 46).type(input).fontSize(14).borderRadius(999)
+        .width('100%').height(this.compact ? 36 : 46).type(input).fontSize(14).borderRadius(999)
         .border({ width: 1, color: $r('app.color.native_chat_stroke') })
-        .backgroundColor($r('app.color.native_chat_field')).fontColor($r('app.color.native_chat_primary'))
-        .placeholderColor($r('app.color.native_chat_caption')).padding({ left: 16, right: 16 })
+        .backgroundColor($r('app.color.native_chat_sidebar')).fontColor($r('app.color.native_chat_primary'))
+        .placeholderColor($r('app.color.native_chat_caption'))
+        .padding({ left: this.compact ? 12 : 16, right: this.compact ? 12 : 16 })
         .showPasswordIcon(false).enabled(!this.verifying).onChange(change)
         .enterKeyType(EnterKeyType.Done)
         .onSubmit(() => { if (input === InputType.Password) void this.connect(); })
@@ -127,7 +128,7 @@ export struct NativeOnboarding {
 
   @Builder
   private form() {
-    Column({ space: this.compact ? 7 : 10 }) {
+    Column({ space: this.compact ? 8 : 10 }) {
       if (this.view === 'third-party') {
         Row() {
           Text(this.text('接口协议', 'API Protocol')).fontSize(12).fontColor($r('app.color.native_chat_secondary')).layoutWeight(1)
@@ -174,46 +175,52 @@ export struct NativeOnboarding {
     Column() {
       Row() {
         if (this.view !== 'home') {
-          Button(this.text('← 返回', '← Back'), { buttonStyle: ButtonStyleMode.TEXTUAL }).fontSize(14)
-            .fontColor($r('app.color.native_chat_secondary')).onClick(() => { this.switchView('home'); })
+          Button(this.text('← 返回', '← Back'), { buttonStyle: ButtonStyleMode.TEXTUAL })
+            .height(this.compact ? 24 : 36).fontSize(this.compact ? 12 : 14)
+            .padding({ left: this.compact ? 4 : 8, right: this.compact ? 4 : 8 })
+            .fontColor($r('app.color.native_chat_action')).onClick(() => { this.switchView('home'); })
         }
         Blank().layoutWeight(1)
-        Button(this.text('帮助', 'Help'), { buttonStyle: ButtonStyleMode.TEXTUAL }).fontSize(14)
-          .fontColor($r('app.color.native_chat_secondary')).onClick(this.onHelp)
+        Button(this.text('帮助', 'Help'), { buttonStyle: ButtonStyleMode.TEXTUAL })
+          .height(this.compact ? 24 : 36).fontSize(this.compact ? 12 : 14)
+          .padding({ left: this.compact ? 4 : 8, right: this.compact ? 4 : 8 })
+          .fontColor($r('app.color.native_chat_action')).onClick(this.onHelp)
       }
-      .width('100%').height(this.compact ? 28 : 36)
+      .width('100%').height(this.compact ? 24 : 36)
       Scroll() {
         Column() {
-          Column({ space: this.compact ? 8 : 14 }) {
+          Column({ space: this.compact ? 6 : 14 }) {
             Image($r('app.media.native_welcome_logo')).width(this.compact ? 44 : 76).height(this.compact ? 44 : 76)
               .borderRadius(this.compact ? 12 : 20).shadow({ radius: 24, color: '#14000000', offsetY: 8 })
               .draggable(false).accessibilityText('Nuwa')
-            Text('Nuwa').fontSize(this.compact ? 22 : 28).fontWeight(FontWeight.Bold)
-              .fontColor($r('app.color.native_chat_primary')).lineHeight(this.compact ? 28 : 34)
+            Text('Nuwa').fontSize(this.compact ? 18 : 28).fontWeight(FontWeight.Bold).letterSpacing(0.4)
+              .fontColor($r('app.color.native_chat_primary')).lineHeight(this.compact ? 22 : 34)
           }
-          .width('100%').layoutWeight(1).constraintSize({ minHeight: this.compact ? 84 : 160 })
-          .justifyContent(FlexAlign.Center).padding({ top: 12, bottom: 12 })
+          .width('100%').layoutWeight(this.compact ? 0 : 1).constraintSize({ minHeight: this.compact ? 90 : 160 })
+          .justifyContent(FlexAlign.Center).padding({ top: this.compact ? 6 : 12, bottom: 12 })
           Column({ space: this.compact ? 8 : 12 }) {
             if (this.view === 'home') {
               this.action(() => this.text('DeepSeek API 账号登录', 'Sign in with DeepSeek API'), true, () => !this.busy, this.onAccount)
               this.action(() => this.text('使用 DeepSeek API Key', 'Use DeepSeek API Key'), false, () => !this.busy,
                 () => { this.switchView('deepseek-key'); })
-              this.action(() => this.text('配置第三方兼容 API', 'Configure third-party API'), false, () => !this.busy,
+              this.action(() => this.text('配置第三方兼容 API', 'Configure 3rd-Party API'), false, () => !this.busy,
                 () => { this.switchView('third-party'); })
             } else {
               this.form()
             }
             Text(this.text('凭据与历史对话仅保存在本地设备',
-              'Credentials and chat history stay on this device.')).fontSize(12).lineHeight(18).textAlign(TextAlign.Center)
-              .fontColor($r('app.color.native_chat_secondary')).padding({ top: 8 })
+              'Credentials and chat history are stored locally on your device'))
+              .width('100%').fontSize(this.compact ? 11 : 12).lineHeight(this.compact ? 14 : 18).textAlign(TextAlign.Center)
+              .fontColor($r('app.color.native_chat_action')).padding({ top: this.compact ? 0 : 8 })
           }
           .width('100%').constraintSize({ maxWidth: 344 })
         }
-        .width('100%').height('100%')
+        .width('100%').height(this.compact ? undefined : '100%')
       }
-      .layoutWeight(1).width('100%').scrollBar(BarState.Off)
+      .layoutWeight(1).width('100%').align(Alignment.Top).scrollBar(BarState.Off)
     }
-    .width('100%').height('100%').padding({ top: 16, left: this.compact ? 12 : 24, right: this.compact ? 12 : 24, bottom: 24 })
+    .width('100%').height('100%').padding({ top: this.compact ? 8 : 16,
+      left: this.compact ? 12 : 24, right: this.compact ? 12 : 24, bottom: this.compact ? 16 : 24 })
     .backgroundColor($r('app.color.native_chat_bg'))
   }
 }
