@@ -183,10 +183,22 @@ export struct NativeToolTimelinePanel {
       'Read ' + count.toString() + (count === 1 ? ' page' : ' pages'));
   }
 
+  private stepKey(step: NativeToolTimelineStep): string {
+    return step.type === 'text' || step.type === 'thinking' ? step.type + ':' + step.key : JSON.stringify(step);
+  }
+
+  private currentTextStep(initial: NativeToolTimelineStep, index: number): NativeToolTimelineStep {
+    const steps = this.view.steps;
+    const current = steps[index];
+    if (current?.type === initial.type && current.key === initial.key) return current;
+    // An earlier tool row can disappear while the same Markdown row remains mounted.
+    return steps.find((step: NativeToolTimelineStep): boolean => step.type === initial.type && step.key === initial.key) ?? initial;
+  }
+
   @Builder
-  private marker(step: NativeToolTimelineStep) {
+  private marker(step: NativeToolTimelineStep, index: number) {
     if (step.type === 'text' || step.type === 'thinking') {
-      Circle().width(5).height(5).fill(step.active ? $r('app.color.native_chat_blue') :
+      Circle().width(5).height(5).fill(this.currentTextStep(step, index).active ? $r('app.color.native_chat_blue') :
         $r('app.color.native_chat_caption')).margin({ top: 10 })
     } else if (step.type === 'search') {
       Image($r('app.media.native_search')).width(15).height(15).margin({ top: 4 })
@@ -290,9 +302,9 @@ export struct NativeToolTimelinePanel {
   }
 
   @Builder
-  private stepRow(step: NativeToolTimelineStep) {
+  private stepRow(step: NativeToolTimelineStep, index: number) {
     Row({ space: 7 }) {
-      Column() { this.marker(step) }.width(16).alignItems(HorizontalAlign.Center)
+      Column() { this.marker(step, index) }.width(16).alignItems(HorizontalAlign.Center)
       Column() {
         if (step.type === 'search') {
           this.searchRow(step)
@@ -302,15 +314,15 @@ export struct NativeToolTimelinePanel {
           this.findRow(step)
         } else if (step.type === 'text') {
           NativeMarkdown({
-            content: this.sourceText(step), fontScale: this.fontScale * 0.85,
+            content: this.sourceText(this.currentTextStep(step, index)), fontScale: this.fontScale * 0.85,
             locale: this.locale, citationSources: this.sources, citationHoverEnabled: this.citationHoverEnabled,
             hasCitations: true, loading: this.streaming && step.key === this.view.steps[this.view.steps.length - 1]?.key,
             onCitation: (index: number): void => { this.openCitation(index); },
           })
-        } else if (step.type === 'thinking' && step.text) {
+        } else if (step.type === 'thinking' && this.currentTextStep(step, index).text) {
           NativeMarkdown({
-            content: step.text, fontScale: this.fontScale, locale: this.locale, muted: true, disableLinks: true,
-            loading: this.streaming && step.active === true,
+            content: this.currentTextStep(step, index).text ?? '', fontScale: this.fontScale, locale: this.locale,
+            muted: true, disableLinks: true, loading: this.streaming && this.currentTextStep(step, index).active === true,
           })
         }
       }
@@ -337,9 +349,9 @@ export struct NativeToolTimelinePanel {
           .padding(0).height(30).onClick((): void => { this.expanded = !this.expanded; })
         }
         if (this.expanded || !this.hasThinking()) {
-          ForEach(this.view.steps, (step: NativeToolTimelineStep) => {
-            Column() { this.stepRow(step) }.width('100%')
-          }, (step: NativeToolTimelineStep): string => JSON.stringify(step))
+          ForEach(this.view.steps, (step: NativeToolTimelineStep, index: number) => {
+            Column() { this.stepRow(step, index) }.width('100%')
+          }, (step: NativeToolTimelineStep, _index: number): string => this.stepKey(step))
         }
       }
       .width('100%').direction(this.rtl ? Direction.Rtl : Direction.Auto).alignItems(HorizontalAlign.Start)

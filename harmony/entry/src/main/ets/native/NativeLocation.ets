@@ -99,20 +99,16 @@ export function restoreNativeLocation(serialized: string): NativeUserLocation | 
   if (!location || !regionSet.has(location.region)) {
     return null;
   }
-  const province = location.province;
-  const city = location.city;
-  if (location.region === 'CN' && (
-    (province !== undefined && !provinceOptions.some(
-      (option: NativeLocationOption): boolean => option.code === province)) ||
-    (city !== undefined && !nativeCityOptions(province ?? '').some(
-      (option: NativeLocationOption): boolean => option.code === city))
-  )) {
-    return null;
-  }
-  if (!usesChineseLocationPicker()) {
+  if (location.region !== 'CN') {
     return { region: location.region };
   }
-  if (location.region !== 'CN' || !province) {
+  const province = location.province;
+  const city = location.city;
+  if (province === undefined) {
+    return city === undefined ? { region: 'CN' } : null;
+  }
+  if (!provinceOptions.some((option: NativeLocationOption): boolean => option.code === province) ||
+    (city !== undefined && !nativeCityOptions(province).some((option: NativeLocationOption): boolean => option.code === city))) {
     return null;
   }
   return city ? { region: 'CN', province, city } : { region: 'CN', province };
