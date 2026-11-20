@@ -15,6 +15,7 @@ import {
   NativeTimelinePage, NativeTimelinePattern, NativeToolStatus, NativeToolTimelineView,
 } from './NativeToolTimeline';
 import { NativeReadLink, validNativeReadLinks } from './NativeReadLinks';
+import { NativePrefillBlock } from './NativeReplyPrefill';
 import {
   backupPath, backupUtf8, backupZipChecksum, MAX_BACKUP_BYTES, MAX_BACKUP_ENTRY_BYTES, memoryBackupInput,
   NativeBackupZipEntry, NativeBackupZipInput, NativeBackupZipStreamEntry, NativeBackupZipWriter, readBackupZipEntries,
@@ -342,6 +343,30 @@ function importedReadLinks(message: ArchiveMessage, textLength: number): NativeR
     }
   }
   return links.length > 0 && validNativeReadLinks(links, textLength) ? links : undefined;
+}
+
+function importedPrefillBlocks(message: ArchiveMessage, refused: boolean): NativePrefillBlock[] | undefined {
+  if (refused || message.fragments.some((fragment: ArchiveFragment): boolean =>
+    fragment.type === 'TEMPLATE_RESPONSE')) {
+    return undefined;
+  }
+  const blocks: NativePrefillBlock[] = [];
+  for (const fragment of message.fragments) {
+    if (fragment.type === 'RESPONSE' && typeof fragment.content === 'string') {
+      blocks.push({ type: 'text', text: fragment.content });
+    } else if (fragment.type === 'THINK' && typeof fragment.content === 'string') {
+      blocks.push({ type: 'thinking', text: fragment.content });
+    } else if (fragment.type === 'TOOL_SEARCH' || fragment.type === 'TOOL_FIND' ||
+      (fragment.type === 'TOOL_OPEN' && !!safeNativeSourceUrl(fragment.url)) ||
+      (fragment.type === 'READ_LINK' && Array.isArray(fragment.results) && fragment.results.some(
+        (result: ArchiveSearchResult): boolean => !!safeNativeSourceUrl(result?.url) ||
+          (typeof result?.signature === 'string' && !!result.signature.trim())))) {
+      // Android turns these recognized fragments into non-text ReplyBlocks. Preserve
+      // their boundary while omitting the historical tool payload from text prefill.
+      blocks.push({ type: 'separator', text: '' });
+    }
+  }
+  return blocks;
 }
 
 function sourceString(value: string | null | undefined, limit: number): string {
@@ -790,6 +815,7 @@ function nativeSession(source: ArchiveSession, archiveSize: number): PreparedSes
       citations: sources?.citations,
       toolTimeline: role === 'assistant' && !refused ? importedTimeline(raw) : undefined,
       readLinks: role === 'assistant' && !refused ? importedReadLinks(raw, body.length) : undefined,
+      prefillBlocks: role === 'assistant' ? importedPrefillBlocks(raw, refused) : undefined,
       files: nativeFiles(raw),
     };
     if (parent) {

@@ -2,6 +2,7 @@ import { util } from '@kit.ArkTS';
 import { http } from '@kit.NetworkKit';
 import { NativeConversation, NativeConversationMessage } from './NativeConversation';
 import { buildArchivedNativeTimeline, NativeArchiveTimelineFragment } from './NativeToolTimeline';
+import { NativePrefillBlock } from './NativeReplyPrefill';
 
 const SHARE_ENDPOINT = 'https://chat.deepseek.com/api/v0/share/content?share_id=';
 const SHARE_URL = /(?:^|[^A-Za-z0-9_@%/.\-])(?:https?:\/\/)?chat\.deepseek\.com\/share\/([A-Za-z0-9_-]{4,64})(?=$|[/?#\s)"'!.,;>\]，。！？）】”》])/i;
@@ -173,6 +174,7 @@ function normalizedNode(row: ShareRow, role: string, now: number): ShareNode {
     return invalidGraph();
   }
   const fragments: NativeArchiveTimelineFragment[] = [];
+  const prefillBlocks: NativePrefillBlock[] = [];
   const response: string[] = [];
   const thoughts: string[] = [];
   const raw = Array.isArray(row.fragments) ? row.fragments : [];
@@ -194,8 +196,10 @@ function normalizedNode(row: ShareRow, role: string, now: number): ShareNode {
       (fragment.type === 'RESPONSE' || fragment.type === 'THINK' || fragment.type === 'TEMPLATE_RESPONSE')) {
       if (fragment.type === 'RESPONSE') {
         response.push(fragment.content);
+        prefillBlocks.push({ type: 'text', text: fragment.content });
       } else if (fragment.type === 'THINK') {
         thoughts.push(fragment.content);
+        prefillBlocks.push({ type: 'thinking', text: fragment.content });
       }
       const elapsed = fragment.elapsed_secs;
       fragments.push({
@@ -220,6 +224,8 @@ function normalizedNode(row: ShareRow, role: string, now: number): ShareNode {
     reasoning: thoughts.join('\n'),
     createdAt: time,
     status: role === 'ASSISTANT' ? (error ? 'error' : 'done') : undefined,
+    prefillBlocks: role === 'ASSISTANT' &&
+      !raw.some((fragment: ShareFragment): boolean => fragment?.type === 'TEMPLATE_RESPONSE') ? prefillBlocks : undefined,
   };
   if (role === 'ASSISTANT') {
     message.thinking = row.thinking_enabled === true;

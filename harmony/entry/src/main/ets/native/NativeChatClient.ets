@@ -15,6 +15,7 @@ export interface NativeChatMessage {
   content: string;
   files?: NativeChatFileRef[];
   readLinks?: NativeReadLink[];
+  prefillBlocks?: NativePrefillBlock[];
 }
 
 export interface NativeReplyOutcome {
@@ -303,7 +304,7 @@ function anthropicPrefillContent(prefill: NativeReplyPrefill, thinking: boolean)
       }
     } else {
       text = undefined;
-      if (thinking) {
+      if (thinking && block.type === 'thinking') {
         content.push({ type: 'thinking', thinking: block.text, signature: block.signature ?? '' });
       }
     }
@@ -724,6 +725,7 @@ class ChatStream {
       this.prefillBlocks.push({ type: 'text', text: block.text ?? '' });
     } else {
       this.outcome.canPrefill = false;
+      if (block.type !== 'tool_use') this.prefillBlocks.push({ type: 'separator', text: '' });
     }
     this.openBlocks.set(index, open);
     this.emitAnthropicEvent(data);
@@ -769,38 +771,85 @@ class ChatStream {
   }
 }
 
-function anthropicReadLinkReply(message: NativeChatMessage): AnthropicChatMessage {
-  const blocks: AnthropicBlock[] = [];
+interface AssistantTextRange {
+  start: number;
+  end: number;
+}
+
+function historicalAssistantRanges(message: NativeChatMessage): AssistantTextRange[] | undefined {
+  if (!message.prefillBlocks) return undefined;
+  const ranges: AssistantTextRange[] = [];
   let offset = 0;
-  for (const link of message.readLinks ?? []) {
-    if (link.offset > offset) {
-      const text: AnthropicContentBlock = { type: 'text', text: message.content.slice(offset, link.offset) };
-      blocks.push(text);
+  let range: AssistantTextRange | undefined;
+  for (const block of message.prefillBlocks) {
+    if (block.type !== 'text') {
+      range = undefined;
+      continue;
     }
-    const call: AnthropicReadLinkCall = {
-      type: 'server_tool_use', id: link.id, name: 'deepseek_read_url', kind: 'read_link',
-      input: { action: 'read_link', url: link.url },
-    };
-    const result: AnthropicReadLinkResult = {
-      type: 'web_fetch_tool_result', tool_use_id: link.id, kind: 'read_link', signature: link.signature,
-      content: {
-        type: 'web_fetch_result', url: link.url, published_at: null,
-        content: { type: 'document', title: link.title, source: { type: 'text', media_type: 'text/plain', data: '' } },
-      },
-    };
-    blocks.push(call, result);
-    offset = link.offset;
+    if (!message.content.startsWith(block.text, offset)) return undefined;
+    if (!range) {
+      range = { start: offset, end: offset };
+      ranges.push(range);
+    }
+    offset += block.text.length;
+    range.end = offset;
   }
-  if (offset < message.content.length) {
-    const text: AnthropicContentBlock = { type: 'text', text: message.content.slice(offset) };
-    blocks.push(text);
+  return offset === message.content.length ? ranges : undefined;
+}
+
+function appendHistoricalText(blocks: AnthropicBlock[], text: string): void {
+  const previous = blocks[blocks.length - 1];
+  blocks.push({ type: 'text', text: (previous?.type === 'text' ? '\n\n' : '') + text });
+}
+
+function appendReadLink(blocks: AnthropicBlock[], link: NativeReadLink): void {
+  const call: AnthropicReadLinkCall = {
+    type: 'server_tool_use', id: link.id, name: 'deepseek_read_url', kind: 'read_link',
+    input: { action: 'read_link', url: link.url },
+  };
+  const result: AnthropicReadLinkResult = {
+    type: 'web_fetch_tool_result', tool_use_id: link.id, kind: 'read_link', signature: link.signature,
+    content: {
+      type: 'web_fetch_result', url: link.url, published_at: null,
+      content: { type: 'document', title: link.title, source: { type: 'text', media_type: 'text/plain', data: '' } },
+    },
+  };
+  blocks.push(call, result);
+}
+
+function historicalAssistantBlocks(message: NativeChatMessage, links: NativeReadLink[]): AnthropicBlock[] | undefined {
+  const ordered = historicalAssistantRanges(message);
+  if (!ordered && !links.length) return undefined;
+  const ranges: AssistantTextRange[] = ordered ?? [{ start: 0, end: message.content.length }];
+  const blocks: AnthropicBlock[] = [];
+  let nextLink = 0;
+  for (const range of ranges) {
+    let start = range.start;
+    while (nextLink < links.length && links[nextLink].offset <= range.end) {
+      const link = links[nextLink++];
+      if (link.offset > start) appendHistoricalText(blocks, message.content.slice(start, link.offset));
+      appendReadLink(blocks, link);
+      start = link.offset;
+    }
+    if (start < range.end || range.start === range.end) {
+      appendHistoricalText(blocks, message.content.slice(start, range.end));
+    }
   }
-  return { role: 'assistant', content: blocks };
+  while (nextLink < links.length) appendReadLink(blocks, links[nextLink++]);
+  return blocks.filter((block: AnthropicBlock): boolean => block.type !== 'text' || block.text !== '');
+}
+
+function openAIAssistantText(blocks: AnthropicBlock[]): string {
+  const text: string[] = [];
+  for (const block of blocks) {
+    if (block.type === 'text' && block.text !== undefined) text.push(block.text);
+  }
+  return text.join('\n');
 }
 
 function anthropicMessage(message: NativeChatMessage): AnthropicChatMessage {
-  if (message.role === 'assistant' && message.readLinks?.length) {
-    return anthropicReadLinkReply(message);
+  if (message.role === 'assistant') {
+    return { role: 'assistant', content: historicalAssistantBlocks(message, message.readLinks ?? []) ?? message.content };
   }
   if (!message.files?.length || message.role !== 'user') {
     return { role: message.role, content: message.content };
@@ -887,16 +936,20 @@ export class NativeChatClient {
     } else {
       const textMessages = messages.filter((message: NativeChatMessage): boolean =>
         !!message.content && (message.role === 'user' || message.role === 'assistant'))
-        .map<NativeChatMessage>((message: NativeChatMessage): NativeChatMessage => ({
-          role: message.role, content: message.content,
-        }));
+        .map<NativeChatMessage>((message: NativeChatMessage): NativeChatMessage => {
+          const blocks = message.role === 'assistant' ? historicalAssistantBlocks(message, message.readLinks ?? []) : undefined;
+          return { role: message.role, content: blocks ? openAIAssistantText(blocks) : message.content };
+        });
       const system = config.system ?? DEFAULT_DEEPSEEK_SYSTEM;
       if (system.trim()) {
         textMessages.unshift({ role: 'system', content: system });
       }
       const prefill = config.prefill;
-      if (prefill?.text && hasPrefillContent(prefill, config.thinking === true)) {
-        textMessages.push({ role: 'assistant', content: prefill.text });
+      if (prefill) {
+        const text = prefill.blocks === undefined ?
+          (hasPrefillContent(prefill, config.thinking === true) ? prefill.text : '') :
+          openAIAssistantText(anthropicPrefillContent(prefill, config.thinking === true));
+        if (text) textMessages.push({ role: 'assistant', content: text });
       }
       body = { model: model, messages: textMessages, stream: true } as ChatRequestBody;
     }

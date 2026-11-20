@@ -1,6 +1,6 @@
-/** Ordered assistant content retained for an eligible Continue request. */
+/** Ordered assistant content used for chat history and Continue requests. */
 export interface NativePrefillBlock {
-  type: 'text' | 'thinking';
+  type: 'text' | 'thinking' | 'separator';
   text: string;
   signature?: string;
 }
@@ -28,6 +28,7 @@ export function copyNativePrefillBlocks(blocks: NativePrefillBlock[] | undefined
 
 export function validNativePrefillBlocks(blocks: NativePrefillBlock[]): boolean {
   return Array.isArray(blocks) && blocks.every((block: NativePrefillBlock): boolean =>
-    !!block && (block.type === 'text' || block.type === 'thinking') && typeof block.text === 'string' &&
+    !!block && (block.type === 'text' || block.type === 'thinking' ||
+      (block.type === 'separator' && block.text === '')) && typeof block.text === 'string' &&
     (block.signature === undefined || (block.type === 'thinking' && typeof block.signature === 'string')));
 }

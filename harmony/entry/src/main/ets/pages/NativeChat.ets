@@ -1936,10 +1936,13 @@ struct NativeChat {
           messages.push({ role: 'latest_reminder', content: reminder });
           previousReminder = reminder;
         }
-        const readLinks = message.role === 'assistant' && usesFiles ?
-          message.readLinks?.filter((link: NativeReadLink): boolean =>
-            useNativeReadLink(link, reply.attachmentBinding, config.baseUrl, !!config.accountToken)) : undefined;
-        messages.push({ role: message.role, content: message.content, files, readLinks });
+        const readLinks = message.role === 'assistant' ? message.readLinks : undefined;
+        messages.push({
+          role: message.role, content: message.content, files,
+          readLinks: usesFiles ? readLinks?.filter((link: NativeReadLink): boolean =>
+            useNativeReadLink(link, reply.attachmentBinding, config.baseUrl, !!config.accountToken)) : readLinks,
+          prefillBlocks: message.role === 'assistant' ? message.prefillBlocks : undefined,
+        });
       }
     }
     return messages;
