@@ -24,6 +24,7 @@ struct SessionDrawerView: View {
     let onOpenSettings: () -> Void
 
     @Environment(\.openURL) private var openURL
+    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.nuwaFontScale) private var fontScale
     @State private var searchText = ""
     @State private var searchResult: (query: String, ids: Set<UUID>)?
@@ -121,11 +122,10 @@ struct SessionDrawerView: View {
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundStyle(Color.nuwaLabelPrimary)
                             .frame(width: 36, height: 36)
-                            .background(Color.nuwaSidebarSearchFill, in: Circle())
-                            .overlay(Circle().strokeBorder(Color.nuwaControlBorder, lineWidth: 0.75))
+                            .nuwaGlass(in: Circle(), interactive: true)
                             .contentShape(Circle())
                     }
-                    .buttonStyle(NuwaTactileButtonStyle())
+                    .buttonStyle(.plain)
                     .accessibilityLabel("退出多选")
                 }
                 .frame(minHeight: max(44, 28 + 16 * fontScale))
@@ -153,8 +153,11 @@ struct SessionDrawerView: View {
                 }
                 .padding(.horizontal, 14)
                 .frame(minHeight: max(44, 28 + 16 * fontScale))
-                .background(Color.nuwaSidebarSearchFill, in: Capsule())
-                .overlay(Capsule().strokeBorder(Color.nuwaControlBorder, lineWidth: 0.85))
+                .nuwaGlass(
+                    in: Capsule(),
+                    tint: colorScheme == .dark ? .white.opacity(0.08) : nil,
+                    interactive: true
+                )
                 .padding(.horizontal, 16)
                 .padding(.top, 10)
                 .padding(.bottom, 12)

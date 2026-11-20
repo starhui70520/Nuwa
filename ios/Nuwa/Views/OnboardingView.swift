@@ -143,17 +143,27 @@ struct OnboardingScreenView: View {
                             } else {
                                 VStack(alignment: .leading, spacing: 12) {
                                     if step == .thirdParty {
-                                        HStack {
+                                        HStack(spacing: 8) {
                                             Text("接口协议")
                                                 .font(NuwaFont.pill(fontScale))
                                                 .foregroundStyle(Color.nuwaLabelSecondary)
-                                            Spacer()
-                                            Picker("接口协议", selection: $settings.apiProtocol) {
+                                            Spacer(minLength: 8)
+                                            HStack(spacing: 6) {
                                                 ForEach(ApiProtocol.allCases) { p in
-                                                    Text(p.displayName).tag(p)
+                                                    let selected = settings.apiProtocol == p
+                                                    Button {
+                                                        settings.apiProtocol = p
+                                                    } label: {
+                                                        Text(p.displayName)
+                                                            .font(NuwaFont.badge(fontScale))
+                                                            .foregroundStyle(selected ? Color.nuwaBrandText : Color.nuwaLabelPrimary)
+                                                            .padding(.horizontal, 10)
+                                                            .padding(.vertical, 6)
+                                                            .nuwaPillSurface(selected: selected)
+                                                    }
+                                                    .buttonStyle(NuwaTactileButtonStyle())
                                                 }
                                             }
-                                            .pickerStyle(.menu)
                                         }
 
                                         inputField(

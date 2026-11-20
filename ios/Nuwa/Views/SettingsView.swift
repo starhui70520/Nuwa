@@ -1,5 +1,63 @@
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
+
+private struct SettingsDropdownOption: Identifiable {
+    let id: String
+    let label: String
+    let isSelected: Bool
+    let onSelect: () -> Void
+}
+
+private struct ActiveSettingsDropdown {
+    let id = UUID()
+    let anchorFrame: CGRect
+    let options: [SettingsDropdownOption]
+}
+
+private final class CoordinateAnchorBox {
+    weak var view: UIView?
+}
+
+private struct CoordinateAnchorProbe: UIViewRepresentable {
+    let box: CoordinateAnchorBox
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.backgroundColor = .clear
+        view.isUserInteractionEnabled = false
+        box.view = view
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        box.view = uiView
+    }
+}
+
+private struct SettingsSelectTrigger<Label: View>: View {
+    let rootAnchorBox: CoordinateAnchorBox
+    let onOpen: (CGRect) -> Void
+    @ViewBuilder let label: () -> Label
+
+    @State private var anchorBox = CoordinateAnchorBox()
+
+    var body: some View {
+        Button {
+            let rect: CGRect
+            if let src = anchorBox.view, let root = rootAnchorBox.view {
+                rect = src.convert(src.bounds, to: root)
+            } else {
+                rect = CGRect(x: 16, y: 120, width: 220, height: 48)
+            }
+            onOpen(rect)
+        } label: {
+            label()
+                .background(CoordinateAnchorProbe(box: anchorBox))
+        }
+        .buttonStyle(NuwaTactileButtonStyle(pressedScale: 0.99))
+    }
+}
 
 private enum SettingsSubpage {
     case root
@@ -71,6 +129,8 @@ struct SettingsView: View {
     @State private var changelogItems: [ReleaseHistoryEntry] = []
     @State private var changelogLoading = false
     @State private var changelogFailed = false
+    @State private var activeDropdown: ActiveSettingsDropdown?
+    @State private var rootAnchorBox = CoordinateAnchorBox()
 
     private let docsURL = URL(string: "https://api-docs.deepseek.com/zh-cn/")!
     private let topUpURL = URL(string: "https://platform.deepseek.com/top_up")!
@@ -107,68 +167,86 @@ struct SettingsView: View {
         ZStack {
             sheetBg.ignoresSafeArea()
 
-            VStack(spacing: 0) {
-                // Header matching SettingsDialog.tsx
-                HStack {
-                    if page == .root {
-                        Color.clear.frame(width: 36, height: 36)
-                    } else {
-                        Button {
-                            withAnimation(.easeInOut(duration: 0.2)) { page = .root }
-                        } label: {
-                            Image(systemName: "chevron.left")
-                                .font(.system(size: 15, weight: .semibold))
+            GeometryReader { rootGeo in
+                ZStack(alignment: .topLeading) {
+                    VStack(spacing: 0) {
+                        // Header matching SettingsDialog.tsx
+                        HStack {
+                            if page == .root {
+                                Color.clear.frame(width: 36, height: 36)
+                            } else {
+                                Button {
+                                    activeDropdown = nil
+                                    withAnimation(.easeInOut(duration: 0.2)) { page = .root }
+                                } label: {
+                                    Image(systemName: "chevron.left")
+                                        .font(.system(size: 15, weight: .semibold))
+                                        .foregroundStyle(Color.nuwaLabelPrimary)
+                                        .frame(width: 36, height: 36)
+                                        .nuwaGlass(in: Circle(), interactive: true)
+                                }
+                                .buttonStyle(.plain)
+                            }
+
+                            Text(pageTitle)
+                                .font(NuwaFont.navTitle(fontScale))
                                 .foregroundStyle(Color.nuwaLabelPrimary)
-                                .frame(width: 36, height: 36)
-                                .nuwaGlass(in: Circle(), interactive: true)
+                                .frame(maxWidth: .infinity)
+
+                            Button {
+                                dismiss()
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(Color.nuwaLabelPrimary)
+                                    .frame(width: 36, height: 36)
+                                    .nuwaGlass(in: Circle(), interactive: true)
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
-                    }
+                        .padding(.horizontal, 16)
+                        .padding(.top, 16)
+                        .padding(.bottom, 10)
 
-                    Text(pageTitle)
-                        .font(NuwaFont.navTitle(fontScale))
-                        .foregroundStyle(Color.nuwaLabelPrimary)
-                        .frame(maxWidth: .infinity)
-
-                    Button {
-                        dismiss()
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(Color.nuwaLabelPrimary)
-                            .frame(width: 36, height: 36)
-                            .nuwaGlass(in: Circle(), interactive: true)
-                    }
-                    .buttonStyle(.plain)
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, 16)
-                .padding(.bottom, 10)
-
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
-                        switch page {
-                        case .root: rootPage
-                        case .account: accountPage
-                        case .data: dataPage
-                        case .location: locationPage
-                        case .changelog: changelogPage
-                        case .feedback: FeedbackReportView(settings: settings, cardBg: cardBg, fieldBg: sheetBg)
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 0) {
+                                switch page {
+                                case .root: rootPage
+                                case .account: accountPage
+                                case .data: dataPage
+                                case .location: locationPage
+                                case .changelog: changelogPage
+                                case .feedback: FeedbackReportView(settings: settings, cardBg: cardBg, fieldBg: sheetBg)
+                                }
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.top, 4)
+                            .padding(.bottom, 32)
                         }
+                        .nuwaNoScrollEdgeEffect()
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.top, 4)
-                    .padding(.bottom, 32)
-                }
-                .nuwaNoScrollEdgeEffect()
-            }
-            .accessibilityHidden(showMigrationChooser)
+                    .frame(width: rootGeo.size.width, height: rootGeo.size.height)
+                    .accessibilityHidden(showMigrationChooser || activeDropdown != nil)
 
-            if showMigrationChooser {
-                migrationChooser
+                    if let dropdown = activeDropdown {
+                        settingsDropdownOverlay(dropdown, containerSize: rootGeo.size)
+                            .zIndex(40)
+                    }
+
+                    if showMigrationChooser {
+                        migrationChooser
+                            .frame(width: rootGeo.size.width, height: rootGeo.size.height)
+                            .zIndex(50)
+                    }
+                }
+                .frame(width: rootGeo.size.width, height: rootGeo.size.height, alignment: .topLeading)
+                .background(CoordinateAnchorProbe(box: rootAnchorBox))
             }
         }
         .environment(\.nuwaFontScale, fontScale)
+        .onChange(of: page) { _, _ in
+            activeDropdown = nil
+        }
         .task {
             syncAccountDrafts()
             await settings.refreshBalance()
@@ -317,38 +395,50 @@ struct SettingsView: View {
 
         groupTitle(L10n.t("groupApp", locale: loc))
         groupCard {
-            pickerRow(icon: "globe", label: L10n.t("language", locale: loc)) {
-                Picker("语言", selection: $settings.locale) {
-                    ForEach(AppLocale.allCases) { item in
-                        Text(item.displayName).tag(item)
+            selectRow(
+                icon: "globe",
+                label: L10n.t("language", locale: loc),
+                value: settings.locale.displayName,
+                options: AppLocale.allCases.map { item in
+                    SettingsDropdownOption(
+                        id: item.rawValue,
+                        label: item.displayName,
+                        isSelected: settings.locale == item
+                    ) {
+                        settings.locale = item
                     }
                 }
-                .labelsHidden()
-                .pickerStyle(.menu)
-            }
+            )
             rowDivider
-            pickerRow(icon: "sun.max", label: L10n.t("appearance", locale: loc)) {
-                Picker("外观", selection: $settings.themePreference) {
-                    ForEach(ThemePreference.allCases) { item in
-                        Text(item.displayName).tag(item)
+            selectRow(
+                icon: "sun.max",
+                label: L10n.t("appearance", locale: loc),
+                value: settings.themePreference.displayName,
+                options: ThemePreference.allCases.map { item in
+                    SettingsDropdownOption(
+                        id: item.rawValue,
+                        label: item.displayName,
+                        isSelected: settings.themePreference == item
+                    ) {
+                        settings.themePreference = item
                     }
                 }
-                .labelsHidden()
-                .pickerStyle(.menu)
-            }
+            )
             rowDivider
-            pickerRow(icon: "textformat.size", label: L10n.t("fontSize", locale: loc)) {
-                Picker("字体大小", selection: $settings.chatFontSize) {
-                    ForEach(SettingsStore.fontSizeOptions, id: \.self) { size in
-                        let label = size == 16
-                            ? (loc == .enUS ? "16px (Default)" : "16px（默认）")
-                            : "\(Int(size))px"
-                        Text(label).tag(size)
+            selectRow(
+                icon: "textformat.size",
+                label: L10n.t("fontSize", locale: loc),
+                value: fontSizeLabel(settings.chatFontSize, locale: loc),
+                options: SettingsStore.fontSizeOptions.map { size in
+                    SettingsDropdownOption(
+                        id: String(Int(size)),
+                        label: fontSizeLabel(size, locale: loc),
+                        isSelected: settings.chatFontSize == size
+                    ) {
+                        settings.chatFontSize = size
                     }
                 }
-                .labelsHidden()
-                .pickerStyle(.menu)
-            }
+            )
             rowDivider
             navRow(
                 icon: "sparkles",
@@ -370,25 +460,35 @@ struct SettingsView: View {
 
         groupTitle(L10n.t("groupVoice", locale: loc))
         groupCard {
-            pickerRow(icon: "speaker.wave.2", label: L10n.t("ttsVoice", locale: loc)) {
-                Picker("朗读音色", selection: $settings.ttsVoice) {
-                    ForEach(TtsVoiceOption.allCases) { v in
-                        Text(v.displayName).tag(v)
+            selectRow(
+                icon: "speaker.wave.2",
+                label: L10n.t("ttsVoice", locale: loc),
+                value: settings.ttsVoice.displayName,
+                options: TtsVoiceOption.allCases.map { v in
+                    SettingsDropdownOption(
+                        id: v.rawValue,
+                        label: v.displayName,
+                        isSelected: settings.ttsVoice == v
+                    ) {
+                        settings.ttsVoice = v
                     }
                 }
-                .labelsHidden()
-                .pickerStyle(.menu)
-            }
+            )
             rowDivider
-            pickerRow(icon: "waveform", label: L10n.t("speechEngine", locale: loc)) {
-                Picker("语音引擎", selection: $settings.speechEngine) {
-                    ForEach(SpeechEngineOption.allCases) { eng in
-                        Text(eng.displayName).tag(eng)
+            selectRow(
+                icon: "waveform",
+                label: L10n.t("speechEngine", locale: loc),
+                value: settings.speechEngine.displayName,
+                options: SpeechEngineOption.allCases.map { eng in
+                    SettingsDropdownOption(
+                        id: eng.rawValue,
+                        label: eng.displayName,
+                        isSelected: settings.speechEngine == eng
+                    ) {
+                        settings.speechEngine = eng
                     }
                 }
-                .labelsHidden()
-                .pickerStyle(.menu)
-            }
+            )
         }
         Text("自动模式在配置 API Key 时优先云端朗读，否则无缝使用 iOS 原生语音服务")
             .font(NuwaFont.badge(fontScale))
@@ -544,15 +644,22 @@ struct SettingsView: View {
                 .font(NuwaFont.sectionHeader(fontScale))
                 .foregroundStyle(Color.nuwaLabelTertiary)
             Spacer()
-            Menu {
-                ForEach(ProviderPreset.presets) { preset in
-                    Button(preset.name) {
-                        apiProtocolDraft = preset.apiProtocol
-                        apiBaseUrlDraft = preset.baseUrl
-                        apiModelDraft = preset.defaultModel
-                        keyVerifyError = nil
+            SettingsSelectTrigger(rootAnchorBox: rootAnchorBox) { frame in
+                openDropdown(
+                    anchorFrame: frame,
+                    options: ProviderPreset.presets.map { preset in
+                        SettingsDropdownOption(
+                            id: preset.id,
+                            label: preset.name,
+                            isSelected: apiBaseUrlDraft == preset.baseUrl && apiProtocolDraft == preset.apiProtocol
+                        ) {
+                            apiProtocolDraft = preset.apiProtocol
+                            apiBaseUrlDraft = preset.baseUrl
+                            apiModelDraft = preset.defaultModel
+                            keyVerifyError = nil
+                        }
                     }
-                }
+                )
             } label: {
                 HStack(spacing: 4) {
                     Text("填充模板")
@@ -561,6 +668,9 @@ struct SettingsView: View {
                         .font(.system(size: 10, weight: .semibold))
                 }
                 .foregroundStyle(Color.nuwaBrandText)
+                .padding(.vertical, 4)
+                .padding(.horizontal, 4)
+                .contentShape(Rectangle())
             }
         }
         .padding(.horizontal, 12)
@@ -569,19 +679,36 @@ struct SettingsView: View {
 
         groupCard {
             VStack(alignment: .leading, spacing: 14) {
-                HStack {
-                    Text("接口协议")
-                        .font(NuwaFont.sublabel(fontScale))
-                        .foregroundStyle(Color.nuwaLabelPrimary)
-                    Spacer()
-                    Picker("接口协议", selection: $apiProtocolDraft) {
-                        ForEach(ApiProtocol.allCases) { proto in
-                            Text(proto.displayName).tag(proto)
+                SettingsSelectTrigger(rootAnchorBox: rootAnchorBox) { frame in
+                    openDropdown(
+                        anchorFrame: frame,
+                        options: ApiProtocol.allCases.map { proto in
+                            SettingsDropdownOption(
+                                id: proto.rawValue,
+                                label: proto.displayName,
+                                isSelected: apiProtocolDraft == proto
+                            ) {
+                                apiProtocolDraft = proto
+                            }
+                        }
+                    )
+                } label: {
+                    HStack {
+                        Text("接口协议")
+                            .font(NuwaFont.sublabel(fontScale))
+                            .foregroundStyle(Color.nuwaLabelPrimary)
+                        Spacer()
+                        HStack(spacing: 5) {
+                            Text(apiProtocolDraft.displayName)
+                                .font(NuwaFont.control(fontScale))
+                                .foregroundStyle(Color.nuwaLabelSecondary)
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(Color.nuwaLabelTertiary)
                         }
                     }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .font(NuwaFont.control(fontScale))
+                    .padding(.vertical, 4)
+                    .contentShape(Rectangle())
                 }
 
                 labeledInput("API 地址 (Base URL)", placeholder: "https://api.deepseek.com", text: $apiBaseUrlDraft)
@@ -774,87 +901,79 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var locationPage: some View {
+        let currentRegionCode = settings.location?.region ?? ""
+        let currentRegionLabel: String = {
+            if currentRegionCode.isEmpty { return "不设置" }
+            if let r = LocationCatalog.regions.first(where: { $0.code == currentRegionCode }) {
+                return settings.locale == .zhCN ? r.zh : r.en
+            }
+            return currentRegionCode
+        }()
+
         groupTitle("国家或地区")
         groupCard {
             VStack(spacing: 0) {
-                HStack {
-                    Text("国家 / 地区")
-                        .font(NuwaFont.rowTitle(fontScale))
-                        .foregroundStyle(Color.nuwaLabelPrimary)
-                    Spacer()
-                    Picker("国家/地区", selection: Binding(
-                        get: { settings.location?.region ?? "" },
-                        set: { code in
-                            if code.isEmpty {
-                                settings.location = nil
-                            } else if code == "CN" {
+                plainSelectRow(
+                    label: "国家 / 地区",
+                    value: currentRegionLabel,
+                    options: [
+                        SettingsDropdownOption(
+                            id: "",
+                            label: "不设置",
+                            isSelected: currentRegionCode.isEmpty
+                        ) {
+                            settings.location = nil
+                        }
+                    ] + LocationCatalog.regions.map { r in
+                        SettingsDropdownOption(
+                            id: r.code,
+                            label: settings.locale == .zhCN ? r.zh : r.en,
+                            isSelected: currentRegionCode == r.code
+                        ) {
+                            if r.code == "CN" {
                                 settings.location = UserLocation(region: "CN", province: "北京市", city: "北京市")
                             } else {
-                                settings.location = UserLocation(region: code, province: nil, city: nil)
+                                settings.location = UserLocation(region: r.code, province: nil, city: nil)
                             }
                         }
-                    )) {
-                        Text("不设置").tag("")
-                        ForEach(LocationCatalog.regions, id: \.code) { r in
-                            Text(settings.locale == .zhCN ? r.zh : r.en).tag(r.code)
-                        }
                     }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .font(NuwaFont.control(fontScale))
-                }
-                .padding(.horizontal, 16)
-                .frame(minHeight: max(50, 34 + 16 * fontScale))
+                )
 
                 if settings.location?.region == "CN" {
+                    let currentProv = settings.location?.province ?? "北京市"
                     rowDivider
-                    HStack {
-                        Text("省份 / 直辖市")
-                            .font(NuwaFont.rowTitle(fontScale))
-                            .foregroundStyle(Color.nuwaLabelPrimary)
-                        Spacer()
-                        Picker("省份", selection: Binding(
-                            get: { settings.location?.province ?? "北京市" },
-                            set: { prov in
-                                let firstCity = LocationCatalog.chinaProvinces.first(where: { $0.name == prov })?.cities.first
-                                settings.location = UserLocation(region: "CN", province: prov, city: firstCity)
-                            }
-                        )) {
-                            ForEach(LocationCatalog.chinaProvinces) { p in
-                                Text(p.name).tag(p.name)
+                    plainSelectRow(
+                        label: "省份 / 直辖市",
+                        value: currentProv,
+                        options: LocationCatalog.chinaProvinces.map { p in
+                            SettingsDropdownOption(
+                                id: p.name,
+                                label: p.name,
+                                isSelected: currentProv == p.name
+                            ) {
+                                let firstCity = p.cities.first
+                                settings.location = UserLocation(region: "CN", province: p.name, city: firstCity)
                             }
                         }
-                        .labelsHidden()
-                        .pickerStyle(.menu)
-                        .font(NuwaFont.control(fontScale))
-                    }
-                    .padding(.horizontal, 16)
-                    .frame(minHeight: max(50, 34 + 16 * fontScale))
+                    )
 
-                    if let prov = LocationCatalog.chinaProvinces.first(where: { $0.name == settings.location?.province }),
+                    if let prov = LocationCatalog.chinaProvinces.first(where: { $0.name == currentProv }),
                        prov.cities.count > 1 {
+                        let currentCity = settings.location?.city ?? prov.cities[0]
                         rowDivider
-                        HStack {
-                            Text("城市")
-                                .font(NuwaFont.rowTitle(fontScale))
-                                .foregroundStyle(Color.nuwaLabelPrimary)
-                            Spacer()
-                            Picker("城市", selection: Binding(
-                                get: { settings.location?.city ?? prov.cities[0] },
-                                set: { city in
-                                    settings.location = UserLocation(region: "CN", province: prov.name, city: city)
-                                }
-                            )) {
-                                ForEach(prov.cities, id: \.self) { c in
-                                    Text(c).tag(c)
+                        plainSelectRow(
+                            label: "城市",
+                            value: currentCity,
+                            options: prov.cities.map { c in
+                                SettingsDropdownOption(
+                                    id: c,
+                                    label: c,
+                                    isSelected: currentCity == c
+                                ) {
+                                    settings.location = UserLocation(region: "CN", province: prov.name, city: c)
                                 }
                             }
-                            .labelsHidden()
-                            .pickerStyle(.menu)
-                            .font(NuwaFont.control(fontScale))
-                        }
-                        .padding(.horizontal, 16)
-                        .frame(minHeight: max(50, 34 + 16 * fontScale))
+                        )
                     }
                 }
             }
@@ -978,6 +1097,180 @@ struct SettingsView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(NuwaTactileButtonStyle(pressedScale: 0.99))
+    }
+
+    private func fontSizeLabel(_ size: Double, locale: AppLocale) -> String {
+        size == 16
+            ? (locale == .enUS ? "16px (Default)" : "16px（默认）")
+            : "\(Int(size))px"
+    }
+
+    private func openDropdown(anchorFrame: CGRect, options: [SettingsDropdownOption]) {
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        withAnimation(.easeOut(duration: 0.16)) {
+            activeDropdown = ActiveSettingsDropdown(anchorFrame: anchorFrame, options: options)
+        }
+    }
+
+    private func closeDropdown() {
+        withAnimation(.easeOut(duration: 0.14)) {
+            activeDropdown = nil
+        }
+    }
+
+    private func selectRow(
+        icon: String,
+        label: String,
+        value: String,
+        options: [SettingsDropdownOption]
+    ) -> some View {
+        SettingsSelectTrigger(rootAnchorBox: rootAnchorBox) { frame in
+            openDropdown(anchorFrame: frame, options: options)
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: icon)
+                    .font(NuwaFont.sized(16, scale: fontScale))
+                    .foregroundStyle(Color.nuwaLabelSecondary)
+                    .frame(width: 22)
+                Text(label)
+                    .font(NuwaFont.rowTitle(fontScale))
+                    .foregroundStyle(Color.nuwaLabelPrimary)
+                Spacer(minLength: 8)
+                HStack(spacing: 5) {
+                    Text(value)
+                        .font(NuwaFont.control(fontScale))
+                        .foregroundStyle(Color.nuwaLabelSecondary)
+                        .lineLimit(1)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color.nuwaLabelTertiary)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .frame(minHeight: max(52, 36 + 16 * fontScale))
+            .contentShape(Rectangle())
+        }
+    }
+
+    private func plainSelectRow(
+        label: String,
+        value: String,
+        options: [SettingsDropdownOption]
+    ) -> some View {
+        SettingsSelectTrigger(rootAnchorBox: rootAnchorBox) { frame in
+            openDropdown(anchorFrame: frame, options: options)
+        } label: {
+            HStack(spacing: 12) {
+                Text(label)
+                    .font(NuwaFont.rowTitle(fontScale))
+                    .foregroundStyle(Color.nuwaLabelPrimary)
+                Spacer(minLength: 8)
+                HStack(spacing: 5) {
+                    Text(value)
+                        .font(NuwaFont.control(fontScale))
+                        .foregroundStyle(Color.nuwaLabelSecondary)
+                        .lineLimit(1)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color.nuwaLabelTertiary)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .frame(minHeight: max(50, 34 + 16 * fontScale))
+            .contentShape(Rectangle())
+        }
+    }
+
+    @ViewBuilder
+    private func settingsDropdownOverlay(
+        _ dropdown: ActiveSettingsDropdown,
+        containerSize: CGSize
+    ) -> some View {
+        let horizontalMargin: CGFloat = 16
+        let verticalMargin: CGFloat = 16
+        let menuWidth = min(max(200, 224 * min(1.25, max(1.0, fontScale))), max(160, containerSize.width - horizontalMargin * 2))
+        let rowHeight = max(44, 28 + 16 * fontScale)
+        let contentHeight = CGFloat(dropdown.options.count) * rowHeight + 12
+        let maxHeight = min(300, max(160, containerSize.height - 96))
+        let menuHeight = min(contentHeight, maxHeight)
+
+        let spaceBelow = containerSize.height - dropdown.anchorFrame.maxY - verticalMargin
+        let spaceAbove = dropdown.anchorFrame.minY - verticalMargin
+        let openBelow = spaceBelow >= min(menuHeight, 160) || spaceBelow >= spaceAbove
+        let rawTop = openBelow
+            ? dropdown.anchorFrame.maxY + 6
+            : dropdown.anchorFrame.minY - 6 - menuHeight
+        let menuTop = min(max(verticalMargin, rawTop), max(verticalMargin, containerSize.height - menuHeight - verticalMargin))
+        let rawLeft = dropdown.anchorFrame.maxX - menuWidth
+        let menuLeft = min(max(horizontalMargin, rawLeft), max(horizontalMargin, containerSize.width - menuWidth - horizontalMargin))
+
+        ZStack(alignment: .topLeading) {
+            Color.black.opacity(0.001)
+                .frame(width: containerSize.width, height: containerSize.height)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    closeDropdown()
+                }
+                .gesture(
+                    DragGesture(minimumDistance: 6)
+                        .onChanged { _ in
+                            closeDropdown()
+                        }
+                )
+
+            ScrollViewReader { proxy in
+                ScrollView(showsIndicators: contentHeight > maxHeight) {
+                    VStack(spacing: 0) {
+                        ForEach(Array(dropdown.options.enumerated()), id: \.element.id) { idx, opt in
+                            if idx > 0 {
+                                Rectangle()
+                                    .fill(Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.06))
+                                    .frame(height: 0.5)
+                                    .padding(.horizontal, 12)
+                            }
+                            Button {
+                                opt.onSelect()
+                                closeDropdown()
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Text(opt.label)
+                                        .font(opt.isSelected ? NuwaFont.controlMedium(fontScale) : NuwaFont.control(fontScale))
+                                        .foregroundStyle(opt.isSelected ? Color.nuwaBrandText : Color.nuwaLabelPrimary)
+                                        .lineLimit(1)
+                                    Spacer(minLength: 6)
+                                    if opt.isSelected {
+                                        Image(systemName: "checkmark")
+                                            .font(.system(size: 13, weight: .semibold))
+                                            .foregroundStyle(Color.nuwaBrandText)
+                                    }
+                                }
+                                .padding(.horizontal, 14)
+                                .frame(minHeight: rowHeight)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(NuwaTactileButtonStyle(pressedScale: 0.99))
+                            .id(opt.id)
+                        }
+                    }
+                    .padding(.vertical, 6)
+                }
+                .onAppear {
+                    if let selected = dropdown.options.first(where: { $0.isSelected }) {
+                        proxy.scrollTo(selected.id, anchor: .center)
+                    }
+                }
+            }
+            .frame(width: menuWidth, height: menuHeight)
+            .nuwaGlassCard(
+                cornerRadius: 18,
+                tint: colorScheme == .dark ? Color.white.opacity(0.08) : Color.white.opacity(0.38)
+            )
+            .offset(x: menuLeft, y: menuTop)
+            .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: openBelow ? .topTrailing : .bottomTrailing)))
+        }
+        .frame(width: containerSize.width, height: containerSize.height, alignment: .topLeading)
     }
 
     private func pickerRow<Control: View>(icon: String, label: String, @ViewBuilder control: () -> Control) -> some View {
