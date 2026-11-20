@@ -5049,17 +5049,30 @@ struct NativeChat {
   }
 
   @Builder
+  private sidebarMenuLabel(icon: Resource, title: string, color: ResourceColor = $r('app.color.native_chat_primary')) {
+    Row({ space: 8 }) {
+      Image(icon).width(16).height(16).colorFilter(nativeIconTint(color))
+        .draggable(false).accessibilityLevel('no')
+      Text(title).fontSize(this.appFontSize(14)).fontColor(color)
+    }
+    .height(40).padding({ left: 10, right: 10 })
+  }
+
+  @Builder
   private sessionMenu(session: NativeSidebarSession) {
     Menu() {
-      MenuItem({ content: session.pinnedAt ? this.label('取消置顶', "Unpin") : this.label('置顶', "Pin") })
+      MenuItem(this.sidebarMenuLabel($r('app.media.native_pin'),
+        session.pinnedAt ? this.label('取消置顶', "Unpin") : this.label('置顶', "Pin")))
         .enabled(this.canEditSidebarMetadata(session.id)).onClick(() => { this.pinSidebarSession(session.id); })
-      MenuItem({ content: this.label('多选', "Select") }).onClick(() => { this.beginSidebarSelection(session.id); })
-      MenuItem({ content: this.label('重命名', "Rename") }).enabled(this.canEditSidebarMetadata(session.id))
+      MenuItem(this.sidebarMenuLabel($r('app.media.native_select'), this.label('多选', "Select")))
+        .onClick(() => { this.beginSidebarSelection(session.id); })
+      MenuItem(this.sidebarMenuLabel($r('app.media.native_edit'), this.label('重命名', "Rename")))
+        .enabled(this.canEditSidebarMetadata(session.id))
         .onClick(() => { this.beginSidebarRename(session); })
-      MenuItem({ content: this.label('删除', "Delete") }).contentFontColor($r('app.color.native_chat_error'))
+      MenuItem(this.sidebarMenuLabel($r('app.media.native_trash'), this.label('删除', "Delete"),
+        $r('app.color.native_chat_error')))
         .onClick(() => { this.deleteSessions([session.id], 'single'); })
     }
-    .font({ size: this.appFontSize(14) })
   }
 
   @Builder
@@ -5096,7 +5109,9 @@ struct NativeChat {
               .colorFilter(nativeIconTint($r('app.color.native_chat_blue_text'))).draggable(false).accessibilityLevel('no')
           }
           Text(this.sidebarSessionTitle(session.title)).fontSize(this.appFontSize(this.wide() ? 14 : 16)).layoutWeight(1).maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis }).fontColor($r('app.color.native_chat_primary'))
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .fontColor(!this.selecting && session.id === this.history.activeId ?
+              $r('app.color.native_chat_blue_text') : $r('app.color.native_chat_primary'))
         }
         .height('100%').layoutWeight(1).focusable(true)
         .onClick(() => {
@@ -5110,7 +5125,7 @@ struct NativeChat {
         if (!this.selecting) {
           Button('⋯', { buttonStyle: ButtonStyleMode.TEXTUAL }).fontSize(18).width(32).height(32).padding(0).margin({ left: 4 })
             .fontColor($r('app.color.native_chat_secondary')).accessibilityText(this.label('对话选项', "Chat options"))
-            .bindMenu(this.sessionMenu(session))
+            .bindMenu(this.sessionMenu(session), { borderRadius: 12 })
         }
       }
       .height(this.wide() ? 40 : 44).width('100%').padding({ left: this.wide() ? 10 : 12, right: 6 })
@@ -5129,7 +5144,7 @@ struct NativeChat {
   }
 
   private openSidebarSettings(): void {
-    this.setDrawer(false);
+    this.getUIContext().getFocusController().clearFocus();
     this.openSettings();
   }
 
