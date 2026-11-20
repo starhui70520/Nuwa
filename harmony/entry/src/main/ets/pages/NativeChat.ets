@@ -5078,6 +5078,21 @@ struct NativeChat {
   }
 
   @Builder
+  private sidebarSelectionAction(icon: Resource, title: () => string, color: ResourceColor,
+    enabled: () => boolean, action: () => void) {
+    Button({ type: ButtonType.Normal }) {
+      Row({ space: 6 }) {
+        Image(icon).width(16).height(16).colorFilter(nativeIconTint(color))
+          .draggable(false).accessibilityLevel('no')
+        Text(title()).fontSize(this.appFontSize(15)).fontWeight(FontWeight.Medium).fontColor(color)
+      }
+    }
+    .height(44).layoutWeight(1).padding({ left: 12, right: 12 }).borderRadius(12)
+    .backgroundColor(Color.Transparent).opacity(enabled() ? 1 : 0.38)
+    .enabled(enabled()).accessibilityText(title()).onClick(action)
+  }
+
+  @Builder
   private drawer(desktop: boolean = false) {
     Column() {
       if (desktop && !this.selecting) {
@@ -5101,19 +5116,19 @@ struct NativeChat {
         .onClick(() => { this.activate(null); })
       }
       if (this.selecting) {
-        Row() {
-          Button(this.label('取消', "Cancel"), { buttonStyle: ButtonStyleMode.TEXTUAL })
-            .fontSize(this.appFontSize(14)).onClick(() => { this.resetSelection(); })
-          Text(this.label(`已选择 ${this.selectedIds.length} 项`, `${this.selectedIds.length} selected`))
-            .fontSize(this.appFontSize(15)).fontWeight(FontWeight.Medium).layoutWeight(1)
-            .textAlign(TextAlign.Center).fontColor($r('app.color.native_chat_primary'))
-          Button(this.label('全选', "Select all"), { buttonStyle: ButtonStyleMode.TEXTUAL })
-            .fontSize(this.appFontSize(14)).onClick(() => {
-            this.selectedIds = this.filteredSidebarGroups.flatMap<string>((group: NativeConversationGroup): string[] =>
-              group.sessions.map<string>((session: NativeConversation): string => session.id));
-          })
+        Row({ space: 12 }) {
+          Text(this.label(`已选择 ${this.selectedIds.length} 个对话`, `${this.selectedIds.length} selected`))
+            .fontSize(this.appFontSize(17)).lineHeight(this.appFontSize(24))
+            .fontWeight(600).layoutWeight(1).fontColor($r('app.color.native_chat_primary'))
+          Row() {
+            this.iconButton($r('app.media.native_close'), this.label('关闭', 'Close'),
+              () => { this.resetSelection(); }, 36, 16, $r('app.color.native_chat_primary'),
+              $r('app.color.native_chat_surface'))
+          }
+          .width(36).height(36).borderRadius(18).border({ width: 1, color: $r('app.color.native_chat_stroke') })
+          .shadow({ radius: 4, color: '#0D000000', offsetY: 1 })
         }
-        .width('100%').height(44)
+        .width('100%').constraintSize({ minHeight: 44 }).padding({ left: 6, right: 2, top: 4, bottom: 6 })
       } else {
         Row({ space: 8 }) {
           Image($r('app.media.native_search')).height(16).width(16).colorFilter(nativeIconTint($r('app.color.native_chat_secondary')))
@@ -5176,16 +5191,16 @@ struct NativeChat {
       })
       if (this.selecting) {
         Row() {
-          Button(this.allPinned() ? this.label('取消置顶', "Unpin") : this.label('置顶', "Pin"), { buttonStyle: ButtonStyleMode.TEXTUAL })
-            .fontSize(this.appFontSize(14))
-            .enabled(this.canPinSidebarSelection()).layoutWeight(1)
-            .onClick(() => { this.pinSidebarSelection(); })
-          Button(this.label('删除', "Delete"), { buttonStyle: ButtonStyleMode.TEXTUAL })
-            .fontSize(this.appFontSize(14)).fontColor($r('app.color.native_chat_error'))
-            .enabled(this.selectedIds.length > 0).layoutWeight(1)
-            .onClick(() => { this.deleteSessions(this.selectedIds, 'batch'); })
+          this.sidebarSelectionAction($r('app.media.native_pin'),
+            () => this.allPinned() ? this.label('取消置顶', 'Unpin') : this.label('置顶', 'Pin'),
+            $r('app.color.native_chat_primary'), () => this.canPinSidebarSelection(),
+            () => { this.pinSidebarSelection(); })
+          Divider().vertical(true).height(18).strokeWidth(1).color($r('app.color.native_chat_stroke'))
+          this.sidebarSelectionAction($r('app.media.native_trash'), () => this.label('删除', 'Delete'),
+            $r('app.color.native_chat_error'), () => this.selectedIds.length > 0,
+            () => { this.deleteSessions(this.selectedIds, 'batch'); })
         }
-        .height(52).width('100%')
+        .height(44).width('100%').margin({ top: 10, bottom: 4 })
       } else {
         Row({ space: 8 }) {
           Button({ type: ButtonType.Normal }) {
