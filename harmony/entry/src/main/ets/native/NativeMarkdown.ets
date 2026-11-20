@@ -1,11 +1,12 @@
 import { LengthMetrics } from '@kit.ArkUI';
-import { deviceInfo, pasteboard } from '@kit.BasicServicesKit';
+import { deviceInfo } from '@kit.BasicServicesKit';
 import { text } from '@kit.ArkGraphics2D';
 import { NativeChatSource, safeNativeSourceUrl } from './NativeChatSources';
 import { NativeHighlightedCode } from './NativeHighlightedCode';
 import { NativeLocale } from './NativeLocation';
 import { NativeMathEquation } from './NativeMathEquation';
 import { NativeMathPictureFiles, NativeStoredMathPicture } from './NativeMathPictureFiles';
+import { NativeMessageCopyButton } from './NativeMessageCopyButton';
 import { NativeMessageSelection } from './NativeMessageSelection';
 import {
   NativeMathPictureRequest, nativeMathPictureKey, requestNativeMathPicture,
@@ -42,7 +43,6 @@ export struct NativeMarkdown {
   @Prop @Watch('onContentChanged') loading: boolean = false;
   onCitation: (number: number) => void = () => {};
   onOpenLink: (target: string) => void = (_target: string) => {};
-  @State private copiedCodeKey: string = '';
   @State private mermaidCodeBlocks: string[] = [];
   @State private mathPictures: Map<string, NativeStoredMathPicture> = new Map<string, NativeStoredMathPicture>();
   @State private contentWidth: number = 0;
@@ -55,7 +55,6 @@ export struct NativeMarkdown {
   private cachedBlocks: NativeMarkdownBlock[] = [];
   private nextStreamUpdate: number = 0;
   private streamTimer: number = -1;
-  private codeCopyTimer: number = -1;
   private mathMounted: boolean = false;
   private mathPictureFiles?: NativeMathPictureFiles;
   private mathTimer: number = -1;
@@ -83,7 +82,6 @@ export struct NativeMarkdown {
     clearTimeout(this.mathTimer);
     this.mathTimer = -1;
     this.clearMathPictures();
-    clearTimeout(this.codeCopyTimer);
     clearTimeout(this.streamTimer);
     this.streamTimer = -1;
     this.dismissCitationPreview();
@@ -640,19 +638,6 @@ export struct NativeMarkdown {
     }
   }
 
-  private async copyCode(text: string, key: string): Promise<void> {
-    try {
-      await pasteboard.getSystemPasteboard().setData(
-        pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, text)
-      );
-      this.copiedCodeKey = key;
-      clearTimeout(this.codeCopyTimer);
-      this.codeCopyTimer = setTimeout(() => { this.copiedCodeKey = ''; }, 1500);
-    } catch {
-      this.getUIContext().getPromptAction().showToast({ message: this.label('复制失败', 'Copy failed') });
-    }
-  }
-
   @Builder
   private mermaidModeButton(path: string, label: string, code: boolean) {
     Button(label, { type: ButtonType.Normal, buttonStyle: ButtonStyleMode.TEXTUAL })
@@ -662,7 +647,7 @@ export struct NativeMarkdown {
       .fontSize(13 * this.fontScale)
       .fontColor($r('app.color.native_chat_primary'))
       .backgroundColor(this.mermaidCodeBlocks.includes(path) === code ?
-        $r('app.color.native_chat_field') : Color.Transparent)
+        $r('app.color.native_chat_code_surface') : Color.Transparent)
       .accessibilitySelected(this.mermaidCodeBlocks.includes(path) === code)
       .onClick(() => { this.setMermaidMode(path, code); })
   }
@@ -681,21 +666,18 @@ export struct NativeMarkdown {
         } else {
           Text(block.lang || 'text')
             .fontSize(12 * this.fontScale)
-            .fontColor($r('app.color.native_chat_secondary'))
+            .lineHeight(18 * this.fontScale)
+            .fontFamily('monospace')
+            .fontColor($r('app.color.native_chat_primary'))
+            .margin({ left: 8 })
             .layoutWeight(1)
         }
-        Button(this.copiedCodeKey === path + ':' + this.currentBlock(block, path).key ?
-          this.label('已复制', 'Copied') : this.label('复制', 'Copy'), { buttonStyle: ButtonStyleMode.TEXTUAL })
-          .height(28)
-          .fontSize(13 * this.fontScale)
-          .onClick(() => {
-            const current = this.currentBlock(block, path);
-            void this.copyCode(current.text ?? '', path + ':' + current.key);
-          })
+        NativeMessageCopyButton({ text: this.currentBlock(block, path).text ?? '', locale: this.locale,
+          codeBlock: true, fontScale: this.fontScale })
       }
       .width('100%')
       .padding(6)
-      .backgroundColor($r('app.color.native_chat_sidebar'))
+      .backgroundColor($r('app.color.native_chat_code_banner'))
       if (this.isMermaid(block) && !this.mermaidCodeBlocks.includes(path)) {
         NativeMermaidPreview({ source: this.currentBlock(block, path).text ?? '', loading: this.loading,
           locale: this.locale, theme: this.theme, fontScale: this.fontScale })
@@ -707,7 +689,7 @@ export struct NativeMarkdown {
     .width('100%')
     .borderRadius(12)
     .clip(true)
-    .backgroundColor($r('app.color.native_chat_field'))
+    .backgroundColor($r('app.color.native_chat_code_surface'))
   }
 
   private blockGap(block: NativeMarkdownBlock, previous: NativeMarkdownBlock | undefined, insideList: boolean): number {
@@ -716,7 +698,8 @@ export struct NativeMarkdown {
     if (insideList && block.kind === 'list') return this.muted ? 2 : 4;
     if (block.kind === 'heading' && !this.muted) return (block.level ?? 1) <= 3 ? 32 : 16;
     if (block.kind === 'list') return previous.kind === 'heading' && (previous.level ?? 1) >= 4 ? 8 : 16;
-    return previous.kind === 'list' || previous.kind === 'heading' ? 16 : 10;
+    return block.kind === 'code' || previous.kind === 'code' || previous.kind === 'list' || previous.kind === 'heading' ?
+      16 : 10;
   }
 
   private tableFontSize(): number {

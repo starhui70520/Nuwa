@@ -125,6 +125,7 @@ export struct NativeHighlightedCode {
     .fontSize(13 * this.fontScale)
     .fontColor($r('app.color.native_chat_primary'))
     .lineHeight(22 * this.fontScale)
+    .wordBreak(WordBreak.BREAK_ALL)
     .width('100%')
     .padding(16)
     .copyOption(CopyOptions.LocalDevice)

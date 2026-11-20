@@ -101,6 +101,14 @@
       "value": "#EBEEF2"
     },
     {
+      "name": "native_chat_code_banner",
+      "value": "#F9FAFB"
+    },
+    {
+      "name": "native_chat_code_surface",
+      "value": "#F9FAFB"
+    },
+    {
       "name": "native_chat_citation_bg",
       "value": "#F5F6F7"
     },
