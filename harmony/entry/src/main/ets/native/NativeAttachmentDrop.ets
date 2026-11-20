@@ -36,14 +36,15 @@ export function hasNativeBackupDropType(event: DragEvent): boolean {
 }
 
 export function nativeBackupDropUri(uris: string[]): string | undefined {
-  return uris.find((uri: string): boolean => {
-    try {
-      const name = uri.startsWith('/') ? uri.slice(uri.lastIndexOf('/') + 1) : new fileUri.FileUri(uri).name;
-      return name.toLowerCase().endsWith('.zip');
-    } catch {
-      return false;
-    }
-  });
+  const distinct = Array.from(new Set<string>(uris));
+  if (distinct.length !== 1) return undefined;
+  const uri = distinct[0];
+  try {
+    const name = uri.startsWith('/') ? uri.slice(uri.lastIndexOf('/') + 1) : new fileUri.FileUri(uri).name;
+    return name.toLowerCase().endsWith('.zip') ? uri : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function safeLocalPath(path: string): boolean {

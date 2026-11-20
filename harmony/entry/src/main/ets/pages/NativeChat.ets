@@ -2728,7 +2728,8 @@ struct NativeChat {
 
   private speechError(code: string | undefined, recognition: boolean): string {
     switch (code) {
-      case 'permission-denied': return this.label('请允许 Nuwa 使用麦克风', 'Allow Nuwa to use the microphone');
+      case 'permission-denied': return this.label('无法使用麦克风，请在系统设置中允许麦克风权限',
+        'Microphone access is blocked. Please allow microphone permission in system settings.');
       case 'key-required': return this.label('云端语音需要可用的 API Key', 'Cloud speech requires a supported API Key');
       case 'unauthorized': return this.label('API Key 无效或已被删除，请更换后重试', 'The API Key is invalid. Replace it and try again.');
       case 'quota': return this.label('账户余额不足，请充值后重试', 'Insufficient account balance. Top up and try again.');
@@ -3232,7 +3233,7 @@ struct NativeChat {
   private composerAction() {
     if (this.reply()) {
       this.iconButton($r('app.media.native_stop'), this.label('停止生成', 'Stop generating'),
-        () => { this.stopVoice(); this.stopReply(); }, this.compact() ? 28 : 34, 16,
+        () => { this.stopReadAloud(); this.stopReply(); }, this.compact() ? 28 : 34, 16,
         Color.White, $r('app.color.native_chat_blue'))
     } else if (this.canSendDraft()) {
       this.composerSendButton()
@@ -5104,7 +5105,8 @@ struct NativeChat {
   @Builder
   private historyDragMask() {
     Column() {
-      Text(this.label('松开鼠标即可增量导入 DeepSeek 历史对话', 'Drop to merge DeepSeek chat history'))
+      Text(this.label('单独拖入一个 DeepSeek ZIP 可增量导入历史；混合或多个文件按附件校验',
+        'Drop a single DeepSeek ZIP alone to import history; mixed or multiple drops use attachment validation'))
         .fontSize(this.appFontSize(16)).fontWeight(FontWeight.Medium).textAlign(TextAlign.Center)
         .fontColor($r('app.color.native_chat_primary'))
         .padding({ left: 36, right: 36, top: 24, bottom: 24 })
