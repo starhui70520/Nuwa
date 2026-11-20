@@ -50,12 +50,12 @@ struct ChatView: View {
                         gestureEnabled: !settings.showMigrationPrompt && !showSettings &&
                             editingMessageId == nil && previewImage == nil,
                         dismissKeyboard: dismissKeyboard
-                    ) { visible in
+                    ) {
                         SessionDrawerView(
                             listStore: listStore,
                             settings: settings,
                             activeSessionId: chatStore.activeSessionId,
-                            isOpen: visible,
+                            isOpen: showSidebar,
                             onSelectSession: { chatStore.selectSession($0) },
                             onCreateNewSession: { chatStore.createNewSession(silentIfAlreadyNew: true) },
                             onTogglePin: { chatStore.togglePin($0) },
@@ -71,7 +71,7 @@ struct ChatView: View {
                             if wide { await settings.refreshBalance() }
                         }
                     } surface: {
-                        mainSurface(sidebarShown: showSidebar) {
+                        mainSurface(sidebarShown: showSidebar, drawerModal: !wide && drawerOpen) {
                             if wide {
                                 sidebarVisible.toggle()
                             } else if drawerOpen {
@@ -201,7 +201,7 @@ struct ChatView: View {
         }
     }
 
-    private func mainSurface(sidebarShown: Bool, onToggleSidebar: @escaping () -> Void) -> some View {
+    private func mainSurface(sidebarShown: Bool, drawerModal: Bool, onToggleSidebar: @escaping () -> Void) -> some View {
         let session = chatStore.activeSession
         let timeline = chatStore.activeTimeline
         let hasMessages = timeline?.messages.isEmpty == false
@@ -226,62 +226,76 @@ struct ChatView: View {
                 hasMessages: hasMessages,
                 sessionTitle: session?.title ?? "",
                 sidebarShown: sidebarShown,
+                drawerModal: drawerModal,
                 onOpenDrawer: onToggleSidebar,
                 onScrollToTop: { scrollToTopToken += 1 },
                 onCreateNewSession: { chatStore.createNewSession() },
                 onToast: { chatStore.showToast($0) }
             )
 
-            ZStack(alignment: .top) {
-                if chatStore.historyLoadFailed {
-                    ContentUnavailableView(
-                        settings.locale == .enUS ? "Couldn’t load conversations" : "无法读取对话记录",
-                        systemImage: "exclamationmark.triangle",
-                        description: Text(settings.locale == .enUS
-                            ? "Your data hasn’t been changed. Reopen Nuwa to try again."
-                            : "数据未被修改，请重新打开 Nuwa 后重试。")
-                    )
-                } else if !chatStore.historyLoaded {
-                    ProgressView()
-                        .frame(maxHeight: .infinity)
-                } else if let session, let timeline, hasMessages {
-                    messageList(timeline)
-                        .id(session.id)
-                } else {
-                    welcomeView
-                }
+            VStack(spacing: 0) {
+                ZStack(alignment: .top) {
+                    if chatStore.historyLoadFailed {
+                        ContentUnavailableView(
+                            settings.locale == .enUS ? "Couldn’t load conversations" : "无法读取对话记录",
+                            systemImage: "exclamationmark.triangle",
+                            description: Text(settings.locale == .enUS
+                                ? "Your data hasn’t been changed. Reopen Nuwa to try again."
+                                : "数据未被修改，请重新打开 Nuwa 后重试。")
+                        )
+                    } else if !chatStore.historyLoaded {
+                        ProgressView()
+                            .frame(maxHeight: .infinity)
+                    } else if let session, let timeline, hasMessages {
+                        messageList(timeline)
+                            .id(session.id)
+                    } else {
+                        welcomeView
+                    }
 
-                if let toast = chatStore.toastMessage {
-                    Text(toast)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(Color.nuwaLabelPrimary)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 9)
-                        .nuwaGlass(in: Capsule())
-                        .padding(.top, 8)
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                        .zIndex(10)
+                    if let toast = chatStore.toastMessage {
+                        Text(toast)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(Color.nuwaLabelPrimary)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 9)
+                            .nuwaGlass(in: Capsule())
+                            .padding(.top, 8)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                            .zIndex(10)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                ChatComposerContainer(
+                    draftStore: draftStore,
+                    settings: settings,
+                    speech: speech,
+                    sessionId: chatStore.activeSessionId,
+                    isGenerating: chatStore.isGenerating,
+                    isImporting: chatStore.importingHistory || !chatStore.historyLoaded,
+                    onSend: sendMessage,
+                    onStop: {
+                        speech.stopSpeaking()
+                        chatStore.stopGenerating()
+                    },
+                    onPickFiles: { showAttachmentFilePicker = true },
+                    onToast: { chatStore.showToast($0) }
+                )
+                .frame(maxWidth: 760)
+                .frame(maxWidth: .infinity)
+            }
+            .allowsHitTesting(!drawerModal)
+            .accessibilityHidden(drawerModal)
+            .overlay {
+                if drawerModal {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .ignoresSafeArea(.container, edges: .bottom)
+                        .onTapGesture(perform: onToggleSidebar)
+                        .accessibilityHidden(true)
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            ChatComposerContainer(
-                draftStore: draftStore,
-                settings: settings,
-                speech: speech,
-                sessionId: chatStore.activeSessionId,
-                isGenerating: chatStore.isGenerating,
-                isImporting: chatStore.importingHistory || !chatStore.historyLoaded,
-                onSend: sendMessage,
-                onStop: {
-                    speech.stopSpeaking()
-                    chatStore.stopGenerating()
-                },
-                onPickFiles: { showAttachmentFilePicker = true },
-                onToast: { chatStore.showToast($0) }
-            )
-            .frame(maxWidth: 760)
-            .frame(maxWidth: .infinity)
         }
     }
 
@@ -676,103 +690,181 @@ private struct ChatDrawerLayout<Sidebar: View, Surface: View>: View {
     @Binding var compactOpen: Bool
     let gestureEnabled: Bool
     let dismissKeyboard: () -> Void
-    @ViewBuilder let sidebar: (Bool) -> Sidebar
+    @ViewBuilder let sidebar: Sidebar
     @ViewBuilder let surface: Surface
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @GestureState private var tracking = false
-    @State private var dragProgress: CGFloat?
-    @State private var rejectedDrag = false
-    @State private var retainDrawer = false
+    @GestureState private var legacyTracking = false
+    @State private var legacyRejectedDrag = false
+    @State private var dragOffset: CGFloat?
 
     private var spring: Animation? {
         reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.90)
     }
 
     var body: some View {
+        if #available(iOS 18.0, *) {
+            layers.gesture(
+                ChatDrawerPan(
+                    enabled: !wide && gestureEnabled,
+                    canBegin: canBeginDrag,
+                    onChange: updateDrag,
+                    onEnd: finishDrag,
+                    onCancel: cancelDrag
+                )
+            )
+        } else {
+            layers
+                .simultaneousGesture(legacyPan, including: wide || !gestureEnabled ? .none : .all)
+                .onChange(of: legacyTracking) { _, active in
+                    guard !active else { return }
+                    legacyRejectedDrag = false
+                    cancelDrag()
+                }
+        }
+    }
+
+    private var layers: some View {
         let open = wide ? wideOpen : compactOpen
         let inset = wide && open ? drawerWidth : 0
-        let revealing = compactOpen || dragProgress != nil
-        let visible = wide ? open : revealing || retainDrawer
+        let surfaceWidth = max(0, size.width - inset)
+        let offset = wide ? inset : dragOffset ?? (compactOpen ? drawerWidth : 0)
 
-        ZStack(alignment: .leading) {
+        return ZStack(alignment: .leading) {
             if !wide || open {
-                sidebar(visible)
+                sidebar
                     .frame(width: drawerWidth)
-                    .opacity(visible ? 1 : 0)
                     .allowsHitTesting(open)
                     .accessibilityHidden(!open)
             }
 
             surface
-                .overlay {
-                    if !wide && compactOpen {
-                        Color.clear
-                            .contentShape(Rectangle())
-                            .ignoresSafeArea(.container, edges: .vertical)
-                            .onTapGesture { compactOpen = false }
-                            .accessibilityHidden(true)
-                    }
-                }
-                .frame(width: max(0, size.width - inset), height: size.height)
+                .frame(width: surfaceWidth, height: size.height)
                 .background(Color.nuwaBgBase.ignoresSafeArea(.container, edges: .vertical))
-                .accessibilityHidden(!wide && compactOpen)
-                .offset(x: wide ? 0 : drawerWidth * (dragProgress ?? (compactOpen ? 1 : 0)))
-                .padding(.leading, inset)
-                .animation(dragProgress == nil ? spring : nil, value: compactOpen)
+                .position(x: offset + surfaceWidth / 2, y: size.height / 2)
+                .animation(wide || dragOffset != nil ? nil : spring, value: compactOpen)
         }
-        .simultaneousGesture(pan, including: wide || !gestureEnabled ? .none : .all)
-        .onChange(of: tracking) { _, active in
-            guard !active else { return }
-            rejectedDrag = false
-            if dragProgress != nil { withAnimation(spring) { dragProgress = nil } }
-        }
-        .onChange(of: wide) { _, _ in
-            dragProgress = nil
-            rejectedDrag = false
-        }
-        .task(id: revealing) {
-            if revealing {
-                retainDrawer = true
-            } else {
-                if !reduceMotion {
-                    try? await Task.sleep(for: .milliseconds(400))
-                    guard !Task.isCancelled else { return }
-                }
-                retainDrawer = false
-            }
+        .frame(width: size.width, height: size.height)
+        .onChange(of: wide) { _, _ in dragOffset = nil }
+        .onChange(of: gestureEnabled) { _, enabled in
+            if !enabled { cancelDrag() }
         }
     }
 
-    private var pan: some Gesture {
+    private func canBeginDrag(at start: CGPoint, moving direction: CGPoint) -> Bool {
+        guard !wide, gestureEnabled, drawerWidth > 0,
+              abs(direction.x) > abs(direction.y) * 1.35 else { return false }
+        return compactOpen ? direction.x < 0 : direction.x > 0 && (0..<32).contains(start.x)
+    }
+
+    private func updateDrag(_ translation: CGFloat) {
+        let start = compactOpen ? drawerWidth : 0
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            dragOffset = min(drawerWidth, max(0, start + translation))
+        }
+    }
+
+    private func finishDrag(_ translation: CGFloat, _ predictedTranslation: CGFloat) {
+        guard dragOffset != nil, drawerWidth > 0 else { return }
+        let start = compactOpen ? 1.0 : 0
+        let current = start + translation / drawerWidth
+        let predicted = start + predictedTranslation / drawerWidth
+        let open = compactOpen
+            ? !(current < 0.72 || (current < 0.86 && predicted < 0.55))
+            : current > 0.28 || (current > 0.14 && predicted > 0.45)
+        if open && !compactOpen { dismissKeyboard() }
+        withAnimation(spring) {
+            compactOpen = open
+            dragOffset = nil
+        }
+    }
+
+    private func cancelDrag() {
+        guard dragOffset != nil else { return }
+        withAnimation(spring) { dragOffset = nil }
+    }
+
+    private var legacyPan: some Gesture {
         DragGesture(minimumDistance: 8)
-            .updating($tracking) { _, active, _ in active = true }
+            .updating($legacyTracking) { _, active, _ in active = true }
             .onChanged { value in
-                guard !wide, gestureEnabled, !rejectedDrag else { return }
-                let dx = value.translation.width
-                if dragProgress == nil {
-                    let canBegin = compactOpen ? dx < 0 : dx > 0 && value.startLocation.x < 32
-                    guard canBegin, abs(dx) > abs(value.translation.height) * 1.35 else {
-                        rejectedDrag = true
-                        return
-                    }
+                guard !legacyRejectedDrag else { return }
+                let direction = CGPoint(x: value.translation.width, y: value.translation.height)
+                if dragOffset == nil && !canBeginDrag(at: value.startLocation, moving: direction) {
+                    legacyRejectedDrag = true
+                    return
                 }
-                let progress = (compactOpen ? 1.0 : 0) + dx / drawerWidth
-                dragProgress = min(1, max(0, progress))
+                updateDrag(direction.x)
             }
             .onEnded { value in
-                guard let current = dragProgress else { return }
-                let predicted = (compactOpen ? 1.0 : 0) + value.predictedEndTranslation.width / drawerWidth
-                let open = compactOpen
-                    ? !(current < 0.72 || (current < 0.86 && predicted < 0.55))
-                    : current > 0.28 || (current > 0.14 && predicted > 0.45)
-                if open && !compactOpen { dismissKeyboard() }
-                retainDrawer = true
-                withAnimation(spring) {
-                    compactOpen = open
-                    dragProgress = nil
-                }
+                finishDrag(value.translation.width, value.predictedEndTranslation.width)
             }
+    }
+}
+
+@available(iOS 18.0, *)
+private struct ChatDrawerPan: UIGestureRecognizerRepresentable {
+    let enabled: Bool
+    let canBegin: (CGPoint, CGPoint) -> Bool
+    let onChange: (CGFloat) -> Void
+    let onEnd: (CGFloat, CGFloat) -> Void
+    let onCancel: () -> Void
+
+    func makeCoordinator(converter: CoordinateSpaceConverter) -> Coordinator {
+        Coordinator(converter: converter, canBegin: canBegin)
+    }
+
+    func makeUIGestureRecognizer(context: Context) -> UIPanGestureRecognizer {
+        let pan = UIPanGestureRecognizer()
+        pan.maximumNumberOfTouches = 1
+        pan.isEnabled = enabled
+        pan.delegate = context.coordinator
+        return pan
+    }
+
+    func updateUIGestureRecognizer(_ pan: UIPanGestureRecognizer, context: Context) {
+        context.coordinator.canBegin = canBegin
+        pan.isEnabled = enabled
+    }
+
+    func handleUIGestureRecognizerAction(_ pan: UIPanGestureRecognizer, context: Context) {
+        let dx = context.converter.localTranslation?.x ?? 0
+        switch pan.state {
+        case .began, .changed:
+            onChange(dx)
+        case .ended:
+            let velocity = context.converter.localVelocity?.x ?? 0
+            onEnd(dx, dx + velocity * 0.2)
+        case .cancelled, .failed:
+            onCancel()
+        default:
+            break
+        }
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        let converter: CoordinateSpaceConverter
+        var canBegin: (CGPoint, CGPoint) -> Bool
+
+        init(converter: CoordinateSpaceConverter, canBegin: @escaping (CGPoint, CGPoint) -> Bool) {
+            self.converter = converter
+            self.canBegin = canBegin
+        }
+
+        func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
+            guard let translation = converter.localTranslation else { return false }
+            let location = converter.localLocation
+            return canBegin(CGPoint(x: location.x - translation.x, y: location.y - translation.y), translation)
+        }
+
+        func gestureRecognizer(
+            _ gesture: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGesture: UIGestureRecognizer
+        ) -> Bool {
+            otherGesture is UIPanGestureRecognizer && otherGesture.view is UIScrollView
+        }
     }
 }
 
@@ -934,6 +1026,7 @@ private struct ChatHeaderView: View {
     let hasMessages: Bool
     let sessionTitle: String
     let sidebarShown: Bool
+    let drawerModal: Bool
     let onOpenDrawer: () -> Void
     let onScrollToTop: () -> Void
     let onCreateNewSession: () -> Void
@@ -966,6 +1059,8 @@ private struct ChatHeaderView: View {
                         .contentShape(Rectangle())
                         .onTapGesture(count: 2, perform: onScrollToTop)
                         .accessibilityAction(named: Text(settings.locale == .enUS ? "Scroll to top" : "回到顶部"), onScrollToTop)
+                        .allowsHitTesting(!drawerModal)
+                        .accessibilityHidden(drawerModal)
                 } else {
                     Spacer(minLength: 0)
                 }
@@ -995,14 +1090,16 @@ private struct ChatHeaderView: View {
                             .foregroundStyle(Color.nuwaLabelPrimary)
                             .frame(width: 38, height: 34)
                             .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .keyboardShortcut("n", modifiers: .command)
-                .accessibilityLabel("开启新对话")
+                    }
+                    .buttonStyle(.plain)
+                    .keyboardShortcut("n", modifiers: .command)
+                    .accessibilityLabel("开启新对话")
                 }
                 .padding(.horizontal, 4)
                 .frame(height: 42)
                 .nuwaGlass(in: Capsule(), interactive: true)
+                .allowsHitTesting(!drawerModal)
+                .accessibilityHidden(drawerModal)
             }
             .padding(.horizontal, 16)
             .padding(.top, 8)

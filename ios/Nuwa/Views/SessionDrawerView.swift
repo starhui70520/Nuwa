@@ -93,7 +93,7 @@ struct SessionDrawerView: View {
     }
 
     var body: some View {
-        let groups = isOpen ? groupedSessions : []
+        let groups = groupedSessions
         let searchInput = SearchInput(query: isOpen ? query : "", summaries: isOpen && !query.isEmpty ? listStore.summaries : [])
         VStack(spacing: 0) {
             // Top Header: Select Mode header OR Search bar (clean uniform background, zero edge-tint artifact)
@@ -304,6 +304,7 @@ struct SessionDrawerView: View {
             }
         }
         .task(id: searchInput) {
+            guard isOpen else { return }
             guard !searchInput.query.isEmpty else {
                 searchResult = nil
                 return
