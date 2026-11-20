@@ -329,27 +329,31 @@ struct ChatView: View {
         let last = messages.last
         return ChatTimeline(
             isAtBottom: $isAtBottom,
-            last: last,
+            messages: messages,
+            versions: versions,
+            appearance: ChatTimelineAppearance(
+                fontSize: settings.chatFontSize,
+                locale: settings.locale,
+                isGenerating: chatStore.isGenerating,
+                editingMessageID: editingMessageId,
+                editDraft: editDraftText
+            ),
             topCommand: scrollToTopToken,
             animateBoundaryJumps: messages.count <= 240,
             latestLabel: settings.locale == .enUS ? "Scroll to latest" : "跳到最新消息"
-        ) { followLatest in
-            ForEach(messages) { message in
-                Group {
-                    if message.id == last?.id && message.isStreaming && chatStore.isGenerating {
-                        LiveReplyRow(store: chatStore.liveReply, fallback: message) { reply in
-                            messageRow(message: reply, versionInfo: versions[reply.id], isLast: true)
-                        } onUpdate: {
-                            if isAtBottom { followLatest() }
-                        }
-                    } else {
-                        messageRow(message: message, versionInfo: versions[message.id], isLast: message.id == last?.id)
+        ) { message in
+            Group {
+                if message.id == last?.id && message.isStreaming && chatStore.isGenerating {
+                    LiveReplyRow(store: chatStore.liveReply, fallback: message) { reply in
+                        messageRow(message: reply, versionInfo: versions[reply.id], isLast: true)
                     }
+                } else {
+                    messageRow(message: message, versionInfo: versions[message.id], isLast: message.id == last?.id)
                 }
-                .frame(maxWidth: 748)
-                .frame(maxWidth: .infinity)
-                .id(ChatScrollTarget.message(message.id))
             }
+            .frame(maxWidth: 748)
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 24)
         }
     }
 
@@ -905,154 +909,13 @@ private struct ChatDrawerPan: UIGestureRecognizerRepresentable {
     }
 }
 
-private enum ChatScrollTarget: Hashable {
-    case top, message(UUID), bottom
-}
-
-private struct ChatTimeline<Rows: View>: View {
-    @Binding var isAtBottom: Bool
-    let last: ChatMessage?
-    let topCommand: Int
-    let animateBoundaryJumps: Bool
-    let latestLabel: String
-    @ViewBuilder let rows: (@escaping () -> Void) -> Rows
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    var body: some View {
-        if #available(iOS 18, *) {
-            ModernChatTimeline(timeline: self)
-        } else {
-            ScrollViewReader { proxy in
-                decorated(
-                    scroll { proxy.scrollTo(ChatScrollTarget.bottom, anchor: .bottom) }
-                        .defaultScrollAnchor(.bottom)
-                ) { toBottom in
-                    if toBottom {
-                        proxy.scrollTo(ChatScrollTarget.bottom, anchor: .bottom)
-                    } else {
-                        proxy.scrollTo(ChatScrollTarget.top, anchor: .top)
-                    }
-                }
-            }
-        }
-    }
-
-    func scroll(followLatest: @escaping () -> Void) -> some View {
-        ScrollView {
-            LazyVStack(spacing: 18) {
-                Color.clear.frame(height: 1).id(ChatScrollTarget.top)
-                rows(followLatest)
-                Color.clear
-                    .frame(height: 8)
-                    .id(ChatScrollTarget.bottom)
-                    .onAppear {
-                        if #unavailable(iOS 18) { isAtBottom = true }
-                    }
-                    .onDisappear {
-                        if #unavailable(iOS 18) { isAtBottom = false }
-                    }
-            }
-            .scrollTargetLayout()
-            .padding(.horizontal, 24)
-            .padding(.top, 12)
-        }
-        .nuwaNoScrollEdgeEffect()
-        .scrollDismissesKeyboard(.interactively)
-    }
-
-    func decorated<Scroll: View>(_ scroll: Scroll, scrollTo: @escaping (Bool) -> Void) -> some View {
-        ZStack(alignment: .bottomTrailing) {
-            scroll
-                .onChange(of: last) { _, _ in
-                    if isAtBottom { scrollTo(true) }
-                }
-                .onChange(of: topCommand) { _, _ in
-                    isAtBottom = false
-                    jump(toBottom: false, using: scrollTo)
-                }
-            if !isAtBottom {
-                Button {
-                    isAtBottom = true
-                    jump(toBottom: true, using: scrollTo)
-                } label: {
-                    Image(systemName: "arrow.down")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(Color.nuwaLabelPrimary)
-                        .frame(width: 36, height: 36)
-                        .nuwaGlass(in: Circle(), interactive: true)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(latestLabel)
-                .padding(.trailing, 16)
-                .padding(.bottom, 12)
-            }
-        }
-    }
-
-    private func jump(toBottom: Bool, using scrollTo: (Bool) -> Void) {
-        if reduceMotion || !animateBoundaryJumps {
-            var transaction = Transaction(animation: nil)
-            transaction.disablesAnimations = true
-            withTransaction(transaction) { scrollTo(toBottom) }
-        } else {
-            withAnimation(.easeOut(duration: 0.22)) { scrollTo(toBottom) }
-        }
-    }
-}
-
-@available(iOS 18, *)
-private struct ModernChatTimeline<Rows: View>: View {
-    let timeline: ChatTimeline<Rows>
-    @State private var position = ScrollPosition(idType: ChatScrollTarget.self)
-    @State private var userScrolling = false
-
-    var body: some View {
-        timeline.decorated(
-            timeline.scroll { scrollTo(bottom: true) }
-                .scrollPosition($position)
-                .defaultScrollAnchor(.bottom, for: .initialOffset)
-                .defaultScrollAnchor(.top, for: .alignment)
-                .onScrollGeometryChange(for: CGSize.self, of: \.containerSize) { _, size in
-                    if size.width > 0 && size.height > 0 && timeline.isAtBottom && !userScrolling {
-                        scrollTo(bottom: true)
-                    }
-                }
-                .onScrollGeometryChange(for: Bool.self) { geo in
-                    nearBottom(geo)
-                } action: { _, nearBottom in
-                    if userScrolling { timeline.isAtBottom = nearBottom }
-                }
-                .onScrollPhaseChange { _, phase, context in
-                    let wasScrolling = userScrolling
-                    userScrolling = phase == .interacting || phase == .decelerating
-                    if userScrolling || (wasScrolling && phase == .idle) {
-                        timeline.isAtBottom = nearBottom(context.geometry)
-                    }
-                }
-        ) { scrollTo(bottom: $0) }
-    }
-
-    private func scrollTo(bottom: Bool) {
-        position.scrollTo(
-            id: bottom ? ChatScrollTarget.bottom : ChatScrollTarget.top,
-            anchor: bottom ? .bottom : .top
-        )
-    }
-
-    private func nearBottom(_ geometry: ScrollGeometry) -> Bool {
-        geometry.visibleRect.maxY >= geometry.contentSize.height - 40
-    }
-}
-
 private struct LiveReplyRow<Content: View>: View {
     @ObservedObject var store: LiveReplyStore
     let fallback: ChatMessage
     @ViewBuilder let content: (ChatMessage) -> Content
-    let onUpdate: () -> Void
 
     var body: some View {
         content(store.message?.id == fallback.id ? store.message ?? fallback : fallback)
-            .onChange(of: store.message) { _, _ in onUpdate() }
     }
 }
 // MARK: - Isolated Floating Liquid Glass Header
