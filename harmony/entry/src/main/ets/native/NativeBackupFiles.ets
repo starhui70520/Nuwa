@@ -16,6 +16,7 @@ interface RetainedImage {
 
 interface RetainedArchive {
   images?: RetainedImage[];
+  source?: RetainedImage;
 }
 
 class NativeBackupSpaceError extends Error {
@@ -126,13 +127,18 @@ export async function copyBackupFile(from: string, to: string): Promise<void> {
 
 export async function stageBackupImage(context: common.UIAbilityContext,
   entry: NativeBackupZipStreamEntry): Promise<string> {
-  await ensureBackupSpace(context.filesDir, entry.size);
+  return stageBackupBlob(context, entry.size, (write: (chunk: Uint8Array) => Promise<void>): Promise<void> =>
+    entry.consume(write));
+}
+
+export async function stageBackupBlob(context: common.UIAbilityContext, size: number,
+  action: (write: (chunk: Uint8Array) => Promise<void>) => Promise<void>): Promise<string> {
+  await ensureBackupSpace(context.filesDir, size);
   const id = util.generateRandomUUID(true);
   await ensureNativeDirectory(imageDirectory(context));
   const path = backupImagePath(context, id);
   try {
-    await writeBackupFile(path, true, (write: (chunk: Uint8Array) => Promise<void>): Promise<void> =>
-      entry.consume(write));
+    await writeBackupFile(path, true, action);
     return id;
   } catch (error) {
     await fileIo.unlink(path).catch(() => {});
@@ -154,13 +160,15 @@ export function backupImageIds(archiveJson?: string): string[] {
   } catch {
     return [];
   }
-  if (!Array.isArray(archive.images)) {
-    return [];
-  }
   const ids: string[] = [];
-  for (const image of archive.images) {
-    if (typeof image?.blobId === 'string' && validBlobId(image.blobId)) {
-      ids.push(image.blobId);
+  if (typeof archive.source?.blobId === 'string' && validBlobId(archive.source.blobId)) {
+    ids.push(archive.source.blobId);
+  }
+  if (Array.isArray(archive.images)) {
+    for (const image of archive.images) {
+      if (typeof image?.blobId === 'string' && validBlobId(image.blobId)) {
+        ids.push(image.blobId);
+      }
     }
   }
   return ids;

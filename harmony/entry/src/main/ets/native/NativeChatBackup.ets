@@ -1,6 +1,7 @@
 import { common } from '@kit.AbilityKit';
 import { url, util } from '@kit.ArkTS';
 import { fileIo, fileUri, picker } from '@kit.CoreFileKit';
+import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import {
   attachmentMime, attachmentPurpose, attachmentRasterMime, attachmentUploadImageMime, NativeAttachment,
   NativeChatAttachments,
@@ -15,12 +16,13 @@ import {
 } from './NativeToolTimeline';
 import { NativeReadLink, validNativeReadLinks } from './NativeReadLinks';
 import {
-  backupPath, backupText, backupUtf8, backupZipChecksum, MAX_BACKUP_BYTES, MAX_BACKUP_ENTRY_BYTES, memoryBackupInput,
+  backupPath, backupUtf8, backupZipChecksum, MAX_BACKUP_BYTES, MAX_BACKUP_ENTRY_BYTES, memoryBackupInput,
   NativeBackupZipEntry, NativeBackupZipInput, NativeBackupZipStreamEntry, NativeBackupZipWriter, readBackupZipEntries,
-  readBackupZipEntry, writeBackupZip,
+  readBackupText, readBackupZipEntry, readBackupZipText, writeBackupJson, writeBackupZip,
 } from './NativeBackupZip';
 import {
-  backupImageIds, backupImagePath, copyBackupFile, removeBackupImage, stageBackupImage, withBackupInput, writeBackupFile,
+  backupImageIds, backupImagePath, copyBackupFile, removeBackupImage, stageBackupBlob, stageBackupImage, withBackupInput,
+  writeBackupFile,
 } from './NativeBackupFiles';
 
 const MANIFEST = 'manifest.json';
@@ -30,6 +32,8 @@ const VERSION = 3;
 const MAX_INLINE_IMAGE_BYTES = 16 * 1024 * 1024;
 const MAX_PREVIEW_BYTES = 1024 * 1024;
 const MAX_FILE_PREVIEW_BYTES = 16 * 1024 * 1024;
+const MAX_EMBEDDED_ARCHIVE_BYTES = 16 * 1024 * 1024;
+const ARCHIVE_TEXT_READ_CHUNK = 256 * 1024;
 const MAX_PORTABLE_SOURCES = 256;
 const MAX_PORTABLE_CITATIONS = 4_096;
 const base64 = new util.Base64Helper();
@@ -130,12 +134,20 @@ interface BackupImageSource {
 interface ArchiveOrigin {
   session: ArchiveSession;
   images: ArchiveImage[];
+  source?: ArchiveSourceReference;
+}
+
+interface ArchiveSourceReference {
+  blobId: string;
+  size: number;
+  digest: string;
 }
 
 interface PreparedSession {
   session: NativeConversation;
   origin: ArchiveOrigin;
   imagePaths: Map<string, string>;
+  archiveSize: number;
 }
 
 export interface NativeBackupMergeResult {
@@ -562,6 +574,68 @@ function original(session: NativeConversation): ArchiveOrigin | undefined {
   return session.archiveJson ? JSON.parse(session.archiveJson) as ArchiveOrigin : undefined;
 }
 
+function archivePayloadDigest(origin: ArchiveOrigin): string {
+  if (origin.source) return origin.source.digest;
+  const digest = cryptoFramework.createMd('SHA256');
+  digest.updateSync({ data: backupUtf8(JSON.stringify(origin.session)) });
+  return base64.encodeToStringSync(digest.digestSync().data);
+}
+
+async function retainArchiveOrigin(prepared: PreparedSession, context: common.UIAbilityContext,
+  staged: string[]): Promise<string> {
+  const origin = prepared.origin;
+  const digest = cryptoFramework.createMd('SHA256');
+  let size = 0;
+  const blobId = await stageBackupBlob(context, prepared.archiveSize,
+    (write: (chunk: Uint8Array) => Promise<void>): Promise<void> =>
+      writeBackupJson(origin.session, async (chunk: Uint8Array): Promise<void> => {
+        digest.updateSync({ data: chunk });
+        size += chunk.byteLength;
+        await write(chunk);
+      }));
+  staged.push(blobId);
+  // Keep only the fragments needed for inline previews and merge when the full source is on disk.
+  const metadata: ArchiveSession = {
+    id: origin.session.id, title: origin.session.title, pinned: origin.session.pinned,
+    inserted_at: origin.session.inserted_at, updated_at: origin.session.updated_at,
+    current_message_id: origin.session.current_message_id,
+    messages: origin.session.messages.map((message: ArchiveMessage): ArchiveMessage => {
+      return {
+        id: message.id, parent_id: message.parent_id, role: message.role, status: message.status,
+        thinking_enabled: message.thinking_enabled, search_enabled: message.search_enabled,
+        accumulated_token_usage: message.accumulated_token_usage, inserted_at: message.inserted_at,
+        fragments: message.fragments.filter((fragment: ArchiveFragment): boolean =>
+          fragment.type === 'FILE' || fragment.type === 'TEMPLATE_RESPONSE'),
+      };
+    }),
+  };
+  const record: ArchiveOrigin = { session: metadata, images: origin.images,
+    source: { blobId: blobId, size: size, digest: base64.encodeToStringSync(digest.digestSync().data) } };
+  return JSON.stringify(record);
+}
+
+async function loadArchiveOrigin(context: common.UIAbilityContext, session: NativeConversation): Promise<ArchiveOrigin | undefined> {
+  const metadata = original(session);
+  const source = metadata?.source;
+  if (!metadata || !source) return metadata;
+  const path = backupImagePath(context, source.blobId);
+  const digest = cryptoFramework.createMd('SHA256');
+  return withBackupInput<ArchiveOrigin>(path, async (input: NativeBackupZipInput): Promise<ArchiveOrigin> => {
+    if (input.size !== source.size) return invalidArchive();
+    const text = await readBackupText(input.size, async (write: (chunk: Uint8Array) => Promise<void>): Promise<void> => {
+      for (let offset = 0; offset < input.size; offset += ARCHIVE_TEXT_READ_CHUNK) {
+        const bytes = await input.read(offset, Math.min(input.size - offset, ARCHIVE_TEXT_READ_CHUNK));
+        digest.updateSync({ data: bytes });
+        await write(bytes);
+      }
+    });
+    if (base64.encodeToStringSync(digest.digestSync().data) !== source.digest) return invalidArchive();
+    const archived = JSON.parse(text) as ArchiveSession;
+    if (archived?.id !== metadata.session.id) return invalidArchive();
+    return { session: archived, images: metadata.images };
+  });
+}
+
 function retainedImage(session: NativeConversation, item: NativeAttachment): ArchiveImage | undefined {
   if (!item.isImage || !session.archiveJson) {
     return undefined;
@@ -678,7 +752,7 @@ function nativeFiles(message: ArchiveMessage): NativeAttachment[] | undefined {
   return result.length > 0 ? result : undefined;
 }
 
-function nativeSession(source: ArchiveSession): PreparedSession {
+function nativeSession(source: ArchiveSession, archiveSize: number): PreparedSession {
   validateSummary(source);
   if (!Array.isArray(source.messages) || !count(source.current_message_id)) {
     return invalidArchive();
@@ -750,7 +824,7 @@ function nativeSession(source: ArchiveSession): PreparedSession {
     messages: messages,
   };
   return {
-    session: session, origin: { session: source, images: [] }, imagePaths: imagePaths,
+    session: session, origin: { session: source, images: [] }, imagePaths: imagePaths, archiveSize: archiveSize,
   };
 }
 
@@ -815,7 +889,7 @@ async function readChatBackup(input: NativeBackupZipInput, context?: common.UIAb
         if (path !== MANIFEST) {
           throw new Error('无法识别历史备份。请选择 DeepSeek 或 Nuwa 的 ZIP 备份。');
         }
-        const header = JSON.parse(backupText(await readBackupZipEntry(entry))) as ArchiveManifest;
+        const header = JSON.parse(await readBackupZipText(entry)) as ArchiveManifest;
         if (header?.export_format_version !== VERSION) {
           throw new Error('暂不支持此备份版本，请选择第 3 版历史备份。');
         }
@@ -827,18 +901,18 @@ async function readChatBackup(input: NativeBackupZipInput, context?: common.UIAb
         return;
       }
       if (path === SESSION_INDEX) {
-        index = JSON.parse(backupText(await readBackupZipEntry(entry))) as ArchiveIndexEntry[];
+        index = JSON.parse(await readBackupZipText(entry)) as ArchiveIndexEntry[];
         if (!Array.isArray(index)) {
           invalidArchive();
         }
         return;
       }
       if (/^chat_sessions\/[^/]+\.json$/.test(path) && !index) {
-        const original = JSON.parse(backupText(await readBackupZipEntry(entry))) as ArchiveSession;
+        const original = JSON.parse(await readBackupZipText(entry)) as ArchiveSession;
         if (!original || !validId(original.id) || sessionPath(original.id) !== path || ids.has(original.id)) {
           return invalidArchive();
         }
-        const prepared = nativeSession(original);
+        const prepared = nativeSession(original, entry.size);
         sessions.push(prepared);
         ids.add(original.id);
         prepared.imagePaths.forEach((id: string, imagePath: string): void => { wantedImages.set(imagePath, id); });
@@ -880,11 +954,14 @@ async function readChatBackup(input: NativeBackupZipInput, context?: common.UIAb
         return invalidArchive();
       }
     }
-    return sessions.map((prepared: PreparedSession): NativeConversation => {
+    const imported: NativeConversation[] = [];
+    for (const prepared of sessions) {
       restorePreparedImages(prepared, loadedImages);
-      prepared.session.archiveJson = JSON.stringify(prepared.origin);
-      return prepared.session;
-    });
+      prepared.session.archiveJson = context && prepared.archiveSize > MAX_EMBEDDED_ARCHIVE_BYTES ?
+        await retainArchiveOrigin(prepared, context, staged) : JSON.stringify(prepared.origin);
+      imported.push(prepared.session);
+    }
+    return imported;
   } catch (error) {
     if (context) {
       for (const id of staged) {
@@ -970,11 +1047,10 @@ function outgoingFile(item: NativeAttachment, sessionId: string, originalFiles: 
 }
 
 function archiveSession(session: NativeConversation, images: Map<string, BackupImageSource>,
-  locale: NativeLocale = 'zh-CN'): ArchiveSession {
-  if (!validId(session.id)) {
+  locale: NativeLocale = 'zh-CN', previous: ArchiveOrigin | undefined = original(session)): ArchiveSession {
+  if (!validId(session.id) || previous?.source) {
     return invalidArchive();
   }
-  const previous = original(session);
   const sourceId = previous?.session.id ?? session.id;
   const rawById = new Map<string, ArchiveMessage>();
   const originalFiles = new Map<string, ArchiveFile>();
@@ -1094,14 +1170,6 @@ function archiveSession(session: NativeConversation, images: Map<string, BackupI
 
 function jsonEntry(name: string, value: Object): NativeBackupZipEntry {
   return { name: name, data: backupUtf8(JSON.stringify(value)) };
-}
-
-async function writeArchiveJson(writer: NativeBackupZipWriter, name: string, value: Object): Promise<void> {
-  const entry = jsonEntry(name, value);
-  if (entry.data.byteLength > MAX_BACKUP_ENTRY_BYTES) {
-    throw new Error('备份中的单个 JSON 文件超过 64 MiB。');
-  }
-  await writer.add(entry.name, memoryBackupInput(entry.data));
 }
 
 function summaryEntry(file: ArchiveSession): ArchiveIndexEntry {
@@ -1230,9 +1298,12 @@ function retainedImageKey(image: ArchiveImage): string {
 }
 
 function sameArchiveSource(first: ArchiveOrigin, second: ArchiveOrigin): boolean {
-  if (first.images.length !== second.images.length || JSON.stringify(first.session) !== JSON.stringify(second.session)) {
+  if (first.images.length !== second.images.length) {
     return false;
   }
+  const samePayload = first.source || second.source ? archivePayloadDigest(first) === archivePayloadDigest(second) :
+    JSON.stringify(first.session) === JSON.stringify(second.session);
+  if (!samePayload) return false;
   const imageKeys = new Map<string, string>();
   first.images.forEach((image: ArchiveImage): void => { imageKeys.set(image.path, retainedImageKey(image)); });
   return second.images.every((image: ArchiveImage): boolean => imageKeys.get(image.path) === retainedImageKey(image));
@@ -1252,7 +1323,7 @@ export function mergeChatBackup(history: NativeConversationState, imported: Nati
   let total = 0;
   for (const incoming of imported) {
     // A previously diverged import retains the source archive ID and payload.
-    const source = original(incoming);
+    const source = priorArchives.size > 0 ? original(incoming) : undefined;
     const existingSources = source ? priorArchives.get(source.session.id) : undefined;
     if (source && existingSources?.some((stored: ArchiveOrigin): boolean => sameArchiveSource(stored, source))) {
       continue;
@@ -1365,13 +1436,14 @@ export class NativeChatBackup {
       const manifest: ArchiveManifest = { export_format_version: VERSION };
       const images = new Map<string, BackupImageSource>();
       const index: ArchiveIndexEntry[] = [];
-      await writeArchiveJson(writer, MANIFEST, manifest);
+      await writer.addJson(MANIFEST, manifest);
       for (const session of sessions) {
-        const file = archiveSession(session, images, locale);
-        await writeArchiveJson(writer, sessionPath(file.id), file);
+        const previous = await loadArchiveOrigin(context, session);
+        const file = archiveSession(session, images, locale, previous);
+        await writer.addJson(sessionPath(file.id), file);
         index.push(summaryEntry(file));
       }
-      await writeArchiveJson(writer, SESSION_INDEX, index);
+      await writer.addJson(SESSION_INDEX, index);
       for (const name of images.keys()) {
         const image = images.get(name);
         if (image) {

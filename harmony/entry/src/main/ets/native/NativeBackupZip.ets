@@ -42,6 +42,8 @@ export const MAX_BACKUP_ENTRY_BYTES = 64 * 1024 * 1024;
 // The central directory start and size are independent ZIP32 fields.
 export const MAX_FILE_BACKUP_BYTES = 2 * (ZIP64_SIZE - 1) + MAX_END_RECORD_BYTES;
 const CHUNK_BYTES = 256 * 1024;
+// A JSON escape can occupy six bytes per UTF-16 code unit.
+const TEXT_CHUNK_CHARS = 32 * 1024;
 const LOCAL_HEADER = 0x04034b50;
 const CENTRAL_HEADER = 0x02014b50;
 const END_HEADER = 0x06054b50;
@@ -119,6 +121,48 @@ export function backupUtf8(value: string): Uint8Array {
 
 export function backupText(bytes: Uint8Array): string {
   return util.TextDecoder.create('utf-8', { fatal: true }).decodeToString(bytes);
+}
+
+function endOfTextChunk(text: string, start: number): number {
+  const end = Math.min(start + TEXT_CHUNK_CHARS, text.length);
+  const last = text.charCodeAt(end - 1);
+  return end < text.length && last >= 0xd800 && last <= 0xdbff ? end - 1 : end;
+}
+
+async function writeBackupText(text: string, write: (chunk: Uint8Array) => Promise<void>,
+  escape: boolean = false): Promise<void> {
+  const encoder = new util.TextEncoder();
+  let start = 0;
+  while (start < text.length) {
+    const end = endOfTextChunk(text, start);
+    const part = text.slice(start, end);
+    await write(encoder.encodeInto(escape ? JSON.stringify(part).slice(1, -1) : part));
+    start = end;
+  }
+}
+
+export async function writeBackupJson(value: Object, write: (chunk: Uint8Array) => Promise<void>): Promise<void> {
+  // Serialize the metadata separately so ArkTS never allocates a second full-size JSON string for long messages.
+  const prefix = 'nuwa-' + util.generateRandomUUID(true) + '-';
+  const longTexts: string[] = [];
+  const json = JSON.stringify(value, (_key: string, item: Object): Object => {
+    if (typeof item !== 'string' || item.length <= TEXT_CHUNK_CHARS) return item;
+    const marker = prefix + longTexts.length.toString();
+    longTexts.push(item);
+    return marker;
+  });
+  let offset = 0;
+  for (let index = 0; index < longTexts.length; index++) {
+    const marker = '"' + prefix + index.toString() + '"';
+    const position = json.indexOf(marker, offset);
+    if (position < 0 || json.indexOf(marker, position + marker.length) >= 0) return invalidZip();
+    await writeBackupText(json.slice(offset, position), write);
+    await write(Uint8Array.of(34));
+    await writeBackupText(longTexts[index], write, true);
+    await write(Uint8Array.of(34));
+    offset = position + marker.length;
+  }
+  await writeBackupText(json.slice(offset), write);
 }
 
 export function backupPath(value: string): string {
@@ -382,6 +426,23 @@ export async function readBackupZipEntry(entry: NativeBackupZipStreamEntry): Pro
   return data ?? new Uint8Array(0);
 }
 
+export async function readBackupText(size: number,
+  consume: (write: (chunk: Uint8Array) => Promise<void>) => Promise<void>): Promise<string> {
+  const decoder = util.TextDecoder.create('utf-8', { fatal: true });
+  const parts: string[] = [];
+  let remaining = size;
+  await consume(async (chunk: Uint8Array): Promise<void> => {
+    remaining -= chunk.length;
+    if (remaining < 0) return invalidZip();
+    parts.push(decoder.decodeToString(chunk, { stream: remaining > 0 }));
+  });
+  if (remaining !== 0) return invalidZip();
+  return parts.join('');
+}
+
+export async function readBackupZipText(entry: NativeBackupZipStreamEntry): Promise<string> {
+  return readBackupText(entry.size, entry.consume);
+}
 export async function readBackupZipEntries(input: NativeBackupZipInput,
   visit: (entry: NativeBackupZipStreamEntry) => Promise<void>, limit?: number): Promise<void> {
   if (!Number.isSafeInteger(input.size) || input.size < 22) {
@@ -437,6 +498,8 @@ interface WrittenEntry {
   offset: number;
 }
 
+type WriteBackupChunk = (chunk: Uint8Array) => Promise<void>;
+
 function storedLocalHeader(name: Uint8Array): Uint8Array {
   const bytes = new Uint8Array(30 + name.length);
   const view = viewOf(bytes);
@@ -489,30 +552,51 @@ export class NativeBackupZipWriter {
   }
 
   async add(path: string, input: NativeBackupZipInput): Promise<number> {
+    if (!Number.isSafeInteger(input.size) || input.size < 0) {
+      return invalidZip();
+    }
+    return this.addEntry(path, input.size, async (append: WriteBackupChunk): Promise<void> => {
+      for (let cursor = 0; cursor < input.size; cursor += CHUNK_BYTES) {
+        const size = Math.min(CHUNK_BYTES, input.size - cursor);
+        await append(await checkedRead(input, cursor, size));
+      }
+    });
+  }
+
+  async addJson(path: string, value: Object): Promise<number> {
+    return this.addEntry(path, 0, (append: WriteBackupChunk): Promise<void> => writeBackupJson(value, append));
+  }
+
+  private async addEntry(path: string, minimumSize: number,
+    writePayload: (append: WriteBackupChunk) => Promise<void>): Promise<number> {
     const name = backupPath(path);
     const encoded = backupUtf8(name);
     if (this.ended || this.names.has(name) || name.endsWith('/') || encoded.length > 0xffff ||
-      backupText(encoded) !== name || !Number.isSafeInteger(input.size) || input.size < 0) {
+      backupText(encoded) !== name) {
       return invalidZip();
     }
     const directorySize = this.directorySize + 46 + encoded.length;
-    const next = this.offset + 46 + encoded.length + input.size;
-    if (input.size >= ZIP64_SIZE || directorySize >= ZIP64_SIZE || next >= ZIP64_SIZE ||
+    const overhead = 30 + encoded.length + 16; // Local header and data descriptor.
+    const maxPayloadSize = ZIP64_SIZE - this.offset - overhead;
+    if (directorySize >= ZIP64_SIZE || minimumSize >= maxPayloadSize ||
       this.entries.length + 1 >= ZIP64_COUNT) {
       return fileBackupTooLarge();
     }
     await this.write(storedLocalHeader(encoded));
     let crc = 0xffffffff;
-    for (let cursor = 0; cursor < input.size; cursor += CHUNK_BYTES) {
-      const size = Math.min(CHUNK_BYTES, input.size - cursor);
-      const chunk = await checkedRead(input, cursor, size);
+    let size = 0;
+    await writePayload(async (chunk: Uint8Array): Promise<void> => {
+      size += chunk.length;
+      if (size >= maxPayloadSize) {
+        return fileBackupTooLarge();
+      }
       crc = accumulateCrc(crc, chunk);
       await this.write(chunk);
-    }
+    });
     const checksum = completeCrc(crc);
-    await this.write(storedDescriptor(input.size, checksum));
-    this.entries.push({ name: encoded, size: input.size, crc: checksum, offset: this.offset });
-    this.offset = next;
+    await this.write(storedDescriptor(size, checksum));
+    this.entries.push({ name: encoded, size: size, crc: checksum, offset: this.offset });
+    this.offset += overhead + size;
     this.directorySize = directorySize;
     this.names.add(name);
     return checksum;
