@@ -394,22 +394,22 @@ private struct MarkdownTableView: View {
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 0) {
+            Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
+                GridRow {
                     ForEach(Array(headers.enumerated()), id: \.offset) { _, h in
                         Text(h)
                             .font(.system(size: fontSize, weight: .semibold))
                             .foregroundStyle(Color.nuwaLabelPrimary)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 8)
-                            .frame(minWidth: 90, alignment: .leading)
+                            .frame(minWidth: 90, maxWidth: .infinity, alignment: .leading)
                     }
                 }
                 .background(Color.primary.opacity(0.05))
 
                 ForEach(Array(rows.enumerated()), id: \.offset) { rIdx, row in
-                    Divider()
-                    HStack(spacing: 0) {
+                    Divider().gridCellUnsizedAxes(.horizontal)
+                    GridRow {
                         ForEach(0..<max(headers.count, row.count), id: \.self) { cIdx in
                             let val = cIdx < row.count ? row[cIdx] : ""
                             Text(val)
@@ -417,7 +417,7 @@ private struct MarkdownTableView: View {
                                 .foregroundStyle(Color.nuwaLabelPrimary)
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 7)
-                                .frame(minWidth: 90, alignment: .leading)
+                                .frame(minWidth: 90, maxWidth: .infinity, alignment: .leading)
                         }
                     }
                     .background(rIdx % 2 == 1 ? Color.primary.opacity(0.02) : Color.clear)
@@ -483,161 +483,6 @@ private struct CodeBlockView: View {
 
 // MARK: - Lightweight In-Scroll Message Controls (Zero Glass Shader Overhead)
 
-struct ReasoningDisclosureView: View {
-    let reasoning: String
-    let seconds: Double?
-    let isStreaming: Bool
-    let fontSize: Double
-
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var expanded = false
-
-    private var headerTitle: String {
-        if isStreaming {
-            if let seconds {
-                return String(format: "正在深度思考 (%.0f 秒)...", seconds)
-            }
-            return "正在思考..."
-        }
-        if let seconds {
-            return String(format: "已思考（用时 %.0f 秒）", max(1, seconds))
-        }
-        return "思考过程"
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Button {
-                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) {
-                    expanded.toggle()
-                }
-            } label: {
-                HStack(spacing: 6) {
-                    Text(headerTitle)
-                        .font(.system(size: max(12, fontSize - 1)))
-                        .foregroundStyle(Color.nuwaLabelSecondary)
-                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(Color.nuwaLabelTertiary)
-                }
-                .frame(minHeight: 32)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(NuwaTactileButtonStyle())
-
-            if expanded {
-                Text(reasoning)
-                    .font(.system(size: max(12, fontSize - 1)))
-                    .foregroundStyle(Color.nuwaLabelSecondary)
-                    .lineSpacing(5)
-                    .textSelection(.enabled)
-                    .padding(.leading, 16)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .overlay(alignment: .leading) {
-                        Rectangle().fill(Color.nuwaControlBorder).frame(width: 1)
-                    }
-            }
-        }
-    }
-}
-
-struct SearchSummaryPillView: View {
-    let results: [WebSearchResultItem]
-    let isSearching: Bool
-    let onTap: () -> Void
-
-    var body: some View {
-        Button(action: onTap) {
-            HStack(spacing: 6) {
-                if isSearching {
-                    ProgressView()
-                        .controlSize(.mini)
-                    Text("正在搜索网页...")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(Color.nuwaLabelSecondary)
-                } else {
-                    Image(systemName: "globe")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(Color.nuwaBrandText)
-                    Text("已阅读 \(results.count) 个网页")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(Color.nuwaLabelSecondary)
-                    Image(systemName: "chevron.right")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(Color.nuwaLabelTertiary)
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .nuwaPillSurface()
-        }
-        .buttonStyle(NuwaTactileButtonStyle())
-        .disabled(results.isEmpty)
-    }
-}
-
-struct SearchPanelSheet: View {
-    let results: [WebSearchResultItem]
-    @Environment(\.dismiss) private var dismiss
-    @Environment(\.openURL) private var openURL
-
-    var body: some View {
-        NavigationStack {
-            List {
-                ForEach(Array(results.enumerated()), id: \.element.id) { idx, item in
-                    Button {
-                        if let url = URL(string: item.url) {
-                            openURL(url)
-                        }
-                    } label: {
-                        VStack(alignment: .leading, spacing: 6) {
-                            HStack(spacing: 6) {
-                                Text("\(idx + 1)")
-                                    .font(.caption2.weight(.bold))
-                                    .foregroundStyle(.white)
-                                    .frame(width: 18, height: 18)
-                                    .background(Color.nuwaBrand, in: Circle())
-                                Text(item.siteName ?? URL(string: item.url)?.host ?? "")
-                                    .font(.caption)
-                                    .foregroundStyle(Color.nuwaLabelTertiary)
-                                    .lineLimit(1)
-                                Spacer()
-                                if let age = item.pageAge, !age.isEmpty {
-                                    Text(age)
-                                        .font(.caption2)
-                                        .foregroundStyle(Color.nuwaLabelTertiary)
-                                }
-                            }
-                            Text(item.title)
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(Color.nuwaLabelPrimary)
-                                .lineLimit(2)
-                            if let snippet = item.snippet, !snippet.isEmpty {
-                                Text(snippet)
-                                    .font(.caption)
-                                    .foregroundStyle(Color.nuwaLabelSecondary)
-                                    .lineLimit(3)
-                            }
-                        }
-                        .padding(.vertical, 4)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .listStyle(.insetGrouped)
-            .navigationTitle("搜索结果 (\(results.count))")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("关闭") { dismiss() }
-                }
-            }
-        }
-        .presentationDetents([.medium, .large])
-        .presentationDragIndicator(.visible)
-    }
-}
-
 struct BranchSwitcherView: View {
     let versionInfo: MessageVersionInfo
     let onSelect: (UUID) -> Void
@@ -680,102 +525,6 @@ struct BranchSwitcherView: View {
             .padding(.horizontal, 6)
             .frame(height: 28)
             .nuwaPillSurface()
-        }
-    }
-}
-
-/// Displays read_link / open_page / find_in_page tool activity pills matching ReplyArea.tsx.
-struct ReplyToolsStatusView: View {
-    let blocks: [ReplyBlock]
-    let isStreaming: Bool
-    @Environment(\.openURL) private var openURL
-
-    private struct FetchedPage: Identifiable {
-        let id: String
-        let url: String
-        let title: String
-        let failed: Bool
-    }
-
-    private var activeReadingLink: String? {
-        guard isStreaming else { return nil }
-        var finishedIds = Set<String>()
-        for b in blocks {
-            if case .webFetchResult(_, let tid, _, _, _) = b { finishedIds.insert(tid) }
-        }
-        for b in blocks.reversed() {
-            if case .serverToolUse(_, let info) = b,
-               (info.action == "read_link" || info.action == "open_page"),
-               !finishedIds.contains(info.id) {
-                return info.url
-            }
-        }
-        return nil
-    }
-
-    private var fetchedPages: [FetchedPage] {
-        var seen = Set<String>()
-        var pages: [FetchedPage] = []
-        for b in blocks {
-            if case .webFetchResult(_, let tid, _, let info, _) = b {
-                let url = info.url ?? ""
-                if url.isEmpty || seen.contains(url) { continue }
-                seen.insert(url)
-                let label = (info.title?.isEmpty == false) ? info.title! : (URL(string: url)?.host ?? url)
-                pages.append(FetchedPage(id: tid, url: url, title: label, failed: info.errorCode != nil))
-            }
-        }
-        return pages
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if let readingUrl = activeReadingLink {
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.mini)
-                    Text("正在浏览网页")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(Color.nuwaLabelSecondary)
-                    if let host = URL(string: readingUrl)?.host {
-                        Text(host)
-                            .font(.caption)
-                            .foregroundStyle(Color.nuwaLabelTertiary)
-                            .lineLimit(1)
-                    }
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .nuwaPillSurface()
-            }
-
-            if !fetchedPages.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(fetchedPages.prefix(5)) { page in
-                            Button {
-                                if !page.failed, let url = URL(string: page.url) {
-                                    openURL(url)
-                                }
-                            } label: {
-                                HStack(spacing: 4) {
-                                    Image(systemName: page.failed ? "exclamationmark.circle" : "link")
-                                        .font(.caption2.weight(.semibold))
-                                        .foregroundStyle(page.failed ? .orange : Color.nuwaBrandText)
-                                    Text(page.title)
-                                        .font(.caption)
-                                        .foregroundStyle(Color.nuwaLabelSecondary)
-                                        .lineLimit(1)
-                                }
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 5)
-                                .nuwaPillSurface()
-                            }
-                            .buttonStyle(NuwaTactileButtonStyle())
-                            .disabled(page.failed)
-                        }
-                    }
-                }
-            }
         }
     }
 }

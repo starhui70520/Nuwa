@@ -9,7 +9,34 @@ enum L10n {
         return zhTable[key] ?? key
     }
 
+    static func count(_ n: Int, singular: String, plural: String, locale: AppLocale) -> String {
+        t(n == 1 ? singular : plural, locale: locale).replacingOccurrences(of: "{count}", with: String(n))
+    }
+
     private static let zhTable: [String: String] = [
+        "close": "关闭",
+        "messageSearchSummary": "1 个网页",
+        "messageSearchSummaries": "{count} 个网页",
+        "toolSearchIntro": "搜索",
+        "messageSearching": "搜索中...",
+        "imageSearching": "图像搜索中...",
+        "searchStopped": "搜索已停止",
+        "toolSearchFail": "联网搜索暂不可用",
+        "toolSearchNoResult": "未搜索到合适内容",
+        "messageSearchNoResult": "未搜索到相关内容",
+        "toolSearch1Result": "搜索到 1 个网页",
+        "toolSearchResults": "搜索到 {count} 个网页",
+        "messageSearchResult": "已阅读 1 个网页",
+        "messageSearchResults": "已阅读 {count} 个网页",
+        "toolOpenOneIntro": "浏览 1 个页面",
+        "toolOpensIntro": "浏览 {count} 个页面",
+        "toolOpenFail": "浏览页面失败",
+        "toolOpenViewAll": "查看全部",
+        "toolFindFail": "查找失败",
+        "toolFindIntro": "查找关键词",
+        "messageThinkDuration": "已思考（用时 {count} 秒）",
+        "messageThinkDurationPlural": "已思考（用时 {count} 秒）",
+        "messageThinkStopped": "已停止",
         "welcome": "你好，让我们开始聊天吧",
         "placeholder": "发消息或语音输入",
         "thinking": "深度思考",
@@ -67,6 +94,29 @@ enum L10n {
     ]
 
     private static let enTable: [String: String] = [
+        "close": "Close",
+        "messageSearchSummary": "1 web page",
+        "messageSearchSummaries": "{count} web pages",
+        "toolSearchIntro": "Searching for",
+        "messageSearching": "Searching...",
+        "imageSearching": "Searching by image...",
+        "searchStopped": "Search stopped",
+        "toolSearchFail": "Search currently unavailable",
+        "toolSearchNoResult": "No suitable results found",
+        "messageSearchNoResult": "No relevant results found",
+        "toolSearch1Result": "Found 1 web page",
+        "toolSearchResults": "Found {count} web pages",
+        "messageSearchResult": "Read 1 web page",
+        "messageSearchResults": "Read {count} web pages",
+        "toolOpenOneIntro": "Read 1 page",
+        "toolOpensIntro": "Read {count} pages",
+        "toolOpenFail": "Read failed",
+        "toolOpenViewAll": "View All",
+        "toolFindFail": "Find failed",
+        "toolFindIntro": "Find keyword",
+        "messageThinkDuration": "Thought for {count} second",
+        "messageThinkDurationPlural": "Thought for {count} seconds",
+        "messageThinkStopped": "Stopped",
         "welcome": "Hi, let's start chatting",
         "placeholder": "Message or speak to Nuwa",
         "thinking": "DeepThink",

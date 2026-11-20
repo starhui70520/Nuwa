@@ -145,7 +145,11 @@ struct ChatView: View {
             set: { if !$0 { searchPanelResults = nil } }
         )) {
             if let results = searchPanelResults {
-                SearchPanelSheet(results: results)
+                SearchSourcesPanel(items: results, locale: settings.locale) {
+                    searchPanelResults = nil
+                }
+                .presentationDragIndicator(.visible)
+                .padding(.top, 12)
             }
         }
         .fileImporter(
@@ -467,54 +471,29 @@ struct ChatView: View {
             }
         } else {
             let refused = message.stopReason == "refusal"
-            let searchResults = message.allSearchResults
-            let isActivelySearching = message.isStreaming && message.blocks.contains { block in
-                if case .serverToolUse(_, let info) = block {
-                    return info.kind.contains("search")
-                }
-                return false
-            } && searchResults.isEmpty
-
-            let allCitations: [TextCitation] = message.blocks.flatMap { block -> [TextCitation] in
-                if case .text(_, _, let c, _) = block { return c }
-                return []
-            }
-            let displayThink = refused ? "" : message.fullThinkingContent
-            let displayText = message.fullTextContent
+            let reply = ReplyPresentation(message)
+            let displayText = reply.answer
 
             VStack(alignment: .leading, spacing: 10) {
-                if isActivelySearching && !refused {
-                    SearchSummaryPillView(
-                        results: searchResults,
-                        isSearching: isActivelySearching
-                    ) {
-                        searchPanelResults = searchResults
-                    }
-                }
-
-                if !refused {
-                    ReplyToolsStatusView(blocks: message.blocks, isStreaming: message.isStreaming)
-                }
-
-                if !displayThink.isEmpty {
-                    ReasoningDisclosureView(
-                        reasoning: displayThink,
-                        seconds: message.thinkingSeconds,
-                        isStreaming: message.isStreaming && displayText.isEmpty,
-                        fontSize: settings.chatFontSize
+                if reply.hasDisclosure || !reply.steps.isEmpty {
+                    ReplyProcessView(
+                        reply: reply, fontSize: settings.chatFontSize, locale: settings.locale,
+                        showResults: { searchPanelResults = $0 },
+                        onCopyCode: { _ in chatStore.showToast(L10n.t("copied", locale: settings.locale)) }
                     )
+                    .id(message.id)
                 }
 
                 if !displayText.isEmpty {
                     MarkdownMessageView(
                         text: displayText,
-                        citations: refused ? [] : allCitations,
+                        citations: reply.citations,
                         fontSize: settings.chatFontSize,
                         isStreaming: message.isStreaming,
                         onCopyCode: { _ in chatStore.showToast(L10n.t("copied", locale: settings.locale)) }
                     )
                     .equatable()
-                } else if message.isStreaming && displayThink.isEmpty && !isActivelySearching {
+                } else if message.isStreaming && !reply.hasDisclosure && reply.steps.isEmpty {
                     HStack(spacing: 8) {
                         ProgressView()
                             .controlSize(.small)
@@ -555,9 +534,9 @@ struct ChatView: View {
                 }
 
                 if !message.isStreaming {
-                    if !refused && !searchResults.isEmpty {
-                        SearchSummaryPillView(results: searchResults, isSearching: false) {
-                            searchPanelResults = searchResults
+                    if !refused && !reply.results.isEmpty {
+                        SearchSourcesButton(items: reply.results, locale: settings.locale) {
+                            searchPanelResults = reply.results
                         }
                         Text(settings.locale == .enUS
                             ? "AI-generated content. Verify important information."

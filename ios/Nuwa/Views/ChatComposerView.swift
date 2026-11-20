@@ -25,12 +25,11 @@ struct ChatComposerView: View {
     let onRemoveAttachment: (String) -> Void
 
     @FocusState private var isFocused: Bool
+    @GestureState private var pressing = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
     @State private var showPhotoPicker = false
-    @State private var bounceTrigger = 0
-    @State private var lastBounce: ContinuousClock.Instant?
 
     private static let lightImpact = UIImpactFeedbackGenerator(style: .light)
 
@@ -64,7 +63,6 @@ struct ChatComposerView: View {
                         .frame(minHeight: 38, alignment: .topLeading)
                         .padding(.horizontal, 6)
                         .padding(.top, 4)
-                        .simultaneousGesture(TapGesture().onEnded { bounce() })
                 }
 
                 // Bottom action row — lightweight crisp native controls inside ONE Liquid Glass card
@@ -115,19 +113,22 @@ struct ChatComposerView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 12)
             .nuwaGlassCard(cornerRadius: 28, tint: colorScheme == .dark ? .white.opacity(0.08) : nil)
-            .keyframeAnimator(initialValue: 1.0, trigger: bounceTrigger) { card, scale in
-                card.scaleEffect(reduceMotion ? 1 : scale, anchor: .bottom)
-            } keyframes: { _ in
-                CubicKeyframe(0.97, duration: 0.08)
-                SpringKeyframe(1.0, duration: 0.43, spring: .bouncy)
+            .animation(pressing ? .easeOut(duration: 0.075) : .spring(duration: 0.38, bounce: 0.36)) { card in
+                card
+                    .brightness(pressing ? (colorScheme == .dark ? 0.035 : -0.015) : 0)
+                    .scaleEffect(pressing && !reduceMotion ? 0.97 : 1)
             }
+            .contentShape(RoundedRectangle(cornerRadius: 28))
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                    .updating($pressing) { value, state, _ in
+                        state = hypot(value.translation.width, value.translation.height) < 16
+                    }
+            )
         }
         .padding(.horizontal, 22)
         .padding(.top, 6)
         .padding(.bottom, 10)
-        .onChange(of: isFocused) { _, focused in
-            if focused { bounce() }
-        }
         .photosPicker(
             isPresented: $showPhotoPicker,
             selection: $selectedPhotoItems,
@@ -140,13 +141,6 @@ struct ChatComposerView: View {
             selectedPhotoItems = []
             onPickPhotos(batch)
         }
-    }
-
-    private func bounce() {
-        let now = ContinuousClock.now
-        guard !reduceMotion, lastBounce.map({ $0.duration(to: now) >= .milliseconds(150) }) ?? true else { return }
-        lastBounce = now
-        bounceTrigger += 1
     }
 
     @ViewBuilder
