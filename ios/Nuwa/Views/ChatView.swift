@@ -903,6 +903,10 @@ struct ChatView: View {
     }
 }
 
+private enum DrawerHaptics {
+    @MainActor static let impact = UIImpactFeedbackGenerator(style: .light)
+}
+
 private struct ChatDrawerLayout<Sidebar: View, Surface: View>: View {
     let size: CGSize
     let drawerWidth: CGFloat
@@ -920,8 +924,6 @@ private struct ChatDrawerLayout<Sidebar: View, Surface: View>: View {
     @GestureState private var legacyTracking = false
     @State private var legacyRejectedDrag = false
     @State private var dragOffset: CGFloat?
-
-    private static let drawerImpact = UIImpactFeedbackGenerator(style: .light)
 
     private var spring: Animation? {
         reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.88)
@@ -951,7 +953,7 @@ private struct ChatDrawerLayout<Sidebar: View, Surface: View>: View {
         }
         .onChange(of: compactOpen) { _, _ in
             guard !wide, hapticEnabled else { return }
-            Self.drawerImpact.impactOccurred(intensity: 0.85)
+            DrawerHaptics.impact.impactOccurred(intensity: 0.85)
         }
     }
 
@@ -1017,7 +1019,7 @@ private struct ChatDrawerLayout<Sidebar: View, Surface: View>: View {
 
     private func updateDrag(_ translation: CGFloat) {
         if dragOffset == nil && hapticEnabled {
-            Self.drawerImpact.prepare()
+            DrawerHaptics.impact.prepare()
         }
         let start = compactOpen ? drawerWidth : 0
         var transaction = Transaction(animation: nil)
