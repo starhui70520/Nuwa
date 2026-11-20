@@ -34,9 +34,12 @@ import {
   nativeBackupDropUri, readNativeAttachmentDrop,
 } from '../native/NativeAttachmentDrop';
 import {
-  commitChatBackup, hydrateImportedAttachment, importedAttachmentOriginalUri, importedAttachmentPreview,
+  commitChatBackup, hydrateImportedAttachment, importedAttachmentOriginalPath, importedAttachmentOriginalUri,
+  importedAttachmentPreview,
   NativeChatBackup, nativeArchivedReplyTemplate, NATIVE_BACKUP_UNREADABLE_CONVERSATION, resolveImportedAttachmentPreview,
 } from '../native/NativeChatBackup';
+import { NativeAvifImage } from '../native/NativeAvifImage';
+import { NATIVE_AVIF_PREVIEW_SUFFIX } from '../native/NativeAvifPreview';
 import { isBackupSpaceError } from '../native/NativeBackupFiles';
 import {
   NativeChatCitation, NativeChatSource, NativeChatSources, nativeSearchResults, safeNativeSourceUrl,
@@ -123,6 +126,11 @@ interface NativeDraft {
   files: NativeDraftAttachment[];
 }
 
+interface NativeImagePreview {
+  uri: string;
+  originalPath: string;
+}
+
 interface NativeSidebarScrollPosition {
   query: string;
   offset: number;
@@ -171,7 +179,7 @@ struct NativeChat {
   @State private uploadQuotaText: string = '';
   @State private attachmentIntakeDraftId: string | null = null;
   @State private fileDropHint: 'attachment' | 'history' | null = null;
-  @State private imagePreview: string = '';
+  @State private imagePreview: NativeImagePreview | null = null;
   @State private loaded: boolean = false;
   @State private retryingConversationIds: string[] = [];
   @State private status: string = '';
@@ -362,7 +370,7 @@ struct NativeChat {
   private followLatest: boolean = true;
   private anchorTimer: number = -1;
   private readonly drafts: Map<string, NativeDraft> = new Map();
-  private visible: boolean = false;
+  @State private visible: boolean = false;
   private scrollTimer: number = -1;
   private streamCheckpointTimer: number = -1;
   private rejectedImageBinding: string = '';
@@ -544,7 +552,7 @@ struct NativeChat {
     } else if (this.updateNotice) {
       this.closeUpdateNotice(true);
     } else if (this.imagePreview) {
-      this.imagePreview = '';
+      this.imagePreview = null;
     } else if (this.authorizing) {
       this.cancelAuthorization();
     } else if (this.sourcePanelEntry) {
@@ -3129,7 +3137,7 @@ struct NativeChat {
   private async openAttachment(item: NativeAttachment): Promise<void> {
     const image = this.attachmentPreview(item);
     if (image) {
-      this.imagePreview = image;
+      this.showAttachmentPreview(item, image);
       return;
     }
     const context = this.host();
@@ -3144,7 +3152,7 @@ struct NativeChat {
       }
       if (this.history.activeId !== sessionId || this.imagePreview || this.chatLinkUrl) return;
       if (generated) {
-        this.imagePreview = generated;
+        this.showAttachmentPreview(item, generated);
         return;
       }
     }
@@ -3173,6 +3181,24 @@ struct NativeChat {
     }
   }
 
+  private attachmentAvifPath(item: NativeAttachment, preview: string): string {
+    if (item.mimeType !== 'image/avif' && !preview.endsWith(NATIVE_AVIF_PREVIEW_SUFFIX)) return '';
+    const context = this.host();
+    const session = this.session();
+    try {
+      if (session && (!item.local || item.archiveId)) {
+        return importedAttachmentOriginalPath(context, session, item) || this.attachments.originalPath(context, item);
+      }
+      return this.attachments.originalPath(context, item);
+    } catch {
+      return '';
+    }
+  }
+
+  private showAttachmentPreview(item: NativeAttachment, uri: string): void {
+    this.imagePreview = { uri: uri, originalPath: this.attachmentAvifPath(item, uri) };
+  }
+
   private messageImageSize(message: NativeConversationMessage): number {
     return message.files?.some((item: NativeAttachment): boolean => !item.isImage) ? 64 : 120;
   }
@@ -3185,8 +3211,11 @@ struct NativeChat {
 
   @Builder
   private attachmentThumbnail(item: NativeAttachment, size: number, preview: string) {
-    Image(preview).width(size).height(size).objectFit(ImageFit.Cover).autoResize(true)
-      .borderRadius(12).draggable(false).accessibilityText(item.name)
+    Stack() {
+      NativeAvifImage({ uri: preview, originalPath: this.attachmentAvifPath(item, preview),
+        fit: ImageFit.Cover, active: this.visible && !this.imagePreview })
+    }
+      .width(size).height(size).borderRadius(12).clip(true).accessibilityText(item.name)
       .onClick(() => { void this.openAttachment(item); })
   }
 
@@ -5409,10 +5438,14 @@ struct NativeChat {
       }
       if (this.imagePreview) {
         Stack({ alignContent: Alignment.TopEnd }) {
-          Image(this.imagePreview).width('100%').height('100%').objectFit(ImageFit.Contain).autoResize(true)
-            .backgroundColor(Color.Black).onClick(() => { this.imagePreview = ''; })
+          Stack() {
+            NativeAvifImage({ uri: this.imagePreview.uri, originalPath: this.imagePreview.originalPath,
+              fit: ImageFit.Contain, active: this.visible })
+          }
+            .width('100%').height('100%').backgroundColor(Color.Black)
+            .onClick(() => { this.imagePreview = null; })
           Row() {
-            this.iconButton($r('app.media.native_close'), this.label('关闭图片', "Close image"), () => { this.imagePreview = ''; },
+            this.iconButton($r('app.media.native_close'), this.label('关闭图片', "Close image"), () => { this.imagePreview = null; },
               42, 22, Color.White, '#660F1115')
           }
           .padding(12)

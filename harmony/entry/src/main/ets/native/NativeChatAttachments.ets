@@ -639,8 +639,13 @@ export class NativeChatAttachments {
     }
   }
 
+  originalPath(context: common.UIAbilityContext, item: NativeAttachment): string {
+    return item.local ? attachmentPath(context, item) : '';
+  }
+
   originalUri(context: common.UIAbilityContext, item: NativeAttachment): string {
-    return item.local ? fileUri.getUriFromPath(attachmentPath(context, item)) : '';
+    const path = this.originalPath(context, item);
+    return path ? fileUri.getUriFromPath(path) : '';
   }
 
   previewUri(context: common.UIAbilityContext, item: NativeAttachment): string {

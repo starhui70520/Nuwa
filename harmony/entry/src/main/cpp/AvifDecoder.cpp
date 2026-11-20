@@ -15,14 +15,51 @@ constexpr uint32_t MAX_IMAGE_PIXELS = 16 * 1024 * 1024;
 // Match the attachment size limit and bound libavif's file-reader buffer.
 constexpr uint64_t MAX_FILE_BYTES = 64 * 1024 * 1024;
 constexpr uint32_t RGBA_BYTES_PER_PIXEL = 4;
+constexpr napi_type_tag ANIMATION_TYPE_TAG{0xae962c2177834f24ULL, 0x9d75ff9e434dbac9ULL};
+
+struct DestroyDecoder {
+    void operator()(avifDecoder* decoder) const
+    {
+        avifDecoderDestroy(decoder);
+    }
+};
+
+using Decoder = std::unique_ptr<avifDecoder, DestroyDecoder>;
+
+struct FramePixels {
+    uint32_t width = 0;
+    uint32_t height = 0;
+    std::unique_ptr<uint8_t[]> pixels;
+};
 
 struct DecodeWork {
     char path[PATH_MAX]{};
     napi_async_work work = nullptr;
     napi_deferred deferred = nullptr;
-    uint32_t width = 0;
-    uint32_t height = 0;
-    std::unique_ptr<uint8_t[]> pixels;
+    FramePixels frame;
+    Decoder decoder;
+};
+
+struct Animation {
+    Decoder decoder;
+    uint32_t frameCount = 0;
+    bool closed = false;
+};
+
+struct ReadFrameWork {
+    napi_async_work work = nullptr;
+    napi_deferred deferred = nullptr;
+    napi_ref animationRef = nullptr;
+    Animation* animation = nullptr;
+    Decoder decoder;
+    uint32_t index = 0;
+    double durationMs = 0;
+    FramePixels frame;
+};
+
+struct CloseWork {
+    napi_async_work work = nullptr;
+    Decoder decoder;
 };
 
 bool ApplyTransforms(avifRGBImage& rgb, std::unique_ptr<uint8_t[]>& pixels, const avifCropRect& crop,
@@ -68,12 +105,11 @@ bool ApplyTransforms(avifRGBImage& rgb, std::unique_ptr<uint8_t[]>& pixels, cons
     return true;
 }
 
-void Decode(napi_env, void* data)
+Decoder OpenDecoder(const char* path, avifDecoderSource source)
 {
-    auto& work = *static_cast<DecodeWork*>(data);
-    std::unique_ptr<avifDecoder, decltype(&avifDecoderDestroy)> decoder(avifDecoderCreate(), avifDecoderDestroy);
+    Decoder decoder(avifDecoderCreate());
     if (!decoder) {
-        return;
+        return nullptr;
     }
 
     decoder->maxThreads = 2;
@@ -81,16 +117,26 @@ void Decode(napi_env, void* data)
     decoder->imageSizeLimit = MAX_IMAGE_PIXELS;
     decoder->ignoreExif = AVIF_TRUE;
     decoder->ignoreXMP = AVIF_TRUE;
-    if (avifDecoderSetIOFile(decoder.get(), work.path) != AVIF_RESULT_OK ||
+    if (avifDecoderSetSource(decoder.get(), source) != AVIF_RESULT_OK ||
+        avifDecoderSetIOFile(decoder.get(), path) != AVIF_RESULT_OK ||
         decoder->io->sizeHint == 0 || decoder->io->sizeHint > MAX_FILE_BYTES ||
-        avifDecoderParse(decoder.get()) != AVIF_RESULT_OK || avifDecoderNextImage(decoder.get()) != AVIF_RESULT_OK) {
-        return;
+        avifDecoderParse(decoder.get()) != AVIF_RESULT_OK) {
+        return nullptr;
     }
+    return decoder;
+}
 
+bool ImageSizeAllowed(const avifImage* image)
+{
+    return image && image->width > 0 && image->height > 0 &&
+           image->width <= MAX_IMAGE_SIDE && image->height <= MAX_IMAGE_SIDE &&
+           static_cast<uint64_t>(image->width) * image->height <= MAX_IMAGE_PIXELS;
+}
+
+void ConvertFrame(Decoder& decoder, FramePixels& frame, bool releaseDecoder = false)
+{
     const avifImage* image = decoder->image;
-    if (!image || image->width == 0 || image->height == 0 ||
-        image->width > MAX_IMAGE_SIDE || image->height > MAX_IMAGE_SIDE ||
-        static_cast<uint64_t>(image->width) * image->height > MAX_IMAGE_PIXELS) {
+    if (!ImageSizeAllowed(image)) {
         return;
     }
 
@@ -120,14 +166,45 @@ void Decode(napi_env, void* data)
     if (avifImageYUVToRGB(image, &rgb) != AVIF_RESULT_OK) {
         return;
     }
-    decoder.reset();
+    if (releaseDecoder) {
+        decoder.reset();
+    }
     if (!ApplyTransforms(rgb, pixels, crop, rotation, mirrorAxis)) {
         return;
     }
 
-    work.width = rgb.width;
-    work.height = rgb.height;
-    work.pixels = std::move(pixels);
+    frame.width = rgb.width;
+    frame.height = rgb.height;
+    frame.pixels = std::move(pixels);
+}
+
+void Decode(napi_env, void* data)
+{
+    auto& work = *static_cast<DecodeWork*>(data);
+    auto decoder = OpenDecoder(work.path, AVIF_DECODER_SOURCE_AUTO);
+    if (decoder && avifDecoderNextImage(decoder.get()) == AVIF_RESULT_OK) {
+        ConvertFrame(decoder, work.frame, true);
+    }
+}
+
+void OpenAnimation(napi_env, void* data)
+{
+    auto& work = *static_cast<DecodeWork*>(data);
+    auto decoder = OpenDecoder(work.path, AVIF_DECODER_SOURCE_TRACKS);
+    if (decoder && decoder->imageSequenceTrackPresent && decoder->imageCount > 1 && decoder->timescale > 0 &&
+        decoder->progressiveState == AVIF_PROGRESSIVE_STATE_UNAVAILABLE && ImageSizeAllowed(decoder->image)) {
+        work.decoder = std::move(decoder);
+    }
+}
+
+void ReadFrame(napi_env, void* data)
+{
+    auto& work = *static_cast<ReadFrameWork*>(data);
+    // libavif advances directly for the next frame and seeks from a keyframe when looping or skipping.
+    if (avifDecoderNthImage(work.decoder.get(), work.index) == AVIF_RESULT_OK) {
+        work.durationMs = work.decoder->imageTiming.duration * 1000;
+        ConvertFrame(work.decoder, work.frame);
+    }
 }
 
 void FreePixels(napi_env, void* data, void*)
@@ -135,19 +212,19 @@ void FreePixels(napi_env, void* data, void*)
     delete[] static_cast<uint8_t*>(data);
 }
 
-napi_value CreateFrame(napi_env env, DecodeWork& work)
+napi_value CreateFrame(napi_env env, FramePixels& pixels, double durationMs = -1)
 {
     napi_value frame;
     napi_value width;
     napi_value height;
     napi_value rgba;
-    const size_t byteLength = static_cast<size_t>(work.width) * work.height * RGBA_BYTES_PER_PIXEL;
-    if (napi_create_object(env, &frame) != napi_ok || napi_create_uint32(env, work.width, &width) != napi_ok ||
-        napi_create_uint32(env, work.height, &height) != napi_ok ||
-        napi_create_external_arraybuffer(env, work.pixels.get(), byteLength, FreePixels, nullptr, &rgba) != napi_ok) {
+    const size_t byteLength = static_cast<size_t>(pixels.width) * pixels.height * RGBA_BYTES_PER_PIXEL;
+    if (napi_create_object(env, &frame) != napi_ok || napi_create_uint32(env, pixels.width, &width) != napi_ok ||
+        napi_create_uint32(env, pixels.height, &height) != napi_ok ||
+        napi_create_external_arraybuffer(env, pixels.pixels.get(), byteLength, FreePixels, nullptr, &rgba) != napi_ok) {
         return nullptr;
     }
-    work.pixels.release();
+    pixels.pixels.release();
 
     const napi_property_descriptor properties[] = {
         {"width", nullptr, nullptr, nullptr, nullptr, width, napi_default_jsproperty, nullptr},
@@ -157,12 +234,19 @@ napi_value CreateFrame(napi_env env, DecodeWork& work)
     if (napi_define_properties(env, frame, sizeof(properties) / sizeof(properties[0]), properties) != napi_ok) {
         return nullptr;
     }
+    if (durationMs >= 0) {
+        napi_value duration;
+        if (napi_create_double(env, durationMs, &duration) != napi_ok ||
+            napi_set_named_property(env, frame, "durationMs", duration) != napi_ok) {
+            return nullptr;
+        }
+    }
     return frame;
 }
 
-void ResolveDecode(napi_env env, napi_deferred deferred, napi_value frame = nullptr)
+void ResolveDecode(napi_env env, napi_deferred deferred, napi_value result = nullptr)
 {
-    if (!frame) {
+    if (!result) {
         bool exceptionPending = false;
         napi_value error;
         if (napi_is_exception_pending(env, &exceptionPending) == napi_ok && exceptionPending &&
@@ -170,25 +254,134 @@ void ResolveDecode(napi_env env, napi_deferred deferred, napi_value frame = null
             napi_reject_deferred(env, deferred, error);
             return;
         }
-        if (napi_get_null(env, &frame) != napi_ok) {
+        if (napi_get_null(env, &result) != napi_ok) {
             return;
         }
     }
-    napi_resolve_deferred(env, deferred, frame);
+    napi_resolve_deferred(env, deferred, result);
+}
+
+template<typename Work>
+bool QueueWork(napi_env env, std::unique_ptr<Work>& work, const char* name,
+               napi_async_execute_callback execute, napi_async_complete_callback complete)
+{
+    napi_value resource;
+    if (napi_create_string_utf8(env, name, NAPI_AUTO_LENGTH, &resource) != napi_ok ||
+        napi_create_async_work(env, nullptr, resource, execute, complete, work.get(), &work->work) != napi_ok) {
+        return false;
+    }
+    if (napi_queue_async_work(env, work->work) != napi_ok) {
+        napi_delete_async_work(env, work->work);
+        return false;
+    }
+    work.release();
+    return true;
+}
+
+void DisposeDecoder(napi_env env, Decoder decoder)
+{
+    if (!decoder) {
+        return;
+    }
+    std::unique_ptr<CloseWork> work(new (std::nothrow) CloseWork);
+    if (!work) {
+        return;
+    }
+    work->decoder = std::move(decoder);
+    QueueWork(env, work, "Nuwa AVIF animation close", [](napi_env, void* data) {
+        static_cast<CloseWork*>(data)->decoder.reset();
+    }, [](napi_env env, napi_status, void* data) {
+        std::unique_ptr<CloseWork> work(static_cast<CloseWork*>(data));
+        napi_delete_async_work(env, work->work);
+    });
 }
 
 void CompleteDecode(napi_env env, napi_status status, void* data)
 {
     std::unique_ptr<DecodeWork> work(static_cast<DecodeWork*>(data));
     napi_value frame = nullptr;
-    if (status == napi_ok && work->pixels) {
-        frame = CreateFrame(env, *work);
+    if (status == napi_ok && work->frame.pixels) {
+        frame = CreateFrame(env, work->frame);
     }
     ResolveDecode(env, work->deferred, frame);
     napi_delete_async_work(env, work->work);
 }
 
-napi_value DecodeAvif(napi_env env, napi_callback_info info)
+void FinalizeAnimation(napi_env, void* data, void*)
+{
+    delete static_cast<Animation*>(data);
+}
+
+napi_value CreateAnimation(napi_env env, Decoder& decoder)
+{
+    std::unique_ptr<Animation> animation(new (std::nothrow) Animation);
+    if (!animation) {
+        return nullptr;
+    }
+    animation->frameCount = static_cast<uint32_t>(decoder->imageCount);
+    const uint32_t playCount = decoder->repetitionCount < 0 ? 0 : static_cast<uint32_t>(decoder->repetitionCount) + 1;
+    napi_value handle;
+    napi_value frameCountValue;
+    napi_value playCountValue;
+    if (napi_create_object(env, &handle) != napi_ok ||
+        napi_create_uint32(env, animation->frameCount, &frameCountValue) != napi_ok ||
+        napi_create_uint32(env, playCount, &playCountValue) != napi_ok) {
+        return nullptr;
+    }
+    const napi_property_descriptor properties[] = {
+        {"frameCount", nullptr, nullptr, nullptr, nullptr, frameCountValue, napi_enumerable, nullptr},
+        {"playCount", nullptr, nullptr, nullptr, nullptr, playCountValue, napi_enumerable, nullptr},
+    };
+    if (napi_define_properties(env, handle, sizeof(properties) / sizeof(properties[0]), properties) != napi_ok ||
+        napi_type_tag_object(env, handle, &ANIMATION_TYPE_TAG) != napi_ok ||
+        napi_wrap(env, handle, animation.get(), FinalizeAnimation, nullptr, nullptr) != napi_ok) {
+        return nullptr;
+    }
+    animation->decoder = std::move(decoder);
+    animation.release();
+    return handle;
+}
+
+void CompleteOpenAnimation(napi_env env, napi_status status, void* data)
+{
+    std::unique_ptr<DecodeWork> work(static_cast<DecodeWork*>(data));
+    napi_value animation = nullptr;
+    if (status == napi_ok && work->decoder) {
+        animation = CreateAnimation(env, work->decoder);
+    }
+    ResolveDecode(env, work->deferred, animation);
+    napi_delete_async_work(env, work->work);
+}
+
+Animation* GetAnimation(napi_env env, napi_value handle)
+{
+    bool tagged = false;
+    void* animation = nullptr;
+    if (napi_check_object_type_tag(env, handle, &ANIMATION_TYPE_TAG, &tagged) != napi_ok || !tagged ||
+        napi_unwrap(env, handle, &animation) != napi_ok) {
+        return nullptr;
+    }
+    return static_cast<Animation*>(animation);
+}
+
+void CompleteReadFrame(napi_env env, napi_status status, void* data)
+{
+    std::unique_ptr<ReadFrameWork> work(static_cast<ReadFrameWork*>(data));
+    napi_value frame = nullptr;
+    if (status == napi_ok && !work->animation->closed && work->frame.pixels) {
+        frame = CreateFrame(env, work->frame, work->durationMs);
+        if (frame) {
+            work->animation->decoder = std::move(work->decoder);
+        }
+    }
+    ResolveDecode(env, work->deferred, frame);
+    napi_delete_reference(env, work->animationRef);
+    napi_delete_async_work(env, work->work);
+    DisposeDecoder(env, std::move(work->decoder));
+}
+
+napi_value QueueDecodePath(napi_env env, napi_callback_info info, const char* name,
+                           napi_async_execute_callback execute, napi_async_complete_callback complete)
 {
     napi_deferred deferred;
     napi_value promise;
@@ -215,28 +408,87 @@ napi_value DecodeAvif(napi_env env, napi_callback_info info)
     }
 
     work->deferred = deferred;
-    napi_value resource;
-    if (napi_create_string_utf8(env, "Nuwa AVIF decode", NAPI_AUTO_LENGTH, &resource) != napi_ok ||
-        napi_create_async_work(env, nullptr, resource, Decode, CompleteDecode, work.get(), &work->work) != napi_ok) {
+    if (!QueueWork(env, work, name, execute, complete)) {
         ResolveDecode(env, deferred);
-        return promise;
-    }
-
-    if (napi_queue_async_work(env, work->work) == napi_ok) {
-        work.release();
-    } else {
-        ResolveDecode(env, deferred);
-        napi_delete_async_work(env, work->work);
     }
     return promise;
 }
 
+napi_value DecodeAvif(napi_env env, napi_callback_info info)
+{
+    return QueueDecodePath(env, info, "Nuwa AVIF decode", Decode, CompleteDecode);
+}
+
+napi_value OpenAvifAnimation(napi_env env, napi_callback_info info)
+{
+    return QueueDecodePath(env, info, "Nuwa AVIF animation open", OpenAnimation, CompleteOpenAnimation);
+}
+
+napi_value ReadAvifAnimationFrame(napi_env env, napi_callback_info info)
+{
+    napi_deferred deferred;
+    napi_value promise;
+    if (napi_create_promise(env, &deferred, &promise) != napi_ok) {
+        napi_throw_error(env, nullptr, "Cannot create AVIF frame promise");
+        return nullptr;
+    }
+
+    size_t argc = 2;
+    napi_value args[2];
+    if (napi_get_cb_info(env, info, &argc, args, nullptr, nullptr) != napi_ok || argc != 2) {
+        ResolveDecode(env, deferred);
+        return promise;
+    }
+    auto* animation = GetAnimation(env, args[0]);
+    double index;
+    if (!animation || !animation->decoder || napi_get_value_double(env, args[1], &index) != napi_ok ||
+        !(index >= 0 && index < animation->frameCount) || index != static_cast<uint32_t>(index)) {
+        ResolveDecode(env, deferred);
+        return promise;
+    }
+
+    std::unique_ptr<ReadFrameWork> work(new (std::nothrow) ReadFrameWork);
+    if (!work || napi_create_reference(env, args[0], 1, &work->animationRef) != napi_ok) {
+        ResolveDecode(env, deferred);
+        return promise;
+    }
+    // Moving the decoder into the worker prevents overlapping reads. The JS reference keeps the handle alive.
+    work->decoder = std::move(animation->decoder);
+    work->animation = animation;
+    work->index = static_cast<uint32_t>(index);
+    work->deferred = deferred;
+    if (!QueueWork(env, work, "Nuwa AVIF frame read", ReadFrame, CompleteReadFrame)) {
+        animation->decoder = std::move(work->decoder);
+        napi_delete_reference(env, work->animationRef);
+        ResolveDecode(env, deferred);
+    }
+    return promise;
+}
+
+napi_value CloseAvifAnimation(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value handle;
+    if (napi_get_cb_info(env, info, &argc, &handle, nullptr, nullptr) == napi_ok && argc == 1) {
+        auto* animation = GetAnimation(env, handle);
+        if (animation) {
+            animation->closed = true;
+            DisposeDecoder(env, std::move(animation->decoder));
+        }
+    }
+    napi_value result;
+    return napi_get_undefined(env, &result) == napi_ok ? result : nullptr;
+}
+
 napi_value Init(napi_env env, napi_value exports)
 {
-    const napi_property_descriptor decode = {
-        "decodeAvif", nullptr, DecodeAvif, nullptr, nullptr, nullptr, napi_default, nullptr,
+    const napi_property_descriptor methods[] = {
+        {"decodeAvif", nullptr, DecodeAvif, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"openAvifAnimation", nullptr, OpenAvifAnimation, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"readAvifAnimationFrame", nullptr, ReadAvifAnimationFrame, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"closeAvifAnimation", nullptr, CloseAvifAnimation, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
-    return napi_define_properties(env, exports, 1, &decode) == napi_ok ? exports : nullptr;
+    return napi_define_properties(env, exports, sizeof(methods) / sizeof(methods[0]), methods) == napi_ok ? exports : nullptr;
 }
 
 napi_module module = {NAPI_MODULE_VERSION, 0, nullptr, Init, "nuwa_avif", nullptr, {nullptr}};

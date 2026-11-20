@@ -745,11 +745,21 @@ export function importedAttachmentPreview(session: NativeConversation, item: Nat
   return '';
 }
 
-export function importedAttachmentOriginalUri(context: common.UIAbilityContext, session: NativeConversation,
+export function importedAttachmentOriginalPath(context: common.UIAbilityContext, session: NativeConversation,
   item: NativeAttachment): string {
   const image = retainedImage(session, item);
   try {
-    return image?.blobId ? fileUri.getUriFromPath(backupImagePath(context, image.blobId)) : '';
+    return image?.blobId ? backupImagePath(context, image.blobId) : '';
+  } catch {
+    return '';
+  }
+}
+
+export function importedAttachmentOriginalUri(context: common.UIAbilityContext, session: NativeConversation,
+  item: NativeAttachment): string {
+  try {
+    const path = importedAttachmentOriginalPath(context, session, item);
+    return path ? fileUri.getUriFromPath(path) : '';
   } catch {
     return '';
   }
