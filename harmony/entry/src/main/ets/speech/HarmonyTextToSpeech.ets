@@ -13,6 +13,7 @@ import {
 const MAX_TEXT_LENGTH = 10000;
 const PLAYBACK_COMPLETE = 1;
 const CAPTION_INTERVAL_MS = 450;
+const DEFAULT_ENGLISH_PERSON = 8;
 
 interface Playback {
   id: string;
@@ -57,6 +58,7 @@ export class HarmonyTextToSpeech {
   private engineBackground: boolean = false;
   private initializing: boolean = false;
   private requestSequence: number = 0;
+  private voiceQuerySequence: number = 0;
   private active?: Playback;
   private readonly media = new HarmonySpeechSession();
 
@@ -129,7 +131,11 @@ export class HarmonyTextToSpeech {
       if (!canIUse('SystemCapability.AI.TextToSpeech')) {
         throw new Error('System TTS unavailable');
       }
-      const person = playback.locale === 'en-US' ? 8 : playback.voice === 'tide' ? 21 : 0;
+      const person = playback.locale === 'en-US' ?
+        (playback.voice === 'tide' ? await this.installedEnglishMalePerson() : DEFAULT_ENGLISH_PERSON) :
+        playback.voice === 'tide' ? 21 : 0;
+      // stop() can cancel while voice discovery is pending. Do not create an engine for stale speech.
+      if (this.active !== playback) return;
       const background = playback.context !== undefined;
       try {
         engine = await this.createEngine(playback.locale, person, background);
@@ -137,8 +143,19 @@ export class HarmonyTextToSpeech {
         if (this.active !== playback || person === 0 || playback.cloudRoute) {
           throw new Error('Voice unavailable');
         }
-        // HarmonyOS 5.0 offers the offline Mandarin voice with English text support.
-        engine = await this.createEngine('zh-CN', 0, background);
+        if (playback.locale === 'en-US' && person !== DEFAULT_ENGLISH_PERSON) {
+          // English male voices are not part of the documented built-in set. If a discovered
+          // installed male voice stops being available, retry the documented Laura female voice.
+          try {
+            engine = await this.createEngine('en-US', DEFAULT_ENGLISH_PERSON, background);
+          } catch {
+            if (this.active !== playback) return;
+            engine = await this.createEngine('zh-CN', 0, background);
+          }
+        } else {
+          // HarmonyOS 5.0 offers the offline Mandarin voice with English text support.
+          engine = await this.createEngine('zh-CN', 0, background);
+        }
       }
       if (this.active !== playback) {
         this.shutdown(engine);
@@ -182,6 +199,28 @@ export class HarmonyTextToSpeech {
       this.initializing = false;
       this.playNext();
     }
+  }
+
+  /** Resolve a male English timbre only when the platform reports it as installed. */
+  private async installedEnglishMalePerson(): Promise<number> {
+    try {
+      const voices = await textToSpeech.listVoices({
+        requestId: `${this.requestPrefix}voice${++this.voiceQuerySequence}`,
+        online: 1,
+        extraParams: { language: 'en-US' },
+      });
+      for (let index = 0; index < voices.length; index++) {
+        const voice = voices[index];
+        const language = voice.language.replace('_', '-').toLowerCase();
+        if (language === 'en-us' && voice.gender.toLowerCase() === 'male' &&
+          voice.status === 'INSTALLED' && Number.isInteger(voice.person) && voice.person > 0) {
+          return voice.person;
+        }
+      }
+    } catch {
+      // Fall back to the documented English voice when voice discovery is unavailable.
+    }
+    return DEFAULT_ENGLISH_PERSON;
   }
 
   private playNext(): void {
