@@ -3,6 +3,8 @@
 
   const diagram = document.getElementById('diagram')
   const systemDark = window.matchMedia('(prefers-color-scheme: dark)')
+  const sourceLimit = 50000
+  const frontmatter = /^(?:[^\S\n]*\n)*([^\S\n]*)---[^\S\n]*\n([\s\S]*?)\n\1---[^\S\n]*(?:\n|$)/
   let latest = 0
   let result = -1
   let queue = Promise.resolve()
@@ -40,41 +42,16 @@
     return root
   }
 
-  function titleScalar(value) {
-    const singleQuoted = /^'((?:[^']|'')*)'(?:[ \t]+#.*)?$/.exec(value)
-    if (singleQuoted) return singleQuoted[1].replace(/''/g, "'")
-    const doubleQuoted = /^("(?:[^"\\]|\\.)*")(?:[ \t]+#.*)?$/.exec(value)
-    if (doubleQuoted) {
-      try {
-        return JSON.parse(doubleQuoted[1])
-      } catch {
-        return ''
-      }
+  function titleFrontmatter(fields, indent) {
+    let title
+    try {
+      const yaml = indent ? fields.split('\n')
+        .map((line) => line.startsWith(indent) ? line.slice(indent.length) : line).join('\n') : fields
+      title = window.NuwaMermaidYamlTitle(yaml)
+    } catch {
+      // A malformed title does not keep the rest of the diagram from rendering.
+      return ''
     }
-    if (/^["'!&*#|>{\[]/.test(value)) return ''
-    return value.replace(/[ \t]+#.*$/, '').trimEnd()
-  }
-
-  function titleFrontmatter(fields) {
-    // Only forward a title field. Mermaid still interprets the YAML block scalar's fold and chomp indicators.
-    const field = /^(?:title|'title'|"title"):[ \t]+([^\r\n\u0085\u2028\u2029]*)$/m.exec(fields)
-    const value = field?.[1].trim()
-    if (!value) return ''
-    const block = /^[|>](?:[1-9][+-]?|[+-][1-9]?)?(?=[ \t]*(?:#|$))/.exec(value)?.[0]
-    if (block) {
-      const lines = []
-      for (const line of fields.slice(field.index + field[0].length).split(/\r?\n/).slice(1)) {
-        if (line && !line.startsWith(' ')) break
-        if (/[\r\u0000-\u0008\u000b\u000c\u000e-\u001f\u0085\u2028\u2029]/.test(line)) return ''
-        lines.push(line.trim() ? line : '')
-      }
-      const first = lines.find((line) => line.length > 0)
-      if (!first) return ''
-      const indentation = Number(/[1-9]/.exec(block)?.[0] ?? first.match(/^ +/)[0].length)
-      if (lines.some((line) => line && !line.startsWith(' '.repeat(indentation)))) return ''
-      return '---\ntitle: ' + block + '\n' + lines.join('\n') + '\n---\n'
-    }
-    const title = titleScalar(value)
     if (!title) return ''
     const encoded = JSON.stringify(title).replace(/[<>%&\u0085\u2028\u2029]/g,
       (character) => '\\u' + character.charCodeAt(0).toString(16).padStart(4, '0'))
@@ -83,13 +60,16 @@
 
   function prepareSource(source) {
     let title = ''
-    const body = source.replace(/^\uFEFF/, '')
-      .replace(/^\s*---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/, (_header, fields) => {
-        title = titleFrontmatter(fields)
+    let body = source.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n')
+      .replace(frontmatter, (_header, indent, fields) => {
+        title = titleFrontmatter(fields, indent)
         return ''
       })
       .replace(/%%\{[\s\S]*?\}%%/g, '')
+      .replace(/%%\{[^\n]*/g, '')
       .replace(/<((?:img|image)\s+)/gi, '&lt;$1')
+    // A stripped directive or header can leave more YAML at the start of the body.
+    while (frontmatter.test(body)) body = body.replace(frontmatter, '')
     return title + body
   }
 
@@ -102,8 +82,10 @@
       try {
         if (payload.length > 267000 || !window.mermaid) throw new Error('Unavailable diagram renderer')
         const bytes = Uint8Array.from(atob(payload), (character) => character.charCodeAt(0))
-        const source = prepareSource(new TextDecoder().decode(bytes))
-        if (source.length > 50000) throw new Error('Diagram is too large')
+        const input = new TextDecoder().decode(bytes)
+        if (input.length > sourceLimit) throw new Error('Diagram is too large')
+        const source = prepareSource(input)
+        if (source.length > sourceLimit) throw new Error('Diagram is too large')
         if (!source.trim()) {
           if (!loading) clear()
           result = loading ? (displayedSource ? 0 : -4) : -3
@@ -116,7 +98,7 @@
           securityLevel: 'strict',
           startOnLoad: false,
           suppressErrorRendering: true,
-          maxTextSize: 50000,
+          maxTextSize: sourceLimit,
           maxEdges: 500,
           secure: ['secure', 'securityLevel', 'startOnLoad', 'maxTextSize', 'maxEdges',
             'suppressErrorRendering', 'dompurifyConfig', 'fontFamily', 'altFontFamily',

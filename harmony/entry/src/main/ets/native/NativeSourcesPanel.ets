@@ -1,7 +1,6 @@
-import { nativeIconTint } from './NativeIconTint';
-import { common } from '@kit.AbilityKit';
 import { NativeChatSource, safeNativeSourceUrl } from './NativeChatSources';
 import { NativeLocale } from './NativeLocation';
+import { NativeSourceLogo } from './NativeSourceLogo';
 
 function sourceDate(value: string | null): string {
   if (!value) {
@@ -21,44 +20,16 @@ export struct NativeSourcesPanel {
   @Prop fontScale: number = 1;
   @Prop sources: NativeChatSource[] = [];
   @Prop title: string = '参考资料';
-  @State private failedSiteIcons: string[] = [];
   onClose: () => void = () => {};
+  onOpenLink: (target: string) => void = (_target: string) => {};
 
   private text(chinese: string, english: string): string {
     return this.locale === 'zh-CN' ? chinese : english;
   }
 
-  private async openSource(source: NativeChatSource): Promise<void> {
+  private openSource(source: NativeChatSource): void {
     const href = safeNativeSourceUrl(source.url);
-    if (!href) {
-      return;
-    }
-    try {
-      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
-      await context.openLink(href, { appLinkingOnly: false });
-    } catch {
-      this.getUIContext().getPromptAction().showToast({ message: this.text('无法打开链接', 'Unable to open link') });
-    }
-  }
-
-  @Builder
-  private siteIcon(source: NativeChatSource) {
-    Row() {
-      if (source.siteIcon && !this.failedSiteIcons.includes(source.siteIcon)) {
-        Image(source.siteIcon).width(18).height(18).objectFit(ImageFit.Cover).autoResize(true)
-          .borderRadius(9)
-          .onError((): void => {
-            if (!this.failedSiteIcons.includes(source.siteIcon ?? '')) {
-              this.failedSiteIcons = this.failedSiteIcons.concat([source.siteIcon ?? '']);
-            }
-          })
-      } else {
-        Image($r('app.media.native_web_search')).width(12).height(12)
-          .colorFilter(nativeIconTint($r('app.color.native_chat_caption')))
-      }
-    }
-    .width(18).height(18).borderRadius(9).backgroundColor($r('app.color.native_chat_citation_bg'))
-    .clip(true)
+    if (href) this.onOpenLink(href);
   }
 
   @Builder
@@ -66,7 +37,7 @@ export struct NativeSourcesPanel {
     Button({ type: ButtonType.Normal }) {
       Column({ space: 6 }) {
         Row({ space: 6 }) {
-          this.siteIcon(source)
+          NativeSourceLogo({ iconUrl: source.siteIcon, diameter: 18 })
           if (source.siteName) {
             Text(source.siteName).fontSize(13 * this.fontScale).lineHeight(17 * this.fontScale)
               .fontWeight(FontWeight.Medium).fontColor($r('app.color.native_chat_caption'))
@@ -99,7 +70,7 @@ export struct NativeSourcesPanel {
     }
     .width('100%').padding(12).borderRadius(12)
     .backgroundColor($r('app.color.native_chat_surface'))
-    .onClick(() => { void this.openSource(source); })
+    .onClick(() => { this.openSource(source); })
   }
 
   build() {

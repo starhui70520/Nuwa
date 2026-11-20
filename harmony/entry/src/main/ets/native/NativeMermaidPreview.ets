@@ -187,7 +187,7 @@ export struct NativeMermaidPreview {
 
   private rejectResource(target: string): WebResourceResponse | null {
     if (target === DIAGRAM_PAGE || target === DIAGRAM_ROOT + 'render.js' ||
-      target === DIAGRAM_ROOT + 'mermaid.min.js') {
+      target === DIAGRAM_ROOT + 'mermaid.min.js' || target === DIAGRAM_ROOT + 'yaml-title.js') {
       return null;
     }
     const response = new WebResourceResponse();

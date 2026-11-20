@@ -1,8 +1,6 @@
-import { common } from '@kit.AbilityKit';
 import { LengthMetrics } from '@kit.ArkUI';
 import { deviceInfo, pasteboard } from '@kit.BasicServicesKit';
 import { text } from '@kit.ArkGraphics2D';
-import { url } from '@kit.ArkTS';
 import { NativeChatSource, safeNativeSourceUrl } from './NativeChatSources';
 import { NativeHighlightedCode } from './NativeHighlightedCode';
 import { NativeLocale } from './NativeLocation';
@@ -13,6 +11,7 @@ import {
   NativeMathPictureRequest, nativeMathPictureKey, requestNativeMathPicture,
 } from './NativeMathRenderQueue';
 import { NativeMermaidPreview } from './NativeMermaidPreview';
+import { NativeSourceLogo } from './NativeSourceLogo';
 import { NativeMathSpan, parseNativeMath } from './NativeMarkdownMath';
 import { nativeMarkdownBlocks, NativeMarkdownBlock, NativeMarkdownPart } from './NativeMarkdownStructure';
 import { NativeTheme } from './NativeSettings';
@@ -42,6 +41,7 @@ export struct NativeMarkdown {
   @Prop @Watch('scheduleMathPictures') theme: NativeTheme = 'system';
   @Prop @Watch('onContentChanged') loading: boolean = false;
   onCitation: (number: number) => void = () => {};
+  onOpenLink: (target: string) => void = (_target: string) => {};
   @State private copiedCodeKey: string = '';
   @State private mermaidCodeBlocks: string[] = [];
   @State private mathPictures: Map<string, NativeStoredMathPicture> = new Map<string, NativeStoredMathPicture>();
@@ -407,18 +407,6 @@ export struct NativeMarkdown {
     }
   }
 
-  private async openLink(target: string): Promise<void> {
-    try {
-      const link = url.URL.parseURL(target);
-      if ((link.protocol === 'https:' || link.protocol === 'http:') && !link.username && !link.password) {
-        const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
-        await context.openLink(link.href, { appLinkingOnly: false });
-      }
-    } catch {
-      this.getUIContext().getPromptAction().showToast({ message: '无法打开链接' });
-    }
-  }
-
   @Builder
   private displayedFormula(picture: NativeStoredMathPicture, source: string) {
     Scroll() {
@@ -494,7 +482,7 @@ export struct NativeMarkdown {
             .objectFit(ImageFit.Contain)
             .verticalAlign(ImageSpanAlignment.BASELINE)
             .baselineOffset(LengthMetrics.vp(-this.inlineDepth(part.formula, size, part.strong, maxWidth)))
-            .onClick(() => { if (part.target) { void this.openLink(part.target); } })
+            .onClick(() => { if (part.target) this.onOpenLink(part.target); })
         } else if (part.math) {
           ForEach(part.math, (span: NativeMathSpan) => {
             Span(span.text)
@@ -504,7 +492,7 @@ export struct NativeMarkdown {
               .fontColor(part.target ? $r('app.color.native_chat_blue_text') : this.bodyColor())
               .fontStyle(span.italic || part.italic ? FontStyle.Italic : FontStyle.Normal)
               .fontWeight(span.bold || part.strong ? FontWeight.Bold : FontWeight.Regular)
-              .onClick(() => { if (part.target) { void this.openLink(part.target); } })
+              .onClick(() => { if (part.target) this.onOpenLink(part.target); })
           }, (_span: NativeMathSpan, index: number): string => index.toString())
         } else {
           Span(part.text)
@@ -515,7 +503,7 @@ export struct NativeMarkdown {
             .fontSize((part.code ? (maxWidth ? 13 : size * 0.875) : size) * this.fontScale)
             .textBackgroundStyle({ color: part.code ? $r('app.color.native_chat_inline_code') : Color.Transparent,
               radius: part.code ? 6 : 0 })
-            .onClick(() => { if (part.target) { void this.openLink(part.target); } })
+            .onClick(() => { if (part.target) this.onOpenLink(part.target); })
         }
       }, (part: NativeMarkdownPart, index: number): string => `${index}:${part.text}:${part.target ?? ''}:${part.citation ?? 0}`)
     }
@@ -622,8 +610,7 @@ export struct NativeMarkdown {
       Button({ type: ButtonType.Normal, buttonStyle: ButtonStyleMode.TEXTUAL }) {
         Column({ space: 5 }) {
           Row({ space: 6 }) {
-            Image(safeNativeSourceUrl(this.citationAnchor.source.siteIcon) || $r('app.media.native_web_search'))
-              .alt($r('app.media.native_web_search')).width(16).height(16).borderRadius(4).draggable(false)
+            NativeSourceLogo({ iconUrl: this.citationAnchor.source.siteIcon, diameter: 16 })
             Text(this.citationAnchor.source.siteName).fontSize(12 * this.fontScale).fontColor($r('app.color.native_chat_secondary'))
               .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).constraintSize({ maxWidth: '62%' })
             if (this.citationAnchor.source.publishedAt) {

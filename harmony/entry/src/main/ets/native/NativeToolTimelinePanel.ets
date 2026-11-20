@@ -1,8 +1,8 @@
-import { common } from '@kit.AbilityKit';
 import { NativeChatCitation, NativeChatSource, safeNativeSourceUrl } from './NativeChatSources';
 import { nativeIconTint } from './NativeIconTint';
 import { NativeLocale } from './NativeLocation';
 import { NativeMarkdown } from './NativeMarkdown';
+import { NativeSourceThumbnails } from './NativeSourceLogo';
 import {
   nativeDeepSearchKind, nativeImageSearchKind, NativeTimelinePage, NativeTimelinePattern,
   NativeToolTimelineStep, NativeToolTimelineView,
@@ -26,6 +26,7 @@ export struct NativeToolTimelinePanel {
   @Prop citationHoverEnabled: boolean = false;
   onSources: (entry: string, sources: NativeChatSource[]) => void =
     (_entry: string, _sources: NativeChatSource[]) => {};
+  onOpenLink: (target: string) => void = (_target: string) => {};
   @State private expanded: boolean = true;
   @State private tick: number = 0;
   private ticker: number = -1;
@@ -132,23 +133,15 @@ export struct NativeToolTimelinePanel {
     }
   }
 
-  private async openLink(value: string): Promise<void> {
+  private openLink(value: string): void {
     const target = safeNativeSourceUrl(value);
-    if (!target) {
-      return;
-    }
-    try {
-      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
-      await context.openLink(target, { appLinkingOnly: false });
-    } catch {
-      this.getUIContext().getPromptAction().showToast({ message: this.text('无法打开链接', 'Unable to open the link') });
-    }
+    if (target) this.onOpenLink(target);
   }
 
   private openCitation(index: number): void {
     const source = this.sources.find((item: NativeChatSource): boolean => item.index === index);
     if (source) {
-      void this.openLink(source.url);
+      this.openLink(source.url);
     }
   }
 
@@ -214,16 +207,18 @@ export struct NativeToolTimelinePanel {
   private searchRow(step: NativeToolTimelineStep) {
     if (step.status !== 'wip' && (step.resultUrls?.length ?? 0) > 0) {
       Button({ type: ButtonType.Capsule, buttonStyle: ButtonStyleMode.TEXTUAL }) {
-        Row({ space: 5 }) {
+        Row({ space: 6 }) {
           Text(this.searchLabel(step)).fontSize(13 * this.fontScale).fontColor($r('app.color.native_chat_secondary'))
             .maxLines(2).textAlign(TextAlign.Start)
-          Image($r('app.media.native_chevron_right')).width(12).height(12)
-            .colorFilter(nativeIconTint($r('app.color.native_chat_caption')))
-            .rotate({ angle: this.rtl ? 180 : 0 })
+          NativeSourceThumbnails({
+            sources: this.searchSources(step.resultUrls ?? []),
+            borderTint: this.activeSourceEntry === this.sourceEntry(step) ?
+              $r('app.color.native_chat_field') : $r('app.color.native_chat_bg'),
+          })
         }
       }
       .padding(0).height(24)
-      .backgroundColor(this.activeSourceEntry === this.sourceEntry(step) ? $r('app.color.native_chat_selected') :
+      .backgroundColor(this.activeSourceEntry === this.sourceEntry(step) ? $r('app.color.native_chat_field') :
         Color.Transparent)
       .onClick((): void => { this.showSources(step, step.resultUrls ?? []); })
     } else {
@@ -246,7 +241,7 @@ export struct NativeToolTimelinePanel {
       .accessibilityText(page.status === 'failed' ? (page.title + ' ' + this.text('浏览失败', 'Read failed')) : page.title)
       .onClick((): void => {
         if (page.status !== 'failed' && page.url) {
-          void this.openLink(page.url);
+          this.openLink(page.url);
         }
       })
   }
@@ -318,6 +313,7 @@ export struct NativeToolTimelinePanel {
             locale: this.locale, citationSources: this.sources, citationHoverEnabled: this.citationHoverEnabled,
             hasCitations: true, loading: this.streaming && step.key === this.view.steps[this.view.steps.length - 1]?.key,
             onCitation: (index: number): void => { this.openCitation(index); },
+            onOpenLink: (target: string): void => { this.openLink(target); },
           })
         } else if (step.type === 'thinking' && this.currentTextStep(step, index).text) {
           NativeMarkdown({

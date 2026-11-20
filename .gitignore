@@ -47,6 +47,7 @@ harmony/entry/src/main/resources/rawfile/web/*
 !harmony/entry/src/main/resources/rawfile/web/.gitkeep
 harmony/entry/src/main/resources/rawfile/mermaid/mermaid.min.js
 harmony/entry/src/main/resources/rawfile/mermaid/MERMAID-LICENSE.txt
+harmony/entry/src/main/resources/rawfile/mermaid/yaml-title.js
 harmony/entry/src/main/resources/rawfile/math/katex.min.js
 harmony/entry/src/main/resources/rawfile/math/mhchem.min.js
 harmony/entry/src/main/resources/rawfile/math/fonts.js

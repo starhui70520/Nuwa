@@ -42,6 +42,8 @@ import {
   NativeChatCitation, NativeChatSource, NativeChatSources, nativeSearchResults, safeNativeSourceUrl,
 } from '../native/NativeChatSources';
 import { NativeSourcesPanel } from '../native/NativeSourcesPanel';
+import { NativeSourceThumbnails } from '../native/NativeSourceLogo';
+import { NativeLinkBrowser } from '../native/NativeLinkBrowser';
 import { NativeVoiceSpectrum } from '../native/NativeVoiceSpectrum';
 import { NativeToolTimeline, NativeToolTimelineStep, NativeToolTimelineView } from '../native/NativeToolTimeline';
 import { NativeToolTimelinePanel } from '../native/NativeToolTimelinePanel';
@@ -231,6 +233,8 @@ struct NativeChat {
   @State private shareImportVisible: boolean = false;
   @State private sourcePanelEntry: string = '';
   @State private panelSources: NativeChatSource[] = [];
+  @State private chatLinkUrl: string = '';
+  private chatLinkController = new webview.WebviewController();
   @State private appVersion: string = '';
   @State private checkingUpdate: boolean = false;
   @State private releaseNotes: NativeReleaseHistoryItem[] = [];
@@ -528,6 +532,10 @@ struct NativeChat {
 
   onBackPress(): boolean {
     if (this.signingOut) return true;
+    if (this.chatLinkUrl) {
+      this.backFromChatLink();
+      return true;
+    }
     if (this.deleteNotice) {
       if (!this.deleteNotice.busy) this.closeDeleteNotice();
     } else if (this.updateNotice) {
@@ -1922,7 +1930,7 @@ struct NativeChat {
 
   private canReceiveFileDrop(): boolean {
     return this.loaded && this.attachmentIntakeDraftId === null && this.canModifyHistory() &&
-      !this.settingsVisible && !this.authorizing && !this.imagePreview &&
+      !this.settingsVisible && !this.authorizing && !this.imagePreview && !this.chatLinkUrl &&
       !this.migrationPromptVisible && !this.migrationChoice && !this.shareImportVisible;
   }
 
@@ -2894,7 +2902,7 @@ struct NativeChat {
   private canPanDrawer(): boolean {
     return !this.wide() && this.authenticated() && !this.settingsVisible && !this.renamingId && !this.authorizing &&
       !this.imagePreview && !this.shareImportVisible && !this.sourcePanelEntry && !this.migrationPromptVisible &&
-      !this.migrationChoice && !this.deleteNotice && !this.updateNotice;
+      !this.migrationChoice && !this.deleteNotice && !this.updateNotice && !this.chatLinkUrl;
   }
 
   private startDrawerPan(event: GestureEvent): void {
@@ -3503,10 +3511,27 @@ struct NativeChat {
 
   private openCitation(sources: NativeChatSource[], index: number): void {
     const source = sources.find((item: NativeChatSource): boolean => item.index === index);
-    const target = safeNativeSourceUrl(source?.url);
-    if (target) {
-      void this.openLink(target);
+    if (source) this.openChatLink(source.url);
+  }
+
+  private openChatLink(value: string): void {
+    const target = safeNativeSourceUrl(value);
+    if (!target || this.chatLinkUrl) return;
+    this.getUIContext().getFocusController().clearFocus();
+    this.chatLinkController = new webview.WebviewController();
+    this.chatLinkUrl = target;
+  }
+
+  private backFromChatLink(): void {
+    try {
+      if (this.chatLinkController.accessBackward()) {
+        this.chatLinkController.backward();
+        return;
+      }
+    } catch {
+      // The browser is still attaching or is no longer available.
     }
+    this.chatLinkUrl = '';
   }
 
   @Builder
@@ -3514,15 +3539,18 @@ struct NativeChat {
     if (sources.length) {
       Button({ type: ButtonType.Capsule, buttonStyle: ButtonStyleMode.TEXTUAL }) {
         Row({ space: 6 }) {
-          Image($r('app.media.native_web_search')).width(14).height(14).colorFilter(nativeIconTint($r('app.color.native_chat_blue_text')))
+          NativeSourceThumbnails({
+            sources: sources, borderTint: this.sourcePanelEntry === entry ? $r('app.color.native_chat_field') :
+              $r('app.color.native_chat_bg'),
+          })
           Text(this.label(`${sources.length} 个网页`, sources.length === 1 ? '1 web page' : `${sources.length} web pages`))
-            .fontSize(this.appFontSize(13)).fontColor($r('app.color.native_chat_secondary'))
-          Image($r('app.media.native_chevron_right')).width(14).height(14).colorFilter(nativeIconTint($r('app.color.native_chat_secondary')))
+            .fontSize(this.appFontSize(13)).fontColor($r('app.color.native_chat_primary'))
         }
       }
-      .height(34).padding({ left: 12, right: 10 })
-      .backgroundColor(this.sourcePanelEntry === entry ? $r('app.color.native_chat_selected') :
-        $r('app.color.native_chat_field'))
+      .height(32).padding({ left: 5, right: 10 }).margin({ top: 16 })
+      .border({ width: 1, color: $r('app.color.native_chat_stroke') })
+      .backgroundColor(this.sourcePanelEntry === entry ? $r('app.color.native_chat_field') :
+        $r('app.color.native_chat_bg'))
       .onClick(() => { this.toggleSources(entry, sources); })
     }
   }
@@ -3551,6 +3579,7 @@ struct NativeChat {
         hasResponse: !!this.assistantResponseText(message()),
         messageId: message().id, activeSourceEntry: this.sourcePanelEntry, citationHoverEnabled: this.wide(),
         onSources: (entry: string, sources: NativeChatSource[]): void => { this.toggleSources(entry, sources); },
+        onOpenLink: (target: string): void => { this.openChatLink(target); },
       })
     } else if (message().reasoning) {
       Button({ type: ButtonType.Normal }) {
@@ -3587,6 +3616,7 @@ struct NativeChat {
         locale: this.settings.locale, theme: this.settings.theme,
         loading: message().status === 'pending' || message().status === 'streaming',
         onCitation: (index: number): void => { this.openCitation(message().sources ?? [], index); },
+        onOpenLink: (target: string): void => { this.openChatLink(target); },
       })
     }
   }
@@ -3650,7 +3680,8 @@ struct NativeChat {
         .height(34).accessibilityText(this.label('正在等待回复', "Waiting for reply"))
       } else if (!this.activeReplyMessage(message().id) && message().stopReason === 'refusal') {
         NativeMarkdown({ content: this.copyableReply(message()), fontScale: this.appFontScale(),
-          locale: this.settings.locale, theme: this.settings.theme })
+          locale: this.settings.locale, theme: this.settings.theme,
+          onOpenLink: (target: string): void => { this.openChatLink(target); } })
       } else {
         this.replyContent(() => this.activeReplyMessage(message().id) ?? message(), () => {
           const active = this.activeReplyMessage(message().id);
@@ -3671,7 +3702,8 @@ struct NativeChat {
     if (message.stopReason !== 'refusal') {
       if (message.status !== 'error' && this.archivedReplyTemplate(message)) {
         NativeMarkdown({ content: this.archivedReplyTemplate(message), fontScale: this.appFontScale(),
-          locale: this.settings.locale, theme: this.settings.theme })
+          locale: this.settings.locale, theme: this.settings.theme,
+          onOpenLink: (target: string): void => { this.openChatLink(target); } })
       }
       this.sourcesSummary(message.id + ':summary', nativeSearchResults(message.sources ?? []))
     }
@@ -5175,6 +5207,7 @@ struct NativeChat {
       sources: this.panelSources, title: this.label('搜索结果', 'Search results'), locale: this.settings.locale,
       fontScale: this.appFontScale(),
       onClose: () => { this.closeSources(); },
+      onOpenLink: (target: string): void => { this.openChatLink(target); },
     })
   }
 
@@ -5280,10 +5313,12 @@ struct NativeChat {
       .width('100%').height('100%').translate({ x: this.drawerProgress() * this.drawerWidth() })
       .scale({ x: 1 - this.drawerProgress() * 0.05, y: 1 - this.drawerProgress() * 0.05, centerX: '0%' })
       .borderRadius(this.drawerProgress() > 0 ? 24 : 0).clip(this.drawerProgress() > 0)
+      .accessibilityLevel(this.chatLinkUrl ? 'no-hide-descendants' : 'auto')
       NativeMathRendererHost()
       if (!this.wide() && this.sourcePanelEntry) {
         Column() { this.sourcesSheet() }
         .width('100%').height('100%').backgroundColor($r('app.color.native_chat_bg'))
+        .accessibilityLevel(this.chatLinkUrl ? 'no-hide-descendants' : 'auto')
       }
       if (this.authorizing) {
         this.authorizationPage()
@@ -5332,6 +5367,13 @@ struct NativeChat {
         } else {
           this.attachmentDragMask()
         }
+      }
+      if (this.chatLinkUrl) {
+        NativeLinkBrowser({
+          target: this.chatLinkUrl, controller: this.chatLinkController, locale: this.settings.locale,
+          onClose: () => { this.chatLinkUrl = ''; },
+          onOpenExternal: (target: string): void => { void this.openLink(target); },
+        })
       }
     }
     .width('100%').height('100%').backgroundColor($r('app.color.native_chat_sidebar')).clip(true)
