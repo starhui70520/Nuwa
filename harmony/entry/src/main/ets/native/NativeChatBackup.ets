@@ -2,6 +2,7 @@ import { common } from '@kit.AbilityKit';
 import { url, util } from '@kit.ArkTS';
 import { fileIo, fileUri, picker } from '@kit.CoreFileKit';
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
+import { writeNativeAvifPreview } from './NativeAvifPreview';
 import {
   attachmentMime, attachmentPurpose, attachmentRasterMime, attachmentUploadImageMime, fileAttachmentRasterMime,
   isArchiveRasterPreviewMime, NativeAttachment, NativeChatAttachments,
@@ -22,8 +23,8 @@ import {
   readBackupText, readBackupZipEntry, readBackupZipText, writeBackupJson, writeBackupZip,
 } from './NativeBackupZip';
 import {
-  backupImageIds, backupImagePath, copyBackupFile, removeBackupImage, stageBackupBlob, stageBackupImage, withBackupInput,
-  writeBackupFile,
+  backupAvifPreviewPath, backupImageIds, backupImagePath, copyBackupFile, removeBackupImage, stageBackupBlob,
+  stageBackupImage, withBackupInput, writeBackupFile,
 } from './NativeBackupFiles';
 
 const MANIFEST = 'manifest.json';
@@ -126,6 +127,12 @@ interface ArchiveImage {
   size?: number;
   crc?: number;
   mimeType?: string;
+  softwareAvifPreview?: boolean;
+}
+
+interface ArchivePreviewInfo {
+  mimeType: string;
+  softwareAvifPreview?: boolean;
 }
 
 interface BackupImageSource {
@@ -717,9 +724,15 @@ export function importedAttachmentPreview(session: NativeConversation, item: Nat
     return '';
   }
   try {
-    if (context && image.blobId && image.size !== undefined && image.size > 0 &&
-      isArchiveRasterPreviewMime(image.mimeType ?? '')) {
-      return fileUri.getUriFromPath(backupImagePath(context, image.blobId));
+    if (context && image.blobId && image.size !== undefined && image.size > 0) {
+      if (isArchiveRasterPreviewMime(image.mimeType ?? '')) {
+        return fileUri.getUriFromPath(backupImagePath(context, image.blobId));
+      }
+      const preview = backupAvifPreviewPath(context, image.blobId);
+      if (fileIo.accessSync(preview)) {
+        const stat = fileIo.statSync(preview);
+        if (stat.isFile() && stat.size > 0) return fileUri.getUriFromPath(preview);
+      }
     }
     if (image.bytes && image.bytes.length <= Math.ceil(MAX_PREVIEW_BYTES / 3) * 4) {
       const bytes = base64.decodeSync(image.bytes);
@@ -744,9 +757,13 @@ export function importedAttachmentOriginalUri(context: common.UIAbilityContext, 
   }
 }
 
-async function fileBackedPreviewMime(path: string): Promise<string> {
-  return withBackupInput<string>(path, async (file: NativeBackupZipInput): Promise<string> =>
-    fileAttachmentRasterMime(path, await file.read(0, Math.min(file.size, 64 * 1024))));
+async function fileBackedPreviewInfo(path: string): Promise<ArchivePreviewInfo> {
+  return withBackupInput<ArchivePreviewInfo>(path, async (file: NativeBackupZipInput): Promise<ArchivePreviewInfo> => {
+    const header = await file.read(0, Math.min(file.size, 64 * 1024));
+    const mimeType = await fileAttachmentRasterMime(path, header);
+    const softwareAvifPreview = !mimeType && attachmentUploadImageMime(header) === 'image/avif';
+    return { mimeType: mimeType, softwareAvifPreview: softwareAvifPreview || undefined };
+  });
 }
 
 export async function resolveImportedAttachmentPreview(context: common.UIAbilityContext, session: NativeConversation,
@@ -755,7 +772,11 @@ export async function resolveImportedAttachmentPreview(context: common.UIAbility
   if (!retained?.blobId || !retained.size) return '';
   try {
     const path = backupImagePath(context, retained.blobId);
-    return await fileBackedPreviewMime(path) ? fileUri.getUriFromPath(path) : '';
+    const info = await fileBackedPreviewInfo(path);
+    if (info.mimeType) return fileUri.getUriFromPath(path);
+    if (!info.softwareAvifPreview) return '';
+    const preview = backupAvifPreviewPath(context, retained.blobId);
+    return await writeNativeAvifPreview(path, preview) ? fileUri.getUriFromPath(preview) : '';
   } catch {
     return '';
   }
@@ -891,7 +912,7 @@ function nativeSession(source: ArchiveSession, archiveSize: number): PreparedSes
 
 function addImageAlias(prepared: PreparedSession, image: ArchiveImage, path: string): void {
   prepared.origin.images.push({ path: path, blobId: image.blobId, bytes: image.bytes, size: image.size,
-    crc: image.crc, mimeType: image.mimeType });
+    crc: image.crc, mimeType: image.mimeType, softwareAvifPreview: image.softwareAvifPreview });
 }
 
 function restorePreparedImages(prepared: PreparedSession, images: Map<string, ArchiveImage>): void {
@@ -992,8 +1013,9 @@ async function readChatBackup(input: NativeBackupZipInput, context?: common.UIAb
       if (context) {
         const id = await stageBackupImage(context, entry);
         staged.push(id);
-        const mimeType = await fileBackedPreviewMime(backupImagePath(context, id));
-        loadedImages.set(imageId, { path: path, blobId: id, size: entry.size, crc: entry.crc, mimeType: mimeType });
+        const preview = await fileBackedPreviewInfo(backupImagePath(context, id));
+        loadedImages.set(imageId, { path: path, blobId: id, size: entry.size, crc: entry.crc,
+          mimeType: preview.mimeType, softwareAvifPreview: preview.softwareAvifPreview });
       } else {
         inlineBytes += entry.size;
         if (inlineBytes > MAX_INLINE_IMAGE_BYTES) {
@@ -1480,12 +1502,19 @@ export async function commitChatBackup(context: common.UIAbilityContext, history
   }
   const unused = new Set<string>();
   const retained = new Set<string>();
+  const avifPreviews = new Set<string>();
   for (const session of imported) {
     const destination = session.archiveJson && acceptedArchives.has(session.archiveJson) ? retained : unused;
-    for (const id of backupImageIds(session.archiveJson)) destination.add(id);
+    for (const id of backupImageIds(session.archiveJson, destination === retained ? avifPreviews : undefined)) {
+      destination.add(id);
+    }
   }
   for (const id of unused) {
     if (!retained.has(id)) await removeBackupImage(context, id);
+  }
+  // Save history and originals before spending space on optional PNG previews.
+  for (const id of avifPreviews) {
+    await writeNativeAvifPreview(backupImagePath(context, id), backupAvifPreviewPath(context, id));
   }
   return merged;
 }

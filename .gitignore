@@ -40,6 +40,7 @@ Thumbs.db
 
 # HarmonyOS build & dependencies
 harmony/.hvigor/
+harmony/**/.cxx/
 harmony/**/build/
 harmony/oh_modules/
 harmony/**/oh_modules/

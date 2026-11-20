@@ -7,11 +7,13 @@ import { ensureNativeDirectory } from './NativeFileSystem';
 
 const IO_CHUNK = 256 * 1024;
 const IMAGE_DIRECTORY = 'nuwa-history-images';
+const AVIF_PREVIEW_SUFFIX = '.avif-preview.png';
 const PRUNE_AFTER_MS = 24 * 60 * 60 * 1_000;
 const FILE_SYSTEM_FULL = 13900025;
 
 interface RetainedImage {
   blobId?: string;
+  softwareAvifPreview?: boolean;
 }
 
 interface RetainedArchive {
@@ -52,6 +54,10 @@ export function backupImagePath(context: common.UIAbilityContext, id: string): s
     throw new Error('备份中的图片原件标识无效。');
   }
   return imageDirectory(context) + '/' + id;
+}
+
+export function backupAvifPreviewPath(context: common.UIAbilityContext, id: string): string {
+  return backupImagePath(context, id) + AVIF_PREVIEW_SUFFIX;
 }
 
 async function readExactly(fd: number, offset: number, length: number): Promise<Uint8Array> {
@@ -148,9 +154,10 @@ export async function stageBackupBlob(context: common.UIAbilityContext, size: nu
 
 export async function removeBackupImage(context: common.UIAbilityContext, id: string): Promise<void> {
   await fileIo.unlink(backupImagePath(context, id)).catch(() => {});
+  await fileIo.unlink(backupAvifPreviewPath(context, id)).catch(() => {});
 }
 
-export function backupImageIds(archiveJson?: string): string[] {
+export function backupImageIds(archiveJson?: string, softwareAvifPreviews?: Set<string>): string[] {
   if (!archiveJson || !archiveJson.includes('"blobId":')) {
     return [];
   }
@@ -168,6 +175,7 @@ export function backupImageIds(archiveJson?: string): string[] {
     for (const image of archive.images) {
       if (typeof image?.blobId === 'string' && validBlobId(image.blobId)) {
         ids.push(image.blobId);
+        if (image.softwareAvifPreview === true) softwareAvifPreviews?.add(image.blobId);
       }
     }
   }
@@ -175,15 +183,23 @@ export function backupImageIds(archiveJson?: string): string[] {
 }
 
 export async function pruneBackupImages(context: common.UIAbilityContext, retained: Set<string>): Promise<void> {
-  const paths = await fileIo.listFile(imageDirectory(context)).catch((): string[] => []);
+  const directory = imageDirectory(context);
+  const names = await fileIo.listFile(directory).catch((): string[] => []);
   const cutoff = Date.now() - PRUNE_AFTER_MS;
-  for (const id of paths) {
-    if (!validBlobId(id) || retained.has(id)) {
+  for (const name of names) {
+    const id = name.split('.')[0];
+    if (!validBlobId(id)) continue;
+    const suffix = name.slice(id.length);
+    const temporary = suffix.startsWith(AVIF_PREVIEW_SUFFIX + '.') && suffix.endsWith('.tmp') &&
+      validBlobId(suffix.slice(AVIF_PREVIEW_SUFFIX.length + 1, -4));
+    if ((!temporary && retained.has(id)) || (suffix && suffix !== AVIF_PREVIEW_SUFFIX && !temporary)) {
       continue;
     }
-    const stat = await fileIo.stat(backupImagePath(context, id)).catch((): fileIo.Stat | undefined => undefined);
+    const path = directory + '/' + name;
+    const stat = await fileIo.stat(path).catch((): fileIo.Stat | undefined => undefined);
     if (stat && stat.mtime * 1_000 < cutoff) {
-      await removeBackupImage(context, id);
+      if (suffix) await fileIo.unlink(path).catch(() => {});
+      else await removeBackupImage(context, id);
     }
   }
 }
