@@ -2628,9 +2628,6 @@ struct NativeChat {
         if (!this.deletingSessions) {
           void this.save(context);
         }
-        if (!error && !reply.stopped && !this.settings.ttsMuted && this.history.activeId === current.id) {
-          this.readMessage(message);
-        }
       }
       this.replies = this.replies.filter((item: NativeReply): boolean => item.sessionId !== reply.sessionId);
       if (!this.replies.length) this.cancelStreamCheckpoint();
