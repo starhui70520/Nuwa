@@ -5,7 +5,7 @@ import {
   NativeDocumentCard, NATIVE_DOCUMENT_CARD_HEIGHT, NATIVE_DOCUMENT_CARD_WIDTH,
 } from '../native/NativeDocumentCard';
 import { common, ConfigurationConstant, wantConstant } from '@kit.AbilityKit';
-import { KeyboardAvoidMode, LengthMetrics } from '@kit.ArkUI';
+import { FrameCallback, KeyboardAvoidMode, LengthMetrics } from '@kit.ArkUI';
 import { KeyCode } from '@kit.InputKit';
 import { inputMethod } from '@kit.IMEKit';
 import { url, util } from '@kit.ArkTS';
@@ -148,6 +148,19 @@ const HISTORY_SAVE_RETRY_DELAYS = [1000, 2500];
 const STREAM_CHECKPOINT_MS = 1500;
 const USER_BUBBLE_HORIZONTAL_PADDING = 16;
 
+class ComposerCaretCallback extends FrameCallback {
+  private readonly restore: () => void;
+
+  constructor(restore: () => void) {
+    super();
+    this.restore = restore;
+  }
+
+  onIdle(_timeLeftInNano: number): void {
+    this.restore();
+  }
+}
+
 @Component
 struct NativeAssistantMessageRow {
   @ObjectLink row: NativeMessageRow;
@@ -286,6 +299,7 @@ struct NativeChat {
   private readonly messageEditor = new TextAreaController();
   private readonly composerEditor = new TextAreaController();
   private composerSelection: TextRange = {};
+  private composerFocused: boolean = false;
   @State private replies: NativeReply[] = [];
   private readonly stoppedUploadReplies = new Map<NativeChatClient, NativeReply>();
   @State private recognitionId: string = '';
@@ -1810,13 +1824,14 @@ struct NativeChat {
     const id = this.history.activeId;
     this.updateDraftText(updated);
     this.composerSelection = { start: cursor, end: cursor };
-    setTimeout(() => {
+    const context = this.getUIContext();
+    context.postFrameCallback(new ComposerCaretCallback(() => {
       if (this.history.activeId !== id || this.draft !== updated) return;
       if (restoreFocus && this.visible && !this.drawerOpen && !this.settingsVisible && !this.backupBusy) {
-        this.getUIContext().getFocusController().requestFocus('nuwa-composer');
+        context.getFocusController().requestFocus('nuwa-composer');
       }
       this.composerEditor.caretPosition(cursor);
-    }, 0);
+    }));
   }
 
   private scheduleDraftSave(immediate: boolean = false): void {
@@ -2814,6 +2829,8 @@ struct NativeChat {
     if (this.recognitionId) {
       this.recognition.finish(this.recognitionId);
     } else if (this.canModifyHistory()) {
+      // Clearing focus collapses the ArkUI selection. Keep the range for dictation.
+      this.composerFocused = false;
       this.getUIContext().getFocusController().clearFocus();
       this.recognitionId = util.generateRandomUUID(true);
       this.voiceInputPhase = 'starting';
@@ -3400,8 +3417,14 @@ struct NativeChat {
             event.getModifierKeyState?.(['Shift'])) return false;
           return this.pasteComposerAttachments(this.composerSelection);
         })
-        .onTextSelectionChange((start: number, end: number) => { this.composerSelection = { start, end }; })
-        .onFocus(() => { this.compactToolsOpen = false; })
+        .onFocus(() => {
+          this.composerFocused = true;
+          this.compactToolsOpen = false;
+        })
+        .onBlur(() => { this.composerFocused = false; })
+        .onTextSelectionChange((start: number, end: number) => {
+          if (this.composerFocused) this.composerSelection = { start, end };
+        })
         .onChange((value: string) => { this.updateDraftText(value); })
       if (!this.wide() && this.voiceInputPhase === 'recording') {
         Column() {

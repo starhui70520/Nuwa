@@ -243,8 +243,8 @@ export class HarmonySpeechRecognition {
         if (!this.currentDevice(session, engine, id)) return;
         if (errorCode === DEVICE_AUDIO_TOO_LONG) {
           if (session.deviceLong && session.started && !session.finishing) {
-            this.emit(id, 'limit');
-            this.emit(id, 'transcribing');
+            this.emit(session.id, 'limit');
+            this.emit(session.id, 'transcribing');
           }
           this.finishDeviceSegment(session, engine);
         } else {
