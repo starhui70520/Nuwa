@@ -62,8 +62,8 @@ import {
 } from '../native/NativeLocation';
 import { NativeSettings, NativeSettingsController, NATIVE_CHAT_FONT_SIZES } from '../native/NativeSettings';
 import {
-  createSidebarRows, filterSidebarGroups, NativeSidebarRow, NativeSidebarSearch, NativeSidebarSession,
-  normalizeSidebarQuery, SIDEBAR_HISTORY_PAGE_SIZE,
+  createSidebarRows, createSidebarSections, filterSidebarGroups, NativeSidebarRow, NativeSidebarSearch,
+  NativeSidebarSection, NativeSidebarSession, normalizeSidebarQuery, SIDEBAR_HISTORY_PAGE_SIZE, visibleSidebarRowIndex,
 } from '../native/NativeSidebarHistory';
 import { fetchNativeProviderBalance } from '../native/NativeProviderBalance';
 import {
@@ -141,6 +141,7 @@ struct NativeChat {
   @State private drawerDrag: number = 0;
   @State private searchText: string = '';
   @State private sidebarRows: NativeSidebarRow[] = [];
+  @State private sidebarSections: NativeSidebarSection[] = [];
   @State private selectedIds: string[] = [];
   @State private selecting: boolean = false;
   @State private settingsVisible: boolean = false;
@@ -242,6 +243,7 @@ struct NativeChat {
   private sidebarQuery: string = '';
   private sidebarLimit: number = SIDEBAR_HISTORY_PAGE_SIZE;
   private sidebarResultCount: number = 0;
+  private sidebarDateTimer: number = -1;
   private readonly messageList = new NativeMessageList();
   private messagePath: NativeConversationMessage[] = [];
   private visibleSession?: NativeConversation;
@@ -281,7 +283,7 @@ struct NativeChat {
     if (state === 'done') {
       const result = text?.trim() ?? '';
       if (result) {
-        this.insertComposerText(result, this.composerSelection);
+        this.insertComposerText(result, this.composerSelection, true);
       } else {
         this.toast(this.label('未识别到语音内容', 'No speech detected'));
       }
@@ -314,6 +316,7 @@ struct NativeChat {
   onPageShow(): void {
     this.visible = true;
     this.refreshSidebarHistory();
+    this.scheduleSidebarDateRefresh();
     if (this.replies.length) this.replies = Array.from(this.replies);
     if (this.loaded) {
       void this.refreshBalance();
@@ -336,6 +339,8 @@ struct NativeChat {
     this.clearUploadQuota();
     this.sidebarSearch.cancel();
     this.visible = false;
+    clearTimeout(this.sidebarDateTimer);
+    this.sidebarDateTimer = -1;
     this.cancelHistorySaveRetry();
     if ((this.replies.length || this.hasPendingHistorySave()) && !this.backupBusy && !this.migrationInProgress) {
       void this.save();
@@ -1099,6 +1104,19 @@ struct NativeChat {
     this.scheduleSidebarSearch();
   }
 
+  private scheduleSidebarDateRefresh(): void {
+    clearTimeout(this.sidebarDateTimer);
+    const now = Date.now();
+    const midnight = new Date(now).setHours(24, 0, 0, 0);
+    this.sidebarDateTimer = setTimeout(() => {
+      this.sidebarDateTimer = -1;
+      if (!this.visible) return;
+      this.sidebarGroups = groupConversations(this.history.sessions);
+      this.refreshSidebarResults();
+      this.scheduleSidebarDateRefresh();
+    }, midnight - now);
+  }
+
   private changeSidebarQuery(value: string): void {
     this.searchText = value;
     const query = normalizeSidebarQuery(value);
@@ -1128,6 +1146,11 @@ struct NativeChat {
 
   private updateSidebarRows(): void {
     this.sidebarRows = createSidebarRows(this.filteredSidebarGroups, this.sidebarLimit);
+    this.sidebarSections = createSidebarSections(this.sidebarRows);
+  }
+
+  private sidebarSectionRows(key: string): NativeSidebarRow[] {
+    return this.sidebarSections.find((section: NativeSidebarSection): boolean => section.key === key)?.rows ?? [];
   }
 
   private resetSidebarWindow(): void {
@@ -1287,7 +1310,7 @@ struct NativeChat {
     this.scheduleDraftSave();
   }
 
-  private insertComposerText(text: string, selection: TextRange): void {
+  private insertComposerText(text: string, selection: TextRange, restoreFocus: boolean = false): void {
     const original = this.draft;
     const limit = original.length;
     const start = Math.max(0, Math.min(selection.start ?? limit, limit));
@@ -1298,7 +1321,11 @@ struct NativeChat {
     this.updateDraftText(updated);
     this.composerSelection = { start: cursor, end: cursor };
     setTimeout(() => {
-      if (this.history.activeId === id && this.draft === updated) this.composerEditor.caretPosition(cursor);
+      if (this.history.activeId !== id || this.draft !== updated) return;
+      if (restoreFocus && this.visible && !this.drawerOpen && !this.settingsVisible && !this.backupBusy) {
+        this.getUIContext().getFocusController().requestFocus('nuwa-composer');
+      }
+      this.composerEditor.caretPosition(cursor);
     }, 0);
   }
 
@@ -2287,6 +2314,24 @@ struct NativeChat {
     return this.viewportWidth >= 768;
   }
 
+  private composerFontScale(): number {
+    return this.settings.chatFontSize / 16;
+  }
+
+  private composerFieldMinHeight(inline: boolean): number {
+    if (inline) return 10 + 16.25 * this.composerFontScale();
+    return 12 + (this.viewportWidth < 440 ? 30 : 48) * this.composerFontScale();
+  }
+
+  private composerFieldMaxHeight(inline: boolean): number {
+    if (inline) return 54;
+    if (this.wide()) return 336;
+    // Reserve the tool row and attachment strip inside the keyboard-resized composer.
+    const controlsHeight = 58 + (this.draftFiles.length ? 76 : 0);
+    return Math.max(this.composerFieldMinHeight(false),
+      Math.min(336, Math.max(120, this.viewportHeight - 120) - controlsHeight));
+  }
+
   private desktopSourcesWidth(): number {
     return Math.min(390, this.viewportWidth / 2 - 64);
   }
@@ -2296,9 +2341,9 @@ struct NativeChat {
     const ui = this.getUIContext();
     const measure = ui.getMeasureUtils();
     const thinkingWidth = measure.measureText({ textContent: this.label('深度思考', 'DeepThink'),
-      fontSize: 13, fontWeight: FontWeight.Medium });
+      fontSize: 13 * this.composerFontScale(), fontWeight: FontWeight.Medium });
     const searchWidth = measure.measureText({ textContent: this.label('智能搜索', 'Search'),
-      fontSize: 13, fontWeight: FontWeight.Medium });
+      fontSize: 13 * this.composerFontScale(), fontWeight: FontWeight.Medium });
     const controlsWidth = 2 * (14 + 5 + 22 + 2) + 10;
     return ui.px2vp(thinkingWidth + searchWidth) + controlsWidth <= this.composerToggleWidth;
   }
@@ -2408,12 +2453,13 @@ struct NativeChat {
         Image(icon).width(14).height(14).colorFilter(nativeIconTint(active() ? $r('app.color.native_chat_blue_text') :
           $r('app.color.native_chat_primary'))).draggable(false)
         if (this.composerToggleLabelsFit()) {
-          Text(label()).fontSize(13).fontWeight(FontWeight.Medium).fontColor(active() ?
+          Text(label()).fontSize(13 * this.composerFontScale()).fontWeight(FontWeight.Medium).fontColor(active() ?
             $r('app.color.native_chat_blue_text') : $r('app.color.native_chat_primary'))
         }
       }
     }
-    .height(34).padding({ left: 11, right: 11 }).backgroundColor(active() ? $r('app.color.native_chat_selected') : Color.Transparent)
+    .height(this.compact() ? 26 : 34).padding({ left: this.compact() ? 8 : 11, right: this.compact() ? 8 : 11 })
+    .backgroundColor(active() ? $r('app.color.native_chat_selected') : Color.Transparent)
     .border({ width: 1, color: active() ? Color.Transparent : $r('app.color.native_chat_stroke') })
     .accessibilityText(label()).accessibilitySelected(active()).onClick(change)
   }
@@ -2427,19 +2473,21 @@ struct NativeChat {
     Button({ type: ButtonType.Circle, buttonStyle: ButtonStyleMode.TEXTUAL }) {
       if (this.voiceInputPhase === 'recording') {
         Stack() {
-          Circle().width(26).height(26).fill($r('app.color.native_chat_blue')).opacity(0.2)
-          Circle().width(22).height(22).fill($r('app.color.native_chat_blue')).opacity(0.75)
+          Circle().width(this.compact() ? 22 : 26).height(this.compact() ? 22 : 26)
+            .fill($r('app.color.native_chat_blue')).opacity(0.2)
+          Circle().width(this.compact() ? 18 : 22).height(this.compact() ? 18 : 22)
+            .fill($r('app.color.native_chat_blue')).opacity(0.75)
           Image($r('app.media.native_mic_fill')).width(16).height(16).colorFilter(nativeIconTint(Color.White))
         }
-        .width(26).height(26)
+        .width(this.compact() ? 22 : 26).height(this.compact() ? 22 : 26)
       } else if (this.voiceInputPhase === 'transcribing' || this.voiceInputPhase === 'starting') {
-        LoadingProgress().width(18).height(18).color($r('app.color.native_chat_blue'))
+        LoadingProgress().width(14).height(14).color($r('app.color.native_chat_action'))
       } else {
         Image($r('app.media.native_voice')).width(22).height(22)
           .colorFilter(nativeIconTint($r('app.color.native_chat_primary'))).draggable(false)
       }
     }
-    .width(34).height(34).padding(0)
+    .width(this.compact() ? 26 : 34).height(this.compact() ? 26 : 34).padding(0)
     .accessibilityText(this.voiceInputPhase === 'recording' ? this.label('结束录音并转写', 'Stop recording and transcribe') :
       this.voiceInputPhase === 'transcribing' ? this.label('正在转写，点击取消', 'Transcribing. Click to cancel') :
       this.voiceInputPhase === 'starting' ? this.label('正在准备录音，点击取消', 'Preparing to record. Click to cancel') :
@@ -2656,10 +2704,11 @@ struct NativeChat {
     Stack({ alignContent: Alignment.Center }) {
       TextArea({ text: this.draft, placeholder: this.label('发消息或语音输入', 'Message or voice input'),
         controller: this.composerEditor })
-        .width('100%').constraintSize({ minHeight: inline || this.viewportWidth < 440 ? 42 : 60,
-          maxHeight: inline ? 110 : 336 })
-        .padding({ top: inline ? 10 : 12, bottom: 0, left: inline ? 4 : 16, right: inline ? 4 : 12 })
-        .borderRadius(0).fontSize(inline ? 14 : 16).lineHeight(inline ? 20 : 24)
+        .width('100%').constraintSize({ minHeight: this.composerFieldMinHeight(inline),
+          maxHeight: this.composerFieldMaxHeight(inline) })
+        .padding({ top: inline ? 5 : 12, bottom: inline ? 5 : 0, left: inline ? 4 : 16, right: inline ? 4 : 12 })
+        .borderRadius(0).fontSize((inline ? 11.375 : 16) * this.composerFontScale())
+        .lineHeight((inline ? 16.25 : 24) * this.composerFontScale())
         .placeholderColor($r('app.color.native_chat_caption'))
         .fontColor($r('app.color.native_chat_primary')).caretColor($r('app.color.native_chat_blue_text'))
         .backgroundColor(Color.Transparent).enterKeyType(EnterKeyType.NEW_LINE)
@@ -2722,7 +2771,8 @@ struct NativeChat {
   private composerAction() {
     if (this.reply()) {
       this.iconButton($r('app.media.native_stop'), this.label('停止生成', 'Stop generating'),
-        () => { this.stopVoice(); this.cancelReply(); }, 34, 16, Color.White, $r('app.color.native_chat_blue'))
+        () => { this.stopVoice(); this.cancelReply(); }, this.compact() ? 28 : 34, 16,
+        Color.White, $r('app.color.native_chat_blue'))
     } else if (this.canSendDraft()) {
       this.composerSendButton()
     } else {
@@ -2733,7 +2783,7 @@ struct NativeChat {
   @Builder
   private composerSendButton() {
     this.iconButton($r('app.media.native_send'), this.label('发送', 'Send'), () => { this.sendDraft(); },
-      34, 16, Color.White, $r('app.color.native_chat_blue'), () => this.loaded && this.canSendDraft())
+      this.compact() ? 28 : 34, 16, Color.White, $r('app.color.native_chat_blue'), () => this.loaded && this.canSendDraft())
   }
 
   @Builder
@@ -2744,34 +2794,37 @@ struct NativeChat {
         this.iconButton($r('app.media.native_add'), this.label('上传附件', 'Upload attachment'), () => {
           this.compactToolsOpen = false;
           void this.acceptDraftFiles();
-        }, 34, 22)
+        }, 28, 22, $r('app.color.native_chat_primary'), Color.Transparent,
+        () => this.attachmentIntakeDraftId === null && !this.backupBusy)
       }
-      .width('100%').padding({ left: 8, right: 8, top: 8 })
+      .width('100%').padding({ left: 8, right: 8, top: 5, bottom: 4 })
+      .border({ width: { bottom: 1 }, color: $r('app.color.native_chat_stroke') })
     }
-    Row({ space: 4 }) {
+    Row() {
       Stack({ alignContent: Alignment.TopEnd }) {
         Button({ type: ButtonType.Circle, buttonStyle: ButtonStyleMode.TEXTUAL }) {
           Image($r('app.media.native_add')).width(22).height(22)
             .colorFilter(nativeIconTint($r('app.color.native_chat_primary')))
             .rotate({ angle: this.compactToolsOpen ? 45 : 0 })
         }
-        .width(34).height(34).padding(0).accessibilityText(this.label('对话工具', 'Chat tools'))
+        .width(28).height(28).padding(0).accessibilityText(this.label('对话工具', 'Chat tools'))
+        .accessibilitySelected(this.compactToolsOpen)
         .onClick(() => { this.compactToolsOpen = !this.compactToolsOpen; })
         if (!this.compactToolsOpen && (this.settings.search || this.settings.thinking)) {
           Circle().width(6).height(6).fill($r('app.color.native_chat_blue')).margin({ top: 3, right: 3 })
             .hitTestBehavior(HitTestMode.None)
         }
       }
-      .width(34).height(34)
+      .width(28).height(28).margin({ right: 4 })
       this.composerField(true)
       this.composerAction()
     }
-    .width('100%').padding({ left: 6, right: 7, bottom: 4 })
+    .width('100%').alignItems(VerticalAlign.Bottom).padding({ left: 5, right: 5, top: 3, bottom: 3 })
   }
 
   @Builder
   private composer() {
-    Column({ space: 2 }) {
+    Column({ space: this.compact() ? 0 : 2 }) {
       this.draftAttachmentStrip()
       if (this.compact()) {
         this.compactComposer()
@@ -2800,7 +2853,7 @@ struct NativeChat {
         .width('100%').padding({ left: 12, right: 12, top: 8, bottom: 12 })
       }
     }
-    .width('100%').borderRadius(24)
+    .width('100%').borderRadius(this.compact() ? 18 : 24)
     .border({ width: 1, color: this.history.activeId === null ? $r('app.color.native_chat_glass_stroke') :
       $r('app.color.native_chat_stroke') })
     .backgroundColor(this.history.activeId === null ? $r('app.color.native_chat_glass') : $r('app.color.native_chat_surface'))
@@ -4056,6 +4109,14 @@ struct NativeChat {
   }
 
   @Builder
+  private sidebarGroupHeader(key: string, label: string) {
+    Text(this.historyGroupLabel(key, label)).fontSize((this.compact() ? 9.75 : 12) * this.settings.chatFontSize / 16)
+      .lineHeight(18).fontWeight(FontWeight.Medium).width('100%')
+      .fontColor($r('app.color.native_chat_action')).backgroundColor($r('app.color.native_chat_sidebar'))
+      .padding({ top: 2, right: 10, bottom: 2, left: 10 })
+  }
+
+  @Builder
   private drawer(desktop: boolean = false) {
     Column() {
       if (desktop && !this.selecting) {
@@ -4116,20 +4177,23 @@ struct NativeChat {
             Text(this.label('未找到匹配的对话', "No matching chats")).fontSize(14).fontColor($r('app.color.native_chat_secondary')).padding(14)
           }
         }
-        ForEach(this.sidebarRows, (row: NativeSidebarRow) => {
-          ListItem() {
-            if (row.session) {
-              this.drawerItem(row.session)
-            } else {
-              Text(this.historyGroupLabel(row.groupKey, row.groupLabel)).fontSize(13).width('100%')
-                .fontColor($r('app.color.native_chat_secondary'))
-                .padding({ top: 8, left: 10, bottom: 3 })
-            }
+        ForEach(this.sidebarSections, (section: NativeSidebarSection) => {
+          ListItemGroup({ header: this.sidebarGroupHeader(section.key, section.label), space: 2 }) {
+            ForEach(this.sidebarSectionRows(section.key), (row: NativeSidebarRow) => {
+              ListItem() {
+                if (row.session) {
+                  this.drawerItem(row.session)
+                }
+              }
+            }, (row: NativeSidebarRow): string => row.key)
           }
-        }, (row: NativeSidebarRow): string => row.key)
+        }, (section: NativeSidebarSection): string => section.key)
       }
       .layoutWeight(1).width('100%').padding({ top: 8 }).scrollBar(BarState.Off)
-      .onScrollIndex((_first: number, last: number) => { this.maybeLoadSidebarPage(last); })
+      .sticky(StickyStyle.Header)
+      .onScrollVisibleContentChange((_first: VisibleListContentInfo, last: VisibleListContentInfo) => {
+        this.maybeLoadSidebarPage(visibleSidebarRowIndex(this.sidebarSections, last.index, last.itemIndexInGroup));
+      })
       if (this.selecting) {
         Row() {
           Button(this.allPinned() ? this.label('取消置顶', "Unpin") : this.label('置顶', "Pin"), { buttonStyle: ButtonStyleMode.TEXTUAL })

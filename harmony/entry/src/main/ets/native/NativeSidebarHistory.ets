@@ -18,6 +18,13 @@ export interface NativeSidebarRow {
   session?: NativeSidebarSession;
 }
 
+export interface NativeSidebarSection {
+  key: string;
+  label: string;
+  headerIndex: number;
+  rows: NativeSidebarRow[];
+}
+
 export function normalizeSidebarQuery(value: string): string {
   return value.trim().toLowerCase();
 }
@@ -63,6 +70,27 @@ export function createSidebarRows(groups: NativeConversationGroup[], limit: numb
     }
   }
   return rows;
+}
+
+export function createSidebarSections(rows: NativeSidebarRow[]): NativeSidebarSection[] {
+  const sections: NativeSidebarSection[] = [];
+  let section: NativeSidebarSection | undefined;
+  rows.forEach((row: NativeSidebarRow, index: number): void => {
+    if (row.session) {
+      section?.rows.push(row);
+    } else {
+      section = { key: row.groupKey, label: row.groupLabel, headerIndex: index, rows: [] };
+      sections.push(section);
+    }
+  });
+  return sections;
+}
+
+export function visibleSidebarRowIndex(sections: NativeSidebarSection[], sectionIndex: number,
+  itemIndex: number = -1): number {
+  const section = sections[sectionIndex];
+  if (!section || itemIndex < -1 || itemIndex >= section.rows.length) return -1;
+  return section.headerIndex + 1 + itemIndex;
 }
 
 export class NativeSidebarSearch {
