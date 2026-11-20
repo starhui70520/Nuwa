@@ -1,6 +1,22 @@
 {
   "color": [
     {
+      "name": "native_settings_balance",
+      "value": "#85A5FF"
+    },
+    {
+      "name": "native_settings_balance_bg",
+      "value": "#2E4D6BFE"
+    },
+    {
+      "name": "native_settings_balance_low",
+      "value": "#F87171"
+    },
+    {
+      "name": "native_settings_balance_low_bg",
+      "value": "#29F87171"
+    },
+    {
       "name": "native_chat_bg",
       "value": "#151517"
     },

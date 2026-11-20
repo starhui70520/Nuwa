@@ -1,6 +1,22 @@
 {
   "color": [
     {
+      "name": "native_settings_balance",
+      "value": "#4D6BFE"
+    },
+    {
+      "name": "native_settings_balance_bg",
+      "value": "#1A4D6BFE"
+    },
+    {
+      "name": "native_settings_balance_low",
+      "value": "#DC2626"
+    },
+    {
+      "name": "native_settings_balance_low_bg",
+      "value": "#1ADC2626"
+    },
+    {
       "name": "start_window_background",
       "value": "#FFFFFF"
     },

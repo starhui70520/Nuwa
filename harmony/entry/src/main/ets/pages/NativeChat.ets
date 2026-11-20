@@ -2652,7 +2652,6 @@ struct NativeChat {
               this.messagePath[pathIndex]?.id === sibling.id);
         }
       }
-      this.stopVoice();
       void this.save();
     }
   }
@@ -4118,17 +4117,38 @@ struct NativeChat {
   }
 
   @Builder
-  private settingsRow(title: () => string, value: () => string, click: () => void, enabled: () => boolean = () => true) {
+  private settingsIcon(icon: Resource) {
+    Image(icon).width(20).height(20).colorFilter(nativeIconTint($r('app.color.native_chat_primary')))
+      .draggable(false).accessibilityLevel('no')
+  }
+
+  private lowBalance(): boolean {
+    return !!this.balance && (!this.balance.isAvailable || Number(this.balance.totalBalance) <= 0);
+  }
+
+  @Builder
+  private settingsRow(icon: Resource, title: () => string, value: () => string, click: () => void,
+    enabled: () => boolean = () => true, showsBalance: boolean = false) {
     Button({ type: ButtonType.Normal }) {
-      Row({ space: 10 }) {
+      Row({ space: 12 }) {
+        this.settingsIcon(icon)
         Text(title()).layoutWeight(1).fontSize(this.appFontSize(15)).fontColor($r('app.color.native_chat_primary'))
-        if (value()) {
-          Text(value()).fontSize(this.appFontSize(13)).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-            .constraintSize({ maxWidth: '45%' }).fontColor($r('app.color.native_chat_secondary'))
+        if (showsBalance && this.balance) {
+          Text(this.balance.formatted).fontSize(this.appFontSize(13)).fontWeight(FontWeight.Medium)
+            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).constraintSize({ maxWidth: '48%' })
+            .padding({ left: 8, right: 8, top: 2, bottom: 2 }).borderRadius(100)
+            .fontColor(this.lowBalance() ? $r('app.color.native_settings_balance_low') :
+              $r('app.color.native_settings_balance'))
+            .backgroundColor(this.lowBalance() ? $r('app.color.native_settings_balance_low_bg') :
+              $r('app.color.native_settings_balance_bg'))
+        } else if (value()) {
+          Text(value()).fontSize(this.appFontSize(14)).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+            .constraintSize({ maxWidth: '48%' }).fontColor($r('app.color.native_chat_secondary'))
         }
         Image($r('app.media.native_chevron_right')).width(14).height(14).colorFilter(nativeIconTint($r('app.color.native_chat_caption')))
+          .draggable(false).accessibilityLevel('no')
       }
-      .width('100%').constraintSize({ minHeight: 48 }).padding({ left: 15, right: 12, top: 6, bottom: 6 })
+      .width('100%').constraintSize({ minHeight: 50 }).padding({ left: 16, right: 16, top: 8, bottom: 8 })
     }
     .width('100%').padding(0).borderRadius(0).backgroundColor(Color.Transparent).enabled(enabled()).onClick(click)
   }
@@ -4157,7 +4177,8 @@ struct NativeChat {
   @Builder
   private locationRows() {
     Column({ space: 8 }) {
-      Row({ space: 8 }) {
+      Row({ space: 12 }) {
+        this.settingsIcon($r('app.media.native_settings_location'))
         Text(this.label('位置', 'Location')).layoutWeight(1).fontSize(this.appFontSize(15))
           .fontColor($r('app.color.native_chat_primary'))
         if (this.settings.location) {
@@ -4187,21 +4208,22 @@ struct NativeChat {
       Text(this.label('用于让回答参考你选择的位置。', 'Replies can use the location you select.'))
         .width('100%').fontSize(this.appFontSize(12)).fontColor($r('app.color.native_chat_secondary'))
     }
-    .width('100%').alignItems(HorizontalAlign.Start).padding({ top: 12, bottom: 12, left: 15, right: 12 })
+    .width('100%').alignItems(HorizontalAlign.Start).padding({ top: 12, bottom: 12, left: 16, right: 16 })
   }
 
   @Builder
   private settingsRoot() {
     this.settingsLabel(() => this.label('账户', 'Account'))
     Column() {
-      this.settingsRow(() => this.label('账号管理', 'Account management'), () =>
+      this.settingsRow($r('app.media.native_settings_account'), () => this.label('账号管理', 'Account management'), () =>
         this.accountToken() ? this.account?.label ?? this.label('DeepSeek API 账号', 'DeepSeek API account') : this.settings.model,
         () => { this.openSettings('account'); })
-      Divider().color($r('app.color.native_chat_stroke')).margin({ left: 14 })
-      this.settingsRow(() => this.label('API 余额', 'API balance'), () => this.balance?.formatted ?? this.label('前往充值', 'Top up'),
-        () => { void this.openLink('https://platform.deepseek.com/top_up'); })
-      Divider().color($r('app.color.native_chat_stroke')).margin({ left: 14 })
-      this.settingsRow(() => this.label('数据管理', 'Data management'),
+      Divider().color($r('app.color.native_chat_stroke'))
+      this.settingsRow($r('app.media.native_settings_wallet'), () => this.label('API 余额', 'API balance'),
+        () => this.label('前往充值', 'Top up'), () => { void this.openLink('https://platform.deepseek.com/top_up'); },
+        () => true, true)
+      Divider().color($r('app.color.native_chat_stroke'))
+      this.settingsRow($r('app.media.native_settings_data'), () => this.label('数据管理', 'Data management'),
         () => this.loaded ? this.label(`${this.history.sessions.length} 条对话`,
           this.history.sessions.length === 1 ? '1 chat' : `${this.history.sessions.length} chats`) : '',
         () => { this.settingsSection = 'data'; }, () => this.loaded)
@@ -4209,7 +4231,26 @@ struct NativeChat {
     .width('100%').borderRadius(16).clip(true).backgroundColor($r('app.color.native_chat_surface'))
     this.settingsLabel(() => this.label('应用', 'App'))
     Column() {
-      Row() {
+      Row({ space: 12 }) {
+        this.settingsIcon($r('app.media.native_settings_language'))
+        Text(this.label('语言', 'Language')).layoutWeight(1).fontSize(this.appFontSize(15)).fontColor($r('app.color.native_chat_primary'))
+        Select([{ value: '简体中文' }, { value: 'English' }])
+          .font({ size: this.appFontSize(14) })
+          .optionFont({ size: this.appFontSize(14) })
+          .selectedOptionFont({ size: this.appFontSize(14) })
+          .selected(this.settings.locale === 'en-US' ? 1 : 0)
+          .value(this.settings.locale === 'en-US' ? 'English' : '简体中文')
+          .accessibilityText(this.label('语言', 'Language'))
+          .onSelect((index: number) => {
+            this.settings.locale = index === 1 ? 'en-US' : 'zh-CN';
+            void this.refreshBalance(true);
+            void this.saveSettings('locale');
+          })
+      }
+      .width('100%').constraintSize({ minHeight: 50 }).padding({ left: 16, right: 16, top: 4, bottom: 4 })
+      Divider().color($r('app.color.native_chat_stroke'))
+      Row({ space: 12 }) {
+        this.settingsIcon($r('app.media.native_settings_theme'))
         Text(this.label('外观', "Theme")).layoutWeight(1).fontSize(this.appFontSize(15)).fontColor($r('app.color.native_chat_primary'))
         Select([{ value: this.label('系统', "System") }, { value: this.label('浅色', "Light") }, { value: this.label('深色', "Dark") }])
           .font({ size: this.appFontSize(14) })
@@ -4217,15 +4258,17 @@ struct NativeChat {
           .selectedOptionFont({ size: this.appFontSize(14) })
           .selected(this.settings.theme === 'dark' ? 2 : this.settings.theme === 'light' ? 1 : 0)
           .value(this.settings.theme === 'dark' ? this.label('深色', "Dark") : this.settings.theme === 'light' ? this.label('浅色', "Light") : this.label('系统', "System"))
+          .accessibilityText(this.label('外观', 'Theme'))
           .onSelect((index: number) => {
             this.settings.theme = index === 2 ? 'dark' : index === 1 ? 'light' : 'system';
             this.applyTheme();
             void this.saveSettings();
           })
       }
-      .width('100%').constraintSize({ minHeight: 48 }).padding({ left: 15, right: 12, top: 4, bottom: 4 })
-      Divider().color($r('app.color.native_chat_stroke')).margin({ left: 14 })
-      Row() {
+      .width('100%').constraintSize({ minHeight: 50 }).padding({ left: 16, right: 16, top: 4, bottom: 4 })
+      Divider().color($r('app.color.native_chat_stroke'))
+      Row({ space: 12 }) {
+        this.settingsIcon($r('app.media.native_settings_font_size'))
         Text(this.label('字体大小', "Font size")).layoutWeight(1).fontSize(this.appFontSize(15)).fontColor($r('app.color.native_chat_primary'))
         Select([{ value: '12px' }, { value: '14px' }, { value: this.label('16px（默认）', "16px (default)") },
           { value: '18px' }, { value: '20px' }, { value: '22px' }])
@@ -4234,29 +4277,14 @@ struct NativeChat {
           .selectedOptionFont({ size: this.appFontSize(14) })
           .selected(NATIVE_CHAT_FONT_SIZES.indexOf(this.settings.chatFontSize))
           .value(this.settings.chatFontSize === 16 ? this.label('16px（默认）', "16px (default)") : `${this.settings.chatFontSize}px`)
+          .accessibilityText(this.label('字体大小', 'Font size'))
           .onSelect((index: number) => {
             this.settings.chatFontSize = NATIVE_CHAT_FONT_SIZES[index] ?? 16;
             void this.saveSettings();
           })
       }
-      .width('100%').constraintSize({ minHeight: 48 }).padding({ left: 15, right: 12, top: 4, bottom: 4 })
-      Divider().color($r('app.color.native_chat_stroke')).margin({ left: 14 })
-      Row() {
-        Text(this.label('语言', 'Language')).layoutWeight(1).fontSize(this.appFontSize(15)).fontColor($r('app.color.native_chat_primary'))
-        Select([{ value: '简体中文' }, { value: 'English' }])
-          .font({ size: this.appFontSize(14) })
-          .optionFont({ size: this.appFontSize(14) })
-          .selectedOptionFont({ size: this.appFontSize(14) })
-          .selected(this.settings.locale === 'en-US' ? 1 : 0)
-          .value(this.settings.locale === 'en-US' ? 'English' : '简体中文')
-          .onSelect((index: number) => {
-            this.settings.locale = index === 1 ? 'en-US' : 'zh-CN';
-            void this.refreshBalance(true);
-            void this.saveSettings('locale');
-          })
-      }
-      .width('100%').constraintSize({ minHeight: 48 }).padding({ left: 15, right: 12, top: 4, bottom: 4 })
-      Divider().color($r('app.color.native_chat_stroke')).margin({ left: 14 })
+      .width('100%').constraintSize({ minHeight: 50 }).padding({ left: 16, right: 16, top: 4, bottom: 4 })
+      Divider().color($r('app.color.native_chat_stroke'))
       this.locationRows()
     }
     .width('100%').borderRadius(16).clip(true).backgroundColor($r('app.color.native_chat_surface'))
@@ -4276,36 +4304,42 @@ struct NativeChat {
     })
     this.settingsLabel(() => this.label('关于', 'About'))
     Column() {
-      Row() {
+      Row({ space: 12 }) {
+        this.settingsIcon($r('app.media.native_settings_info'))
         Text(this.label('当前版本', "Current version")).layoutWeight(1).fontSize(this.appFontSize(15)).fontColor($r('app.color.native_chat_primary'))
-        Text(this.appVersion).fontSize(this.appFontSize(13)).fontColor($r('app.color.native_chat_secondary'))
+        Text(this.appVersion).fontSize(this.appFontSize(14)).fontColor($r('app.color.native_chat_secondary'))
       }
-      .width('100%').constraintSize({ minHeight: 48 }).padding({ left: 15, right: 12, top: 4, bottom: 4 })
-      Divider().color($r('app.color.native_chat_stroke')).margin({ left: 14 })
-      this.settingsRow(() => this.checkingUpdate ? this.label('检查中...', 'Checking…') : this.label('检查更新', 'Check for updates'),
-        () => '', () => { void this.checkUpdate(); })
-      Divider().color($r('app.color.native_chat_stroke')).margin({ left: 14 })
-      this.settingsRow(() => this.label('隐私政策', 'Privacy policy'), () => '', () => {
+      .width('100%').constraintSize({ minHeight: 50 }).padding({ left: 16, right: 16, top: 4, bottom: 4 })
+      Divider().color($r('app.color.native_chat_stroke'))
+      this.settingsRow($r('app.media.native_settings_download'),
+        () => this.checkingUpdate ? this.label('检查中...', 'Checking…') : this.label('检查更新', 'Check for updates'),
+        () => '', () => { void this.checkUpdate(); }, () => !this.checkingUpdate)
+      Divider().color($r('app.color.native_chat_stroke'))
+      this.settingsRow($r('app.media.native_settings_document'), () => this.label('更新日志', 'Release notes'), () => '',
+        () => { this.settingsSection = 'notes'; void this.loadReleaseNotes(); })
+      Divider().color($r('app.color.native_chat_stroke'))
+      this.settingsRow($r('app.media.native_settings_info'),
+        () => this.label('问题反馈与日志上报', 'Feedback & Diagnostics'), () => '', () => { this.settingsSection = 'feedback'; })
+      Divider().color($r('app.color.native_chat_stroke'))
+      this.settingsRow($r('app.media.native_settings_document'), () => this.label('隐私政策', 'Privacy policy'), () => '', () => {
         void openNuwaPrivacyPolicy(this.host()).catch(() => {
           this.toast(this.label('无法打开隐私政策', 'Unable to open the privacy policy'));
         });
       })
-      Divider().color($r('app.color.native_chat_stroke')).margin({ left: 14 })
-      this.settingsRow(() => this.label('更新日志', 'Release notes'), () => '',
-        () => { this.settingsSection = 'notes'; void this.loadReleaseNotes(); })
-      Divider().color($r('app.color.native_chat_stroke')).margin({ left: 14 })
-      this.settingsRow(() => this.label('问题反馈与日志上报', 'Feedback & Diagnostics'), () => '',
-        () => { this.settingsSection = 'feedback'; })
-      Divider().color($r('app.color.native_chat_stroke')).margin({ left: 14 })
-      this.settingsRow(() => this.label('API 文档与帮助', 'API Docs & Help'), () => '',
+      Divider().color($r('app.color.native_chat_stroke'))
+      this.settingsRow($r('app.media.native_settings_document'), () => this.label('API 文档与帮助', 'API Docs & Help'), () => '',
         () => { void this.openLink(DEEPSEEK_DOCS_URL); })
     }
     .width('100%').borderRadius(16).clip(true).backgroundColor($r('app.color.native_chat_surface'))
     Button({ type: ButtonType.Normal }) {
-      Text(this.label('退出登录', 'Sign Out')).width('100%').textAlign(TextAlign.Start)
-        .fontSize(this.appFontSize(15)).fontColor($r('app.color.native_chat_primary')).padding({ left: 15, right: 12 })
+      Row({ space: 12 }) {
+        this.settingsIcon($r('app.media.native_settings_sign_out'))
+        Text(this.label('退出登录', 'Sign Out')).layoutWeight(1).textAlign(TextAlign.Start)
+          .fontSize(this.appFontSize(15)).fontColor($r('app.color.native_chat_primary'))
+      }
+      .width('100%').constraintSize({ minHeight: 50 }).padding({ left: 16, right: 16, top: 8, bottom: 8 })
     }
-    .width('100%').height(48).borderRadius(16).padding(0).backgroundColor($r('app.color.native_chat_surface'))
+    .width('100%').borderRadius(16).padding(0).backgroundColor($r('app.color.native_chat_surface'))
     .enabled(!this.signingOut).onClick(() => { void this.signOutAll(); })
   }
 
