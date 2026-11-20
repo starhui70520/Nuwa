@@ -72,7 +72,7 @@ import {
   createNativeLatestReminder, defaultNativeLocale, nativeCityOptions, NativeLocationOption,
   nativeProvinceOptions, nativeRegionOptions, NativeUserLocation, usesChineseLocationPicker,
 } from '../native/NativeLocation';
-import { NativeSettings, NativeSettingsController, NATIVE_CHAT_FONT_SIZES } from '../native/NativeSettings';
+import { NativeApiCredentialDraft, NativeSettings, NativeSettingsController, NATIVE_CHAT_FONT_SIZES } from '../native/NativeSettings';
 import {
   createSidebarRows, createSidebarSections, filterSidebarGroups, NativeSidebarRow, NativeSidebarSearch,
   NativeSidebarSection, NativeSidebarSession, normalizeSidebarQuery, SIDEBAR_HISTORY_PAGE_SIZE, visibleSidebarRowIndex,
@@ -158,6 +158,7 @@ struct NativeChat {
   @State private hoveredMessageId: string = '';
   @State private settings: NativeSettings = {
     baseUrl: 'https://api.deepseek.com', model: 'deepseek-chat', apiKey: '', protocol: 'openai', authMode: 'api-key',
+    credentialDraft: null,
     signedOut: false,
     theme: 'system', chatFontSize: 16, attachmentBinding: '', thinking: false, search: false, ttsMuted: true,
     speechEngine: 'auto', speechVoice: 'stella', migrationPromptHandled: false,
@@ -739,7 +740,8 @@ struct NativeChat {
   private settingsSnapshot(): NativeSettings {
     return {
       baseUrl: this.settings.baseUrl, apiKey: this.settings.apiKey, model: this.settings.model,
-      protocol: this.settings.protocol, thinking: this.settings.thinking, search: this.settings.search,
+      protocol: this.settings.protocol, credentialDraft: this.settings.credentialDraft,
+      thinking: this.settings.thinking, search: this.settings.search,
       ttsMuted: this.settings.ttsMuted, authMode: this.settings.authMode,
       signedOut: this.settings.signedOut,
       speechEngine: this.settings.speechEngine, speechVoice: this.settings.speechVoice,
@@ -881,6 +883,7 @@ struct NativeChat {
     settings.signedOut = false;
     settings.attachmentBinding = util.generateRandomUUID(true);
     await this.settingsStore.save(this.host(), settings, undefined, true);
+    settings.credentialDraft = null;
     this.settings = settings;
     this.onboardingView = 'home';
     if (settings.apiKey) {
@@ -892,9 +895,10 @@ struct NativeChat {
   private prepareCredentialSettings(): void {
     this.settingsKey = '';
     this.settingsKeyEditing = false;
-    this.settingsBase = this.settings.baseUrl;
-    this.settingsModel = this.settings.model;
-    this.settingsProtocol = this.settings.protocol;
+    const draft = this.settings.credentialDraft;
+    this.settingsBase = draft?.baseUrl ?? this.settings.baseUrl;
+    this.settingsModel = draft?.model ?? this.settings.model;
+    this.settingsProtocol = draft?.protocol ?? this.settings.protocol;
     this.settingsError = '';
   }
 
@@ -910,10 +914,31 @@ struct NativeChat {
   }
 
   private finishCredentialSettings(): void {
-    this.commitSettingsModel();
+    if (!this.settingsVerifying) this.commitCredentialFields();
     this.settingsKey = '';
     this.settingsKeyEditing = false;
     this.settingsError = '';
+  }
+
+  private commitCredentialFields(): void {
+    const baseUrl = this.settingsBase.trim();
+    const model = this.settingsModel.trim();
+    const activeDraft = this.settings.credentialDraft;
+    if (!this.settingsEndpointMatches()) {
+      const credentialDraft: NativeApiCredentialDraft = { baseUrl, model, protocol: this.settingsProtocol };
+      this.settings.credentialDraft = credentialDraft;
+      void this.settingsStore.saveCredentialDraft(this.host(), credentialDraft).catch(() => {
+        this.toast(this.label('无法保存待验证的接口设置', 'Unable to save pending endpoint settings'));
+      });
+    } else {
+      this.commitSettingsModel();
+      if (activeDraft) {
+        this.settings.credentialDraft = null;
+        void this.settingsStore.saveCredentialDraft(this.host(), null).catch(() => {
+          this.toast(this.label('无法清除待验证的接口设置', 'Unable to clear pending endpoint settings'));
+        });
+      }
+    }
   }
 
   private editSettingsKey(): void {
@@ -941,6 +966,7 @@ struct NativeChat {
       apiKey: this.settingsKey.trim(), baseUrl: this.settingsBase.trim(),
       model: this.settingsModel.trim(), protocol: this.settingsProtocol,
     };
+    this.commitCredentialFields();
     this.settingsVerifying = true;
     this.settingsError = '';
     try {
@@ -1166,6 +1192,7 @@ struct NativeChat {
     const account = this.account;
     const settings = this.settingsSnapshot();
     settings.apiKey = '';
+    settings.credentialDraft = null;
     settings.authMode = 'api-key';
     settings.signedOut = true;
     settings.attachmentBinding = util.generateRandomUUID(true);
@@ -4534,6 +4561,12 @@ struct NativeChat {
         })
     }
     .width('100%').padding(14).borderRadius(16).backgroundColor($r('app.color.native_chat_surface'))
+    if (this.settings.credentialDraft || !this.settingsEndpointMatches()) {
+      Text(this.label('当前对话仍使用已保存的接口；验证成功后才会切换。',
+        'Current chats keep using the saved endpoint until verification succeeds.'))
+        .width('100%').fontSize(this.appFontSize(12)).fontColor($r('app.color.native_chat_caption'))
+        .padding({ left: 14, right: 14, top: 2, bottom: 4 })
+    }
     this.credentialField(() => this.label('API 地址 (Base URL)', 'API Base URL'), () => this.settingsBase,
       () => this.label('例如 https://api.deepseek.com 或 https://api.openai.com/v1',
         'e.g. https://api.deepseek.com or https://api.openai.com/v1'),

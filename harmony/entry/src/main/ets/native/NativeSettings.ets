@@ -12,12 +12,19 @@ export type NativeTheme = 'system' | 'light' | 'dark';
 export type NativeManualPreference = 'locale' | 'location';
 export const NATIVE_CHAT_FONT_SIZES: number[] = [12, 14, 16, 18, 20, 22];
 
+export interface NativeApiCredentialDraft {
+  baseUrl: string;
+  model: string;
+  protocol: NativeApiProtocol;
+}
+
 /** User-configurable settings. API credentials are held separately in Asset Store Kit. */
 export interface NativeSettings {
   baseUrl: string;
   apiKey: string;
   model: string;
   protocol: NativeApiProtocol;
+  credentialDraft?: NativeApiCredentialDraft | null;
   authMode: NativeAuthMode;
   signedOut: boolean;
   locale: NativeLocale;
@@ -57,6 +64,20 @@ const decode = (value: Uint8Array): string =>
 
 const bindingFor = (baseUrl: string, protocol: NativeApiProtocol): string =>
   JSON.stringify({ baseUrl: baseUrl.trim(), protocol });
+
+const parseCredentialDraft = (value: string): NativeApiCredentialDraft | null => {
+  try {
+    const draft = JSON.parse(value) as NativeApiCredentialDraft;
+    return typeof draft.baseUrl === 'string' && typeof draft.model === 'string' &&
+      (draft.protocol === 'openai' || draft.protocol === 'anthropic') ? draft : null;
+  } catch {
+    return null;
+  }
+};
+
+const writeCredentialDraft = async (store: preferences.Preferences, draft: NativeApiCredentialDraft | null): Promise<void> => {
+  await store.put('credentialDraft', draft ? JSON.stringify(draft) : '');
+};
 
 const readCredential = async (): Promise<StoredCredential | null> => {
   const query: asset.AssetMap = new Map();
@@ -138,6 +159,7 @@ export class NativeSettingsController {
     const speechVoice = await store.get('speechVoice', 'stella') as string;
     const migrationPromptHandled = await store.get('migrationPromptHandled', false) as boolean;
     const desktopSidebarCollapsed = await store.get('desktopSidebarCollapsed', false) as boolean;
+    const credentialDraft = signedOut ? null : parseCredentialDraft(await store.get('credentialDraft', '') as string);
     const resolvedProtocol: NativeApiProtocol = protocol === 'anthropic' ? 'anthropic' : 'openai';
     const apiKey = credential && credential.binding === bindingFor(baseUrl, resolvedProtocol)
       ? credential.apiKey : '';
@@ -146,6 +168,7 @@ export class NativeSettingsController {
       apiKey,
       model,
       protocol: resolvedProtocol,
+      credentialDraft,
       authMode: authMode === 'deepseek-account' ? 'deepseek-account' : 'api-key',
       signedOut,
       locale: locale === 'zh-CN' || locale === 'en-US' ? locale : defaultNativeLocale(),
@@ -168,6 +191,17 @@ export class NativeSettingsController {
     const operation = serializedWrites.then(async (): Promise<void> => {
       const store = await preferences.getPreferences(context, PREFERENCES_NAME);
       await store.put('signedOut', true);
+      await writeCredentialDraft(store, null);
+      await store.flush();
+    });
+    serializedWrites = operation.catch(() => {});
+    return operation;
+  }
+
+  async saveCredentialDraft(context: common.UIAbilityContext, draft: NativeApiCredentialDraft | null): Promise<void> {
+    const operation = serializedWrites.then(async (): Promise<void> => {
+      const store = await preferences.getPreferences(context, PREFERENCES_NAME);
+      await writeCredentialDraft(store, draft);
       await store.flush();
     });
     serializedWrites = operation.catch(() => {});
@@ -205,6 +239,9 @@ export class NativeSettingsController {
         store.put('migrationPromptHandled', settings.migrationPromptHandled),
         store.put('desktopSidebarCollapsed', settings.desktopSidebarCollapsed),
       ];
+      if (verifiedCredential || settings.signedOut) {
+        writes.push(writeCredentialDraft(store, null));
+      }
       // Changing other settings must preserve both system defaults and the saved location hierarchy.
       if (manualPreference === 'locale') {
         writes.push(store.put('locale', settings.locale));

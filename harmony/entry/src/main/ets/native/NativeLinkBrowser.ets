@@ -70,13 +70,29 @@ export struct NativeLinkBrowser {
     }
   }
 
+  private updateNavigation(address: string): void {
+    const target = safeNativeSourceUrl(address);
+    if (target) this.currentUrl = target;
+    this.canNavigateBack = this.canGoBack();
+  }
+
+  private activeAddress(): string {
+    try {
+      const address = this.controller.getUrl();
+      if (address) return safeNativeSourceUrl(address);
+    } catch {
+      // The web view may not yet be attached to its controller.
+    }
+    return safeNativeSourceUrl(this.currentUrl || this.target);
+  }
+
   private openInSystemBrowser(): void {
-    const target = safeNativeSourceUrl(this.currentUrl || this.target);
+    const target = this.activeAddress();
     if (target) this.onOpenExternal(target);
   }
 
   private async shareCurrentLink(): Promise<void> {
-    const target = safeNativeSourceUrl(this.currentUrl || this.target);
+    const target = this.activeAddress();
     if (!target) return;
     try {
       const sharedData = new systemShare.SharedData({
@@ -173,15 +189,15 @@ export struct NativeLinkBrowser {
             if (!event.data.isMainFrame() && (requested === 'about:blank' || requested === 'about:srcdoc')) return false;
             return safeNativeSourceUrl(requested).length === 0;
           })
+          .onTitleReceive((event: OnTitleReceiveEvent) => {
+            this.pageTitle = event.isRealTitle === false ? '' : event.title.slice(0, 512);
+          })
+          .onRefreshAccessedHistory((event: OnRefreshAccessedHistoryEvent) => {
+            if (event.isMainFrame === false) return;
+            this.updateNavigation(event.url);
+          })
           .onPageEnd((event: OnPageEndEvent) => {
-            const loadedUrl = safeNativeSourceUrl(event.url);
-            if (loadedUrl) this.currentUrl = loadedUrl;
-            this.canNavigateBack = this.canGoBack();
-            try {
-              this.pageTitle = this.controller.getTitle().slice(0, 512);
-            } catch {
-              this.pageTitle = '';
-            }
+            this.updateNavigation(event.url);
           })
           .onErrorReceive((event: OnErrorReceiveEvent) => {
             if (event.request.isMainFrame()) {
