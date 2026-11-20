@@ -36,6 +36,10 @@ struct ChatView: View {
     @State private var headerHeight: CGFloat = 58
     @State private var composerHeight: CGFloat = 114
     @State private var streamingCoordinator = TimelineStreamingCoordinator()
+    @State private var sidebarSearchFocus = SidebarSearchFocusBox()
+    @State private var wideSidebarSearchFocused = false
+    @State private var holdKeyboardFreeze = false
+    @State private var keyboardFreezeTask: Task<Void, Never>?
 
     private var usesSystemSafeAreaBars: Bool {
         #if compiler(>=6.2)
@@ -49,6 +53,7 @@ struct ChatView: View {
     private let topUpURL = URL(string: "https://platform.deepseek.com/top_up")!
 
     var body: some View {
+        let ignoreKeyboardLayout = drawerOpen || holdKeyboardFreeze || wideSidebarSearchFocused
         ZStack {
             Color.nuwaSidebarFill.ignoresSafeArea()
 
@@ -83,6 +88,21 @@ struct ChatView: View {
                                 settings: settings,
                                 activeSessionId: chatStore.activeSessionId,
                                 isOpen: showSidebar,
+                                suppressSearchFocus: !showSidebar || showSettings || settings.showMigrationPrompt || previewImage != nil,
+                                onSearchFocusChanged: { focused in
+                                    sidebarSearchFocus.isFocused = focused
+                                    if !focused {
+                                        sidebarSearchFocus.lastDismissedAt = Date()
+                                    }
+                                    if wide {
+                                        if wideSidebarSearchFocused && !focused {
+                                            freezeKeyboardBriefly()
+                                        }
+                                        wideSidebarSearchFocused = focused
+                                    } else if wideSidebarSearchFocused {
+                                        wideSidebarSearchFocused = false
+                                    }
+                                },
                                 onSelectSession: { chatStore.selectSession($0) },
                                 onCreateNewSession: { chatStore.createNewSession(silentIfAlreadyNew: true) },
                                 onTogglePin: { chatStore.togglePin($0) },
@@ -92,7 +112,7 @@ struct ChatView: View {
                                 onDeleteSessions: { chatStore.deleteSessions($0) },
                                 onSearch: { await chatStore.matchingSessionIDs(query: $0) },
                                 onClose: { if !wide { closeDrawer() } },
-                                onOpenSettings: { showSettings = true }
+                                onOpenSettings: openSettingsFromDrawer
                             )
                             .padding(.top, topSafe)
                             .padding(.bottom, bottomSafe)
@@ -110,6 +130,9 @@ struct ChatView: View {
                                 trailingSafe: trailingSafe
                             ) {
                                 if wide {
+                                    if sidebarVisible {
+                                        dismissKeyboard()
+                                    }
                                     sidebarVisible.toggle()
                                 } else if drawerOpen {
                                     closeDrawer()
@@ -144,10 +167,16 @@ struct ChatView: View {
                             .zIndex(60)
                         }
                     }
-                    .onChange(of: wide) { _, _ in closeDrawer() }
+                    .onChange(of: wide) { _, isWide in
+                        closeDrawer()
+                        if !isWide {
+                            wideSidebarSearchFocused = false
+                        }
+                    }
                 }
                 .ignoresSafeArea(.container, edges: .all)
             }
+            .ignoresSafeArea(ignoreKeyboardLayout ? .keyboard : [], edges: .bottom)
             .coordinateSpace(name: "nuwaRoot")
         }
         .task(id: chatStore.historyLoaded) {
@@ -169,6 +198,26 @@ struct ChatView: View {
             isAtBottom = true
             disclosureOverrides.removeAll()
             disclosureAnchorID = nil
+        }
+        .onChange(of: showSettings) { _, open in
+            if open || !sidebarSearchFocus.isFocused {
+                dismissKeyboard()
+            }
+        }
+        .onChange(of: drawerOpen) { wasOpen, isOpen in
+            if wasOpen && !isOpen {
+                if sidebarSearchFocus.isFocused || sidebarSearchFocus.wasRecentlyDismissed {
+                    freezeKeyboardBriefly()
+                }
+                sidebarSearchFocus.isFocused = false
+                dismissKeyboard()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+            if !drawerOpen && !sidebarSearchFocus.isFocused && !wideSidebarSearchFocused && holdKeyboardFreeze {
+                keyboardFreezeTask?.cancel()
+                holdKeyboardFreeze = false
+            }
         }
         .sheet(isPresented: $showSettings) {
             SettingsView(settings: settings, chatStore: chatStore)
@@ -976,10 +1025,48 @@ struct ChatView: View {
 
     private func dismissKeyboard() {
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        for scene in UIApplication.shared.connectedScenes {
+            guard let windowScene = scene as? UIWindowScene else { continue }
+            for window in windowScene.windows where window.isKeyWindow {
+                window.endEditing(true)
+            }
+        }
+    }
+
+    private func freezeKeyboardBriefly(duration: Double = 0.38) {
+        keyboardFreezeTask?.cancel()
+        holdKeyboardFreeze = true
+        keyboardFreezeTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(duration))
+            guard !Task.isCancelled else { return }
+            holdKeyboardFreeze = false
+        }
     }
 
     private func closeDrawer() {
+        if sidebarSearchFocus.isFocused || sidebarSearchFocus.wasRecentlyDismissed {
+            freezeKeyboardBriefly()
+        }
+        sidebarSearchFocus.isFocused = false
+        dismissKeyboard()
         drawerOpen = false
+    }
+
+    private func openSettingsFromDrawer() {
+        let shouldDefer = sidebarSearchFocus.isFocused || sidebarSearchFocus.wasRecentlyDismissed || holdKeyboardFreeze
+        if shouldDefer {
+            freezeKeyboardBriefly()
+            sidebarSearchFocus.isFocused = false
+            sidebarSearchFocus.lastDismissedAt = Date()
+        }
+        dismissKeyboard()
+        if shouldDefer {
+            DispatchQueue.main.async {
+                showSettings = true
+            }
+        } else {
+            showSettings = true
+        }
     }
 
     private func sendMessage() {
@@ -992,6 +1079,16 @@ struct ChatView: View {
         }
         speech.stopSpeaking()
         chatStore.sendCurrentDraft(settings: settings)
+    }
+}
+
+private final class SidebarSearchFocusBox {
+    var isFocused = false
+    var lastDismissedAt: Date?
+
+    var wasRecentlyDismissed: Bool {
+        guard let lastDismissedAt else { return false }
+        return Date().timeIntervalSince(lastDismissedAt) < 0.45
     }
 }
 
@@ -1016,6 +1113,7 @@ private struct ChatDrawerLayout<Sidebar: View, Surface: View>: View {
     @GestureState private var legacyTracking = false
     @State private var legacyRejectedDrag = false
     @State private var dragOffset: CGFloat?
+    @State private var dismissedKeyboardForDrag = false
 
     private var spring: Animation? {
         reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.88)
@@ -1115,8 +1213,15 @@ private struct ChatDrawerLayout<Sidebar: View, Surface: View>: View {
     }
 
     private func updateDrag(_ translation: CGFloat) {
-        if dragOffset == nil && hapticEnabled {
-            DrawerHaptics.impact.prepare()
+        if dragOffset == nil {
+            dismissedKeyboardForDrag = false
+            if hapticEnabled {
+                DrawerHaptics.impact.prepare()
+            }
+        }
+        if !dismissedKeyboardForDrag && compactOpen && translation < -4 {
+            dismissedKeyboardForDrag = true
+            dismissKeyboard()
         }
         let start = compactOpen ? drawerWidth : 0
         var transaction = Transaction(animation: nil)
@@ -1128,13 +1233,14 @@ private struct ChatDrawerLayout<Sidebar: View, Surface: View>: View {
 
     private func finishDrag(_ translation: CGFloat, _ predictedTranslation: CGFloat) {
         guard dragOffset != nil, drawerWidth > 0 else { return }
+        dismissedKeyboardForDrag = false
         let start = compactOpen ? 1.0 : 0
         let current = start + translation / drawerWidth
         let predicted = start + predictedTranslation / drawerWidth
         let open = compactOpen
             ? !(current < 0.72 || (current < 0.86 && predicted < 0.55))
             : current > 0.28 || (current > 0.14 && predicted > 0.45)
-        if open && !compactOpen { dismissKeyboard() }
+        if open != compactOpen { dismissKeyboard() }
         withAnimation(spring) {
             compactOpen = open
             dragOffset = nil
@@ -1142,6 +1248,7 @@ private struct ChatDrawerLayout<Sidebar: View, Surface: View>: View {
     }
 
     private func cancelDrag() {
+        dismissedKeyboardForDrag = false
         guard dragOffset != nil else { return }
         withAnimation(spring) { dragOffset = nil }
     }

@@ -12,6 +12,8 @@ struct SessionDrawerView: View {
     @ObservedObject var settings: SettingsStore
     let activeSessionId: UUID?
     let isOpen: Bool
+    let suppressSearchFocus: Bool
+    let onSearchFocusChanged: (Bool) -> Void
     let onSelectSession: (UUID) -> Void
     let onCreateNewSession: () -> Void
     let onTogglePin: (UUID) -> Void
@@ -26,6 +28,7 @@ struct SessionDrawerView: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.nuwaFontScale) private var fontScale
+    @FocusState private var isSearchFocused: Bool
     @State private var searchText = ""
     @State private var searchResult: (query: String, ids: Set<UUID>)?
     @State private var selectMode = false
@@ -104,6 +107,19 @@ struct SessionDrawerView: View {
         Self.selectImpact.impactOccurred(intensity: 0.75)
     }
 
+    private func dismissSearchFocus() {
+        if isSearchFocused {
+            isSearchFocused = false
+        }
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        for scene in UIApplication.shared.connectedScenes {
+            guard let windowScene = scene as? UIWindowScene else { continue }
+            for window in windowScene.windows where window.isKeyWindow {
+                window.endEditing(true)
+            }
+        }
+    }
+
     var body: some View {
         let groups = groupedSessions
         let searchInput = SearchInput(query: isOpen ? query : "", summaries: isOpen && !query.isEmpty ? listStore.summaries : [])
@@ -138,8 +154,14 @@ struct SessionDrawerView: View {
                         .font(NuwaFont.sized(15.5, weight: .regular, scale: fontScale))
                         .foregroundStyle(Color.nuwaLabelTertiary)
                     TextField(L10n.t("searchPlaceholder", locale: loc), text: $searchText)
+                        .focused($isSearchFocused)
+                        .submitLabel(.search)
+                        .onSubmit {
+                            dismissSearchFocus()
+                        }
                         .font(NuwaFont.control(fontScale))
                         .foregroundStyle(Color.nuwaLabelPrimary)
+                        .frame(maxWidth: .infinity, minHeight: max(44, 28 + 16 * fontScale))
                     if !searchText.isEmpty {
                         Button {
                             searchText = ""
@@ -147,16 +169,40 @@ struct SessionDrawerView: View {
                             Image(systemName: "xmark.circle.fill")
                                 .font(.system(size: 15))
                                 .foregroundStyle(Color.nuwaLabelTertiary)
+                                .frame(width: 24, height: 24)
+                                .contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    if isSearchFocused {
+                        Button {
+                            dismissSearchFocus()
+                        } label: {
+                            Text(L10n.t("cancel", locale: loc))
+                                .font(NuwaFont.captionMedium(fontScale))
+                                .foregroundStyle(Color.nuwaBrandText)
+                                .padding(.horizontal, 2)
+                                .frame(minHeight: 32)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                     }
                 }
                 .padding(.horizontal, 14)
                 .frame(minHeight: max(44, 28 + 16 * fontScale))
+                .background {
+                    Color.clear
+                        .contentShape(Capsule())
+                        .onTapGesture {
+                            if !isSearchFocused && !suppressSearchFocus {
+                                isSearchFocused = true
+                            }
+                        }
+                }
                 .nuwaGlass(
                     in: Capsule(),
                     tint: colorScheme == .dark ? .white.opacity(0.08) : nil,
-                    interactive: true
+                    interactive: false
                 )
                 .padding(.horizontal, 16)
                 .padding(.top, 10)
@@ -175,6 +221,7 @@ struct SessionDrawerView: View {
                         .foregroundStyle(Color.nuwaLabelTertiary)
                         .multilineTextAlignment(.center)
                     Button {
+                        dismissSearchFocus()
                         onCreateNewSession()
                         onClose()
                     } label: {
@@ -191,7 +238,11 @@ struct SessionDrawerView: View {
                     Spacer()
                 }
                 .padding(.horizontal, 20)
-                .frame(maxWidth: .infinity)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    dismissSearchFocus()
+                }
             } else if groups.isEmpty {
                 VStack {
                     Spacer()
@@ -204,7 +255,11 @@ struct SessionDrawerView: View {
                     }
                     Spacer()
                 }
-                .frame(maxWidth: .infinity)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    dismissSearchFocus()
+                }
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 2) {
@@ -216,6 +271,7 @@ struct SessionDrawerView: View {
                                 Spacer()
                                 if groupIdx == 0 && !selectMode {
                                     Button {
+                                        dismissSearchFocus()
                                         triggerLightHaptic()
                                         enterSelectMode(initialId: nil)
                                     } label: {
@@ -231,15 +287,30 @@ struct SessionDrawerView: View {
                             .padding(.horizontal, 12)
                             .padding(.top, groupIdx == 0 ? 4 : 20)
                             .padding(.bottom, 6)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                if isSearchFocused {
+                                    dismissSearchFocus()
+                                }
+                            }
 
                             ForEach(group.sessions) { session in
                                 sessionRow(session)
                             }
                         }
+
+                        Color.clear
+                            .frame(height: isSearchFocused ? 420 : 12)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                if isSearchFocused {
+                                    dismissSearchFocus()
+                                }
+                            }
                     }
                     .padding(.horizontal, 12)
-                    .padding(.bottom, 12)
                 }
+                .scrollDismissesKeyboard(.interactively)
                 .nuwaNoScrollEdgeEffect()
             }
 
@@ -289,6 +360,7 @@ struct SessionDrawerView: View {
             } else {
                 HStack(spacing: 8) {
                     Button {
+                        dismissSearchFocus()
                         onOpenSettings()
                     } label: {
                         HStack(spacing: 10) {
@@ -312,6 +384,7 @@ struct SessionDrawerView: View {
 
                     if let balance = settings.deepSeekBalanceText {
                         Button {
+                            dismissSearchFocus()
                             openURL(topUpURL)
                         } label: {
                             Text(balance)
@@ -333,6 +406,7 @@ struct SessionDrawerView: View {
                     }
 
                     Button {
+                        dismissSearchFocus()
                         onOpenSettings()
                     } label: {
                         HStack(spacing: 0) {
@@ -365,10 +439,24 @@ struct SessionDrawerView: View {
             let ids = await onSearch(searchInput.query)
             if !Task.isCancelled { searchResult = (searchInput.query, ids) }
         }
+        .onChange(of: isSearchFocused) { _, focused in
+            if focused && suppressSearchFocus {
+                dismissSearchFocus()
+                onSearchFocusChanged(false)
+            } else {
+                onSearchFocusChanged(focused)
+            }
+        }
+        .onChange(of: suppressSearchFocus) { _, suppressed in
+            if suppressed {
+                dismissSearchFocus()
+            }
+        }
         .onChange(of: isOpen) { _, open in
             if open {
                 Task { await settings.refreshBalance() }
             } else {
+                dismissSearchFocus()
                 exitSelectMode()
             }
         }
@@ -455,6 +543,7 @@ struct SessionDrawerView: View {
         )
         .contentShape(Rectangle())
         .onTapGesture {
+            dismissSearchFocus()
             if selectMode {
                 toggleSelected(session.id)
             } else {
@@ -495,6 +584,7 @@ struct SessionDrawerView: View {
     }
 
     private func enterSelectMode(initialId: UUID?) {
+        dismissSearchFocus()
         withAnimation(.easeInOut(duration: 0.16)) {
             selectMode = true
             selectedIds = initialId.map { [$0] } ?? []
