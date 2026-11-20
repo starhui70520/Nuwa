@@ -18,6 +18,7 @@ export struct NativeLinkBrowser {
   @State private pageTitle: string = '';
   @State private canNavigateBack: boolean = false;
   @State private failed: boolean = false;
+  @State private loadProgress: number = 0;
 
   aboutToAppear(): void {
     this.currentUrl = safeNativeSourceUrl(this.target);
@@ -30,6 +31,7 @@ export struct NativeLinkBrowser {
     this.pageTitle = '';
     this.canNavigateBack = false;
     this.failed = next.length === 0;
+    this.loadProgress = 0;
   }
 
   private text(chinese: string, english: string): string {
@@ -48,6 +50,7 @@ export struct NativeLinkBrowser {
   }
 
   private titleLabel(): string {
+    if (this.failed && this.currentUrl) return this.text('页面加载失败', 'Page failed to load');
     const title = this.pageTitle.trim();
     return title || this.hostLabel() || this.text('无法打开网页', 'Unable to open page');
   }
@@ -76,14 +79,44 @@ export struct NativeLinkBrowser {
     this.canNavigateBack = this.canGoBack();
   }
 
+  private beginNavigation(address: string): void {
+    this.updateNavigation(address);
+    this.pageTitle = '';
+    this.failed = false;
+    this.loadProgress = 0;
+  }
+
+  private retryPage(): void {
+    try {
+      this.controller.refresh();
+    } catch {
+      // The controller may be detached while the browser is closing.
+    }
+  }
+
   private activeAddress(): string {
     try {
-      const address = this.controller.getUrl();
-      if (address) return safeNativeSourceUrl(address);
+      const address = safeNativeSourceUrl(this.controller.getUrl());
+      if (address) return address;
     } catch {
       // The web view may not yet be attached to its controller.
     }
     return safeNativeSourceUrl(this.currentUrl || this.target);
+  }
+
+  @Builder
+  private loadFailure() {
+    Column({ space: 12 }) {
+      Text(this.text('无法加载此网页', 'This page could not be loaded'))
+        .fontSize(14).fontColor($r('app.color.native_chat_secondary'))
+      if (this.currentUrl) {
+        Button(this.text('重新加载', 'Reload'), { buttonStyle: ButtonStyleMode.TEXTUAL })
+          .id('nuwa-link-browser-retry').fontSize(14).fontColor($r('app.color.native_chat_blue_text'))
+          .onClick(() => { this.retryPage(); })
+      }
+    }
+    .width('100%').height('100%').justifyContent(FlexAlign.Center)
+    .backgroundColor($r('app.color.native_chat_bg'))
   }
 
   private openInSystemBrowser(): void {
@@ -171,51 +204,58 @@ export struct NativeLinkBrowser {
       .alignItems(VerticalAlign.Center)
       .backgroundColor($r('app.color.native_chat_surface'))
 
-      Divider().color($r('app.color.native_chat_stroke')).strokeWidth(1)
-
-      if (this.currentUrl.length > 0 && !this.failed) {
-        Web({ src: safeNativeSourceUrl(this.target), controller: this.controller, incognitoMode: true })
-          .width('100%')
-          .layoutWeight(1)
-          .backgroundColor($r('app.color.native_chat_bg'))
-          .javaScriptAccess(true)
-          .fileAccess(false)
-          .domStorageAccess(true)
-          .databaseAccess(false)
-          .allowWindowOpenMethod(false)
-          .mixedMode(MixedMode.None)
-          .onLoadIntercept((event: OnLoadInterceptEvent): boolean => {
-            const requested = event.data.getRequestUrl();
-            if (!event.data.isMainFrame() && (requested === 'about:blank' || requested === 'about:srcdoc')) return false;
-            return safeNativeSourceUrl(requested).length === 0;
-          })
-          .onTitleReceive((event: OnTitleReceiveEvent) => {
-            this.pageTitle = event.isRealTitle === false ? '' : event.title.slice(0, 512);
-          })
-          .onRefreshAccessedHistory((event: OnRefreshAccessedHistoryEvent) => {
-            if (event.isMainFrame === false) return;
-            this.updateNavigation(event.url);
-          })
-          .onPageEnd((event: OnPageEndEvent) => {
-            this.updateNavigation(event.url);
-          })
-          .onErrorReceive((event: OnErrorReceiveEvent) => {
-            if (event.request.isMainFrame()) {
-              this.canNavigateBack = this.canGoBack();
-              this.pageTitle = this.text('页面加载失败', 'Page failed to load');
-            }
-          })
-      } else {
-        Column() {
-          Text(this.text('无法加载此网页', 'This page could not be loaded'))
-            .fontSize(14)
-            .fontColor($r('app.color.native_chat_secondary'))
+      Stack({ alignContent: Alignment.TopStart }) {
+        Divider().color($r('app.color.native_chat_stroke')).strokeWidth(1)
+        if (this.currentUrl && !this.failed && this.loadProgress < 100) {
+          Progress({ value: this.loadProgress, total: 100, type: ProgressType.Linear })
+            .id('nuwa-link-browser-progress').width('100%').height(2).style({ strokeWidth: 2 })
+            .color($r('app.color.native_chat_blue')).backgroundColor($r('app.color.native_chat_stroke'))
+            .accessibilityText(this.text('正在加载网页', 'Loading web page'))
         }
-        .width('100%')
-        .layoutWeight(1)
-        .justifyContent(FlexAlign.Center)
-        .backgroundColor($r('app.color.native_chat_bg'))
       }
+      .width('100%').height(2)
+
+      Stack() {
+        if (this.currentUrl) {
+          Web({ src: safeNativeSourceUrl(this.target), controller: this.controller, incognitoMode: true })
+            .width('100%').height('100%')
+            .backgroundColor($r('app.color.native_chat_bg'))
+            .accessibilityLevel(this.failed ? 'no-hide-descendants' : 'auto')
+            .javaScriptAccess(true)
+            .fileAccess(false)
+            .domStorageAccess(true)
+            .databaseAccess(false)
+            .allowWindowOpenMethod(false)
+            .mixedMode(MixedMode.None)
+            .onLoadIntercept((event: OnLoadInterceptEvent): boolean => {
+              const requested = event.data.getRequestUrl();
+              if (!event.data.isMainFrame() && (requested === 'about:blank' || requested === 'about:srcdoc')) return false;
+              return safeNativeSourceUrl(requested).length === 0;
+            })
+            .onPageBegin((event: OnPageBeginEvent) => { this.beginNavigation(event.url); })
+            .onProgressChange((event: OnProgressChangeEvent) => { this.loadProgress = event.newProgress; })
+            .onTitleReceive((event: OnTitleReceiveEvent) => {
+              this.pageTitle = event.isRealTitle === false ? '' : event.title.slice(0, 512);
+            })
+            .onRefreshAccessedHistory((event: OnRefreshAccessedHistoryEvent) => {
+              if (event.isMainFrame === false) return;
+              this.updateNavigation(event.url);
+            })
+            .onPageEnd((event: OnPageEndEvent) => {
+              this.updateNavigation(event.url);
+              this.loadProgress = 100;
+            })
+            .onErrorReceive((event: OnErrorReceiveEvent) => {
+              if (event.request.isMainFrame()) {
+                this.updateNavigation(event.request.getRequestUrl());
+                this.failed = true;
+                this.loadProgress = 100;
+              }
+            })
+        }
+        if (this.failed) this.loadFailure()
+      }
+      .width('100%').layoutWeight(1)
     }
     .width('100%')
     .height('100%')
