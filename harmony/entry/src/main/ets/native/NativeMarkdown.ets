@@ -58,9 +58,13 @@ export struct NativeMarkdown {
   private codeCopyTimer: number = -1;
   private mathMounted: boolean = false;
   private mathPictureFiles?: NativeMathPictureFiles;
-  private mathWork: Promise<void> = Promise.resolve();
   private mathTimer: number = -1;
-  private mathGeneration: number = 0;
+  private mathDraining: boolean = false;
+  private mathRequests: Map<string, NativeMathPictureRequest> = new Map<string, NativeMathPictureRequest>();
+  private mathMisses: Set<string> = new Set<string>();
+  private displayMathKeys: Map<string, string> = new Map<string, string>();
+  private displayMathFallbacks: Map<string, string> = new Map<string, string>();
+  private displayMathStyle: string = '';
   private mathColor: string = '#0F1115';
   private mathDensity: number = 1;
   private mathFontRatio: number = 1;
@@ -76,8 +80,8 @@ export struct NativeMarkdown {
 
   aboutToDisappear(): void {
     this.mathMounted = false;
-    this.mathGeneration++;
     clearTimeout(this.mathTimer);
+    this.mathTimer = -1;
     this.clearMathPictures();
     clearTimeout(this.codeCopyTimer);
     clearTimeout(this.streamTimer);
@@ -139,11 +143,16 @@ export struct NativeMarkdown {
     }
   }
 
-  private collectMathRequests(entries: Map<string, NativeMathPictureRequest>, blocks: NativeMarkdownBlock[]): void {
-    for (const block of blocks) {
+  private collectMathRequests(entries: Map<string, NativeMathPictureRequest>, displayKeys: Map<string, string>,
+    blocks: NativeMarkdownBlock[], parent: string): void {
+    for (let position = 0; position < blocks.length; position++) {
+      const block = blocks[position];
+      const path = parent + ':' + position.toString();
       if (block.kind === 'math') {
         const request = this.mathRequest(block.text ?? '', this.bodySize(), true);
-        entries.set(nativeMathPictureKey(request), request);
+        const key = nativeMathPictureKey(request);
+        entries.set(key, request);
+        displayKeys.set(path, key);
       } else if (block.rows) {
         for (let index = 0; index < block.rows.length; index++) {
           for (const cell of block.rows[index]) {
@@ -154,45 +163,34 @@ export struct NativeMarkdown {
         const size = block.kind === 'heading' ? this.headingSize(block.level ?? 1) : this.bodySize();
         this.collectInlinePictures(entries, block.parts, size);
       }
-      if (block.children) this.collectMathRequests(entries, block.children);
+      if (block.children) this.collectMathRequests(entries, displayKeys, block.children, path);
     }
   }
 
   private scheduleMathPictures(): void {
-    const generation = ++this.mathGeneration;
-    clearTimeout(this.mathTimer);
-    if (!this.mathMounted || this.loading) {
-      this.clearMathPictures();
-      return;
-    }
+    if (!this.mathMounted || this.mathTimer >= 0) return;
     this.mathTimer = setTimeout(() => {
-      this.mathWork = this.mathWork.then((): Promise<void> => this.prepareMathPictures(generation)).catch(() => {});
+      this.mathTimer = -1;
+      this.updateMathRequests();
     }, 40);
   }
 
   private clearMathPictures(): void {
     if (this.mathPictures.size) this.mathPictures.clear();
+    this.mathRequests.clear();
+    this.mathMisses.clear();
+    this.displayMathKeys.clear();
+    this.displayMathFallbacks.clear();
     const files = this.mathPictureFiles;
     this.mathPictureFiles = undefined;
     if (files) void files.dispose();
   }
 
-  private mathGenerationIsCurrent(generation: number): boolean {
-    return this.mathMounted && !this.loading && this.mathGeneration === generation;
-  }
-
-  private publishMathPictures(additions: Map<string, NativeStoredMathPicture>): void {
-    const next = new Map<string, NativeStoredMathPicture>(this.mathPictures);
-    additions.forEach((picture: NativeStoredMathPicture, key: string): void => { next.set(key, picture); });
-    this.mathPictures = next;
-    additions.clear();
-  }
-
-  private async prepareMathPictures(generation: number): Promise<void> {
-    if (!this.mathGenerationIsCurrent(generation)) return;
+  private updateMathRequests(): void {
     this.prepareMathPresentation();
     const requests = new Map<string, NativeMathPictureRequest>();
-    this.collectMathRequests(requests, this.blocks());
+    const displayKeys = new Map<string, string>();
+    this.collectMathRequests(requests, displayKeys, this.blocks(), 'markdown');
     if (!requests.size) {
       this.clearMathPictures();
       return;
@@ -202,33 +200,98 @@ export struct NativeMarkdown {
     if (!directory) return;
     const files = this.mathPictureFiles ?? new NativeMathPictureFiles(directory);
     this.mathPictureFiles = files;
+    // An open display block can be valid, temporarily invalid, and valid again as
+    // tokens arrive. Preserve its last successful picture at the same AST position.
+    const style = nativeMathPictureKey(this.mathRequest('', this.bodySize(), true));
+    const fallbacks = new Map<string, string>();
+    if (style === this.displayMathStyle) {
+      displayKeys.forEach((key: string, path: string): void => {
+        const old = this.displayMathKeys.get(path);
+        const previous = old && this.mathPictures.has(old) ? old : this.displayMathFallbacks.get(path);
+        if (previous && previous !== key && !this.mathPictures.has(key)) fallbacks.set(path, previous);
+      });
+    }
+    this.displayMathStyle = style;
+    this.displayMathKeys = displayKeys;
+    this.displayMathFallbacks = fallbacks;
+    if (requests.size !== this.mathRequests.size ||
+      Array.from(requests.keys()).some((key: string): boolean => !this.mathRequests.has(key))) {
+      this.mathRequests = requests;
+      this.mathMisses.forEach((key: string): void => {
+        if (!requests.has(key)) this.mathMisses.delete(key);
+      });
+    }
+    this.retainMathPictures(this.mathPictures, files);
+    this.startMathWork();
+  }
+
+  private retainMathPictures(pictures: Map<string, NativeStoredMathPicture>, files: NativeMathPictureFiles): void {
+    const fallbackKeys = new Set<string>();
+    this.displayMathFallbacks.forEach((previous: string, path: string): void => {
+      const key = this.displayMathKeys.get(path);
+      if (key && !pictures.has(key)) fallbackKeys.add(previous);
+      else this.displayMathFallbacks.delete(path);
+    });
     const retained = new Map<string, NativeStoredMathPicture>();
-    this.mathPictures.forEach((picture: NativeStoredMathPicture, key: string): void => {
-      if (requests.has(key)) {
+    pictures.forEach((picture: NativeStoredMathPicture, key: string): void => {
+      if (this.mathRequests.has(key) || fallbackKeys.has(key)) {
         retained.set(key, picture);
       } else {
         void files.release(picture.source);
       }
     });
-    if (retained.size !== this.mathPictures.size) this.mathPictures = retained;
+    if (pictures !== this.mathPictures || retained.size !== pictures.size) this.mathPictures = retained;
+  }
+
+  private startMathWork(): void {
+    const files = this.mathPictureFiles;
+    if (!files || this.mathDraining) return;
+    this.mathDraining = true;
+    void this.drainMathPictures(files).catch(() => {}).finally(() => {
+      this.mathDraining = false;
+      if (this.mathPictureFiles !== files) this.startMathWork();
+    });
+  }
+
+  private publishMathPictures(additions: Map<string, NativeStoredMathPicture>, files: NativeMathPictureFiles): void {
+    if (!additions.size || this.mathPictureFiles !== files) return;
+    const next = new Map<string, NativeStoredMathPicture>(this.mathPictures);
+    additions.forEach((picture: NativeStoredMathPicture, key: string): void => {
+      if (this.mathRequests.has(key)) next.set(key, picture);
+      else void files.release(picture.source);
+    });
+    additions.clear();
+    this.retainMathPictures(next, files);
+  }
+
+  private async drainMathPictures(files: NativeMathPictureFiles): Promise<void> {
     const additions = new Map<string, NativeStoredMathPicture>();
     try {
       // The shared renderer handles one formula at a time. Keep only one request
       // in flight from this message so long replies cannot fill its queue.
-      for (const entry of requests.entries()) {
-        const key = entry[0];
-        if (retained.has(key)) continue;
-        const picture = await requestNativeMathPicture(entry[1]);
-        if (!this.mathGenerationIsCurrent(generation)) return;
-        if (!picture) continue;
-        const stored = await files.store(picture);
-        if (stored) additions.set(key, stored);
-        if (!this.mathGenerationIsCurrent(generation)) return;
-        if (additions.size >= MATH_PICTURE_PAINT_BATCH || (additions.size > 0 && !this.mathPictures.size)) {
-          this.publishMathPictures(additions);
+      while (this.mathPictureFiles === files) {
+        const requests = this.mathRequests;
+        for (const entry of requests.entries()) {
+          if (this.mathPictureFiles !== files || this.mathRequests !== requests) break;
+          const key = entry[0];
+          if (this.mathPictures.has(key) || additions.has(key) || this.mathMisses.has(key)) continue;
+          const picture = await requestNativeMathPicture(entry[1]);
+          if (this.mathPictureFiles !== files || !this.mathRequests.has(key)) continue;
+          const stored = picture ? await files.store(picture) : null;
+          if (this.mathPictureFiles !== files || !this.mathRequests.has(key)) {
+            if (stored) void files.release(stored.source);
+          } else if (!stored) {
+            this.mathMisses.add(key);
+          } else {
+            additions.set(key, stored);
+          }
+          if (additions.size >= MATH_PICTURE_PAINT_BATCH || (additions.size > 0 && !this.mathPictures.size)) {
+            this.publishMathPictures(additions, files);
+          }
         }
+        this.publishMathPictures(additions, files);
+        if (this.mathRequests === requests) break;
       }
-      if (additions.size) this.publishMathPictures(additions);
     } finally {
       additions.forEach((picture: NativeStoredMathPicture): void => { void files.release(picture.source); });
     }
@@ -239,6 +302,14 @@ export struct NativeMarkdown {
     if (!this.mathPictures.size) return null;
     const key = nativeMathPictureKey(this.mathRequest(source, size, display, bold));
     return this.mathPictures.get(key) ?? null;
+  }
+
+  private displayMathPicture(source: string, path: string): NativeStoredMathPicture | null {
+    const picture = this.mathPicture(source, this.bodySize(), true);
+    const currentKey = nativeMathPictureKey(this.mathRequest(source, this.bodySize(), true));
+    const last = this.displayMathKeys.get(path) === currentKey ?
+      this.displayMathFallbacks.get(path) : this.displayMathKeys.get(path);
+    return picture ?? (last ? this.mathPictures.get(last) ?? null : null);
   }
 
   private inlinePictureScale(picture: NativeStoredMathPicture, maxWidth: number): number {
@@ -320,17 +391,18 @@ export struct NativeMarkdown {
   }
 
   private onContentChanged(): void {
-    this.scheduleMathPictures();
     clearTimeout(this.streamTimer);
     this.streamTimer = -1;
     if (!this.mathMounted) return;
     const delay = this.loading ? this.nextStreamUpdate - Date.now() : 0;
     if (delay <= 0) {
       this.visibleContent = this.content;
+      this.scheduleMathPictures();
     } else {
       this.streamTimer = setTimeout(() => {
         this.streamTimer = -1;
         this.visibleContent = this.content;
+        this.scheduleMathPictures();
       }, delay);
     }
   }
@@ -710,8 +782,8 @@ export struct NativeMarkdown {
     if (block.kind === 'code') {
       this.codeBlock(block, path)
     } else if (block.kind === 'math') {
-      if (this.mathPicture(block.text ?? '', this.bodySize(), true)) {
-        this.displayedFormula(this.mathPicture(block.text ?? '', this.bodySize(), true)!, block.text ?? '')
+      if (this.displayMathPicture(block.text ?? '', path)) {
+        this.displayedFormula(this.displayMathPicture(block.text ?? '', path)!, block.text ?? '')
       } else {
         NativeMathEquation({ expression: parseNativeMath(block.text ?? ''), source: block.text ?? '',
           formulaFontSize: (this.bodySize() + 1) * this.fontScale })
