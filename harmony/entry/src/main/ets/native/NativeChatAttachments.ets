@@ -88,6 +88,13 @@ export const NATIVE_ATTACHMENT_MAX_COUNT = 50;
 const MAX_BYTES = 64 * 1024 * 1024;
 const IO_CHUNK = 256 * 1024;
 const MAX_ACTIVE_UPLOADS = 3;
+// The decoded RGBA surface can use four bytes per pixel. Convert one image at a time.
+const MAX_UPLOAD_DECODE_PIXELS = 32 * 1024 * 1024;
+const MAX_UPLOAD_DECODE_SIDE = 16384;
+const EXIF_ORIENTATIONS = [
+  'top-left', 'top-right', 'bottom-right', 'bottom-left', 'left-top', 'right-top', 'right-bottom', 'left-bottom',
+];
+const EXIF_ROTATIONS = [0, 0, 0, 180, 0, 270, 90, 90, 270];
 const MAX_PREVIEW_SIDE = 8192;
 const MAX_PREVIEW_PIXELS = 16 * 1024 * 1024;
 const BINARY_MIME = 'application/octet-stream';
@@ -366,6 +373,56 @@ function rejectCanceled(transfer: AttachmentTransfer): void {
   }
 }
 
+let imageConversionQueue: Promise<void> = Promise.resolve();
+
+function queueImageConversion(file: UploadFile, transfer: AttachmentTransfer): Promise<UploadFile> {
+  const conversion = imageConversionQueue.then((): Promise<UploadFile> => {
+    rejectCanceled(transfer);
+    return convertImage(file);
+  });
+  imageConversionQueue = conversion.then((): void => {}, (): void => {});
+  return conversion;
+}
+
+async function uploadOrientation(source: image.ImageSource, mimeType: string): Promise<number> {
+  if (mimeType === 'image/tiff') {
+    try {
+      const metadata = await source.readImageMetadata(['TiffOrientation']);
+      const orientation = metadata.tiffMetadata?.orientation ?? 1;
+      if (orientation >= 5 && orientation <= 8) {
+        // The TIFF codec has already applied the flips, leaving only an axis swap for these tags.
+        return orientation % 2 ? 5 : 7;
+      }
+    } catch {
+      // The TIFF metadata reader is available only on newer image runtimes.
+    }
+    return 1;
+  }
+  try {
+    const tag = await source.getImageProperty(image.PropertyKey.ORIENTATION, { defaultValue: '' });
+    const value = tag.trim().toLowerCase();
+    const numeric = Number(value);
+    if (Number.isInteger(numeric) && numeric >= 1 && numeric <= 8) return numeric;
+    const named = EXIF_ORIENTATIONS.indexOf(value) + 1;
+    if (named) return named;
+  } catch {
+    // The older EXIF API has limited codec support.
+  }
+  return 1;
+}
+
+async function orientUploadPixels(pixels: image.PixelMap, original: image.Size, orientation: number): Promise<void> {
+  const rotation = EXIF_ROTATIONS[orientation] ?? 0;
+  if ((rotation === 90 || rotation === 270) && original.width !== original.height) {
+    const decoded = (await pixels.getImageInfo()).size;
+    if (decoded.width === original.height && decoded.height === original.width) return;
+  }
+  const horizontal = orientation === 2 || orientation === 5 || orientation === 7;
+  const vertical = orientation === 4;
+  if (horizontal || vertical) await pixels.flip(horizontal, vertical);
+  if (rotation) await pixels.rotate(rotation);
+}
+
 async function convertImage(file: UploadFile): Promise<UploadFile> {
   const path = file.localPath + '.' + util.generateRandomUUID(true) + '.upload';
   let source: image.ImageSource | undefined;
@@ -373,12 +430,15 @@ async function convertImage(file: UploadFile): Promise<UploadFile> {
   let packer: image.ImagePacker | undefined;
   try {
     source = image.createImageSource(file.localPath);
-    const info = await source.getImageInfo();
-    const scale = Math.max(1, Math.max(info.size.width, info.size.height) / 4096);
-    pixels = await source.createPixelMap({
-      desiredSize: { width: Math.max(1, Math.round(info.size.width / scale)),
-        height: Math.max(1, Math.round(info.size.height / scale)) },
-    });
+    const size = (await source.getImageInfo()).size;
+    if (!Number.isSafeInteger(size.width) || !Number.isSafeInteger(size.height) ||
+      size.width < 1 || size.height < 1 || Math.max(size.width, size.height) > MAX_UPLOAD_DECODE_SIDE ||
+      size.width * size.height > MAX_UPLOAD_DECODE_PIXELS) {
+      return file;
+    }
+    const orientation = await uploadOrientation(source, file.mimeType);
+    pixels = await source.createPixelMap({ editable: orientation > 1 });
+    if (orientation > 1) await orientUploadPixels(pixels, size, orientation);
     packer = image.createImagePacker();
     const out = await fileIo.open(path, fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
     try {
@@ -386,8 +446,8 @@ async function convertImage(file: UploadFile): Promise<UploadFile> {
     } finally {
       await fileIo.close(out);
     }
-    const size = (await fileIo.stat(path)).size;
-    if (!size || size > MAX_BYTES) {
+    const encodedSize = (await fileIo.stat(path)).size;
+    if (!encodedSize || encodedSize > MAX_BYTES) {
       throw new Error('图片转换大小无效。');
     }
     const dot = file.name.lastIndexOf('.');
@@ -678,7 +738,7 @@ export class NativeChatAttachments {
       temporary: false,
     };
     if (item.isImage && !['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(file.mimeType)) {
-      file = await convertImage(file);
+      file = await queueImageConversion(file, transfer);
     }
     try {
       rejectCanceled(transfer);
