@@ -359,7 +359,8 @@ struct NativeChat {
   private rejectedImageBinding: string = '';
   private rejectedHistoryImages: Set<string> = new Set();
   private streamFrame: number = -1;
-  private touchStart: number = 0;
+  private drawerTouchDownAt: number = 0;
+  private drawerPanStartedAt: number | undefined;
   private titleTap: number = 0;
   private readonly recognition = new HarmonySpeechRecognition((id: string, state: string, text?: string, code?: string) => {
     if (id !== this.recognitionId) {
@@ -2877,8 +2878,39 @@ struct NativeChat {
     return Math.min(this.viewportWidth * 0.82, 310);
   }
 
-  private drawerProgress(): number {
-    return this.wide() ? 0 : Math.max(0, Math.min(1, (this.drawerOpen ? 1 : 0) + this.drawerDrag / this.drawerWidth()));
+  private drawerProgress(offset: number = this.drawerDrag): number {
+    return this.wide() ? 0 : Math.max(0, Math.min(1, (this.drawerOpen ? 1 : 0) + offset / this.drawerWidth()));
+  }
+
+  private canPanDrawer(): boolean {
+    return !this.wide() && this.authenticated() && !this.settingsVisible && !this.renamingId && !this.authorizing &&
+      !this.imagePreview && !this.shareImportVisible && !this.sourcePanelEntry && !this.migrationPromptVisible &&
+      !this.migrationChoice && !this.deleteNotice && !this.updateNotice;
+  }
+
+  private startDrawerPan(event: GestureEvent): void {
+    this.drawerPanStartedAt = undefined;
+    if (!this.canPanDrawer() || Math.abs(event.offsetX) <= Math.abs(event.offsetY) * 1.25 ||
+      (this.drawerOpen ? event.offsetX >= 0 : event.offsetX <= 0)) return;
+    this.drawerPanStartedAt = this.drawerTouchDownAt || event.timestamp;
+  }
+
+  private finishDrawerPan(event?: GestureEvent): void {
+    const startedAt = this.drawerPanStartedAt;
+    this.drawerPanStartedAt = undefined;
+    if (event && startedAt !== undefined && this.canPanDrawer()) {
+      // The release can extend past the last rendered frame. Use its actual position and time.
+      const velocity = event.offsetX / Math.max(1, (event.timestamp - startedAt) / 1000000);
+      const progress = this.drawerProgress(event.offsetX);
+      const open = this.drawerOpen ? progress >= 0.72 && velocity >= -0.4 : progress > 0.28 || velocity > 0.4;
+      if (open !== this.drawerOpen) {
+        this.setDrawer(open);
+        return;
+      }
+    }
+    if (this.drawerDrag !== 0) {
+      this.getUIContext().animateTo({ duration: 260, curve: Curve.EaseOut }, () => { this.drawerDrag = 0; });
+    }
   }
 
   @Builder
@@ -5300,23 +5332,19 @@ struct NativeChat {
       }
     })
     // Leave horizontal drags on scrollable message content to the child first.
+    .onTouch((event: TouchEvent) => {
+      if (event.type === TouchType.Down && event.touches.length === 1) this.drawerTouchDownAt = event.timestamp;
+    })
     .gesture(
-      PanGesture({ direction: PanDirection.Horizontal, distance: 14 })
-        .onActionStart((event: GestureEvent) => { this.touchStart = event.fingerList[0]?.globalX ?? this.viewportWidth; })
+      PanGesture({ direction: PanDirection.Horizontal, distance: 12 })
+        .onActionStart((event: GestureEvent) => { this.startDrawerPan(event); })
         .onActionUpdate((event: GestureEvent) => {
-          if (!this.wide() && this.authenticated() && !this.settingsVisible && !this.renamingId && !this.authorizing &&
-            !this.imagePreview && !this.shareImportVisible && !this.sourcePanelEntry && !this.migrationPromptVisible &&
-            !this.migrationChoice &&
-            (this.drawerOpen || this.touchStart < 160)) {
+          if (this.drawerPanStartedAt !== undefined && this.canPanDrawer()) {
             this.drawerDrag = event.offsetX;
           }
         })
-        .onActionEnd(() => {
-          if (this.drawerDrag !== 0) {
-            this.setDrawer(this.drawerProgress() > (this.drawerOpen ? 0.72 : 0.28));
-          }
-        })
-        .onActionCancel(() => { this.drawerDrag = 0; })
+        .onActionEnd((event: GestureEvent) => { this.finishDrawerPan(event); })
+        .onActionCancel(() => { this.finishDrawerPan(); })
     )
   }
 }
