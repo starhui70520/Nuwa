@@ -2,6 +2,7 @@ import { abilityAccessCtrl, common, Permissions } from '@kit.AbilityKit';
 import { audio } from '@kit.AudioKit';
 import { speechRecognizer } from '@kit.CoreSpeechKit';
 import { HarmonyCloudSpeech, describeHarmonySpeechError } from './HarmonyCloudSpeech';
+import { HarmonyOfflineEnglish } from './HarmonyOfflineEnglish';
 import { HarmonySpeechError, HarmonySpeechOptions, HarmonySpeechRoute, resolveHarmonySpeechRoute } from './HarmonySpeechOptions';
 import { encodeHarmonySpeechWav, HARMONY_ASR_MAX_BYTES, HARMONY_ASR_MAX_SECONDS, HARMONY_ASR_SAMPLE_RATE } from './HarmonySpeechWav';
 
@@ -34,6 +35,7 @@ class RecognitionSession {
   engine?: speechRecognizer.SpeechRecognitionEngine;
   capturer?: audio.AudioCapturer;
   cloud?: HarmonyCloudSpeech;
+  english?: HarmonyOfflineEnglish;
   route?: HarmonySpeechRoute;
   pcm?: Uint8Array;
   byteCount: number = 0;
@@ -100,6 +102,10 @@ export class HarmonySpeechRecognition {
     this.clearTimer(session);
     this.clearLimitTimer(session);
     this.emit(id, 'transcribing');
+    if (session.english) {
+      void this.transcribeEnglish(session, session.english);
+      return;
+    }
     if (session.capturer && !session.deviceExternal) {
       void this.transcribe(session);
       return;
@@ -134,6 +140,7 @@ export class HarmonySpeechRecognition {
     this.clearTimer(session);
     this.clearLimitTimer(session);
     session.cloud?.cancel();
+    session.english?.cancel();
     session.pcm = undefined;
     this.releaseDevice(session);
     void this.releaseCapturer(session);
@@ -145,13 +152,15 @@ export class HarmonySpeechRecognition {
       return;
     }
     const engine = options?.engine ?? 'native';
+    const english = (options?.locale ?? '').toLowerCase().startsWith('en');
     session.route = engine === 'native' ? undefined : resolveHarmonySpeechRoute(options, false);
     if (engine === 'cloud' && !session.route) {
       this.fail(session, 'key-required');
       return;
     }
     const nativeAvailable = canIUse('SystemCapability.AI.SpeechRecognizer');
-    if (!nativeAvailable && !session.route) {
+    const offlineEnglish = english && engine !== 'cloud' && !session.route;
+    if (!offlineEnglish && !nativeAvailable && !session.route) {
       this.fail(session, 'unavailable');
       return;
     }
@@ -169,8 +178,9 @@ export class HarmonySpeechRecognition {
       return;
     }
 
-    // The on-device recognizer is Mandarin-only. In Auto, English can use the configured cloud route.
-    if (engine === 'cloud' || !nativeAvailable || (session.route && options?.locale.toLowerCase().startsWith('en'))) {
+    if (offlineEnglish) {
+      await this.openEnglishRecorder(session, context);
+    } else if (engine === 'cloud' || !nativeAvailable || (english && session.route)) {
       await this.openCloudRecorder(session);
     } else {
       await this.openDevice(session);
@@ -375,6 +385,37 @@ export class HarmonySpeechRecognition {
     }
   }
 
+  private async openEnglishRecorder(session: RecognitionSession, context: common.UIAbilityContext): Promise<void> {
+    if (!canIUse('SystemCapability.Multimedia.Audio.Capturer')) {
+      this.fail(session, 'unavailable');
+      return;
+    }
+    const recognizer = new HarmonyOfflineEnglish();
+    session.english = recognizer;
+    await recognizer.open(context);
+    if (this.active !== session) return;
+    await this.startCapturer(session, (data: ArrayBuffer): void => {
+      if (this.active !== session || session.finishing) return;
+      try {
+        this.updateLevel(session, data);
+        recognizer.write(data);
+      } catch {
+        this.fail(session, 'failed');
+      }
+    });
+  }
+
+  private async transcribeEnglish(session: RecognitionSession, recognizer: HarmonyOfflineEnglish): Promise<void> {
+    await this.releaseCapturer(session);
+    if (this.active !== session) return;
+    try {
+      session.text = await recognizer.finish();
+      this.complete(session);
+    } catch {
+      this.fail(session, 'failed');
+    }
+  }
+
   private async startCapturer(session: RecognitionSession, onData: (data: ArrayBuffer) => void): Promise<void> {
     session.captureStarting = true;
     try {
@@ -386,7 +427,8 @@ export class HarmonySpeechRecognition {
           encodingType: audio.AudioEncodingType.ENCODING_TYPE_RAW,
         },
         capturerInfo: {
-          source: session.deviceExternal ? audio.SourceType.SOURCE_TYPE_VOICE_RECOGNITION : audio.SourceType.SOURCE_TYPE_MIC,
+          source: session.deviceExternal || session.english ?
+            audio.SourceType.SOURCE_TYPE_VOICE_RECOGNITION : audio.SourceType.SOURCE_TYPE_MIC,
           capturerFlags: 0,
         },
       };

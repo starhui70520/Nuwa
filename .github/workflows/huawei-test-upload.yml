@@ -163,7 +163,10 @@ jobs:
 
       - name: Build release APP pack
         working-directory: harmony
+        env:
+          NODE_24: ${{ steps.build-config.outputs.node }}
         run: |
+          "$NODE_24" scripts/prepare-offline-english.mjs
           ohpm install --all
           hvigorw assembleApp --mode project -p product=default -p buildMode=release --no-daemon
 

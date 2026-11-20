@@ -51,3 +51,6 @@ harmony/entry/src/main/resources/rawfile/math/katex.min.js
 harmony/entry/src/main/resources/rawfile/math/mhchem.min.js
 harmony/entry/src/main/resources/rawfile/math/fonts.js
 harmony/entry/src/main/resources/rawfile/math/KATEX-LICENSE.txt
+/harmony/vendor/sherpa_onnx-2.0.2.har
+/harmony/entry/src/main/resources/rawfile/en-model/
+/harmony/entry/oh-package-lock.json5

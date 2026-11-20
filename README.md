@@ -37,6 +37,23 @@ npx cap sync android
 npx cap open android
 ```
 
+### HarmonyOS 原生构建
+
+安装带原生工具链的 HarmonyOS CLI、Java 17、Node.js 22.2 或更新版本、`curl` 和 `tar`。初始化 HarmonyOS SDK 环境后运行以下命令。英文听写模型和原生库在构建前按固定版本下载并校验，运行时可离线识别。
+
+```bash
+cd chat-demo
+pnpm install --frozen-lockfile
+pnpm build
+cp -R dist/. ../harmony/entry/src/main/resources/rawfile/web/
+node ../harmony/scripts/stage-mermaid.mjs
+node ../harmony/scripts/stage-katex.mjs
+cd ../harmony
+node scripts/prepare-offline-english.mjs
+ohpm install --all
+hvigorw assembleHap --mode module -p product=default -p buildMode=debug --no-daemon
+```
+
 ### 浏览器迁移扩展
 
 1. 打开 Chrome / Edge 扩展管理页面（`chrome://extensions` 或 `edge://extensions`），开启**开发者模式**。

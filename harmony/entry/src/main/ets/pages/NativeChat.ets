@@ -3662,11 +3662,11 @@ struct NativeChat {
     }
     .width('100%').borderRadius(16).clip(true).backgroundColor($r('app.color.native_chat_surface'))
     Text(this.settings.speechEngine === 'native' ?
-      this.label('语音输入与回答朗读由鸿蒙系统语音服务处理', 'HarmonyOS speech services handle voice input and read-aloud.') :
+      this.label('在设备上进行语音输入和朗读，支持离线英文听写。', 'Uses on-device speech and supports offline English dictation.') :
       this.settings.speechEngine === 'cloud' ?
         this.label('云端语音会将录音或朗读文本发送给配置的语音服务。', 'Cloud speech sends recordings or read-aloud text to the configured speech service.') :
-        this.label('优先使用鸿蒙系统语音，可用时回退至配置的云端语音服务。',
-          'Uses HarmonyOS speech first, with your configured cloud speech service as a fallback.'))
+        this.label('自动使用本地语音和已配置的云端服务，未配置云端时可离线英文听写。',
+          'Uses on-device speech and your cloud service. Without a cloud service, English dictation works offline.'))
       .width('100%').fontSize(12)
       .fontColor($r('app.color.native_chat_secondary')).padding({ left: 9 })
     this.settingsLabel(() => this.label('关于', 'About'))

@@ -1,0 +1,29 @@
+Offline English speech recognition in Nuwa
+
+Sherpa-ONNX v2.0.2, The next-gen Kaldi team
+Apache License, Version 2.0. The official ARM64 and x86-64 HarmonyOS libraries
+are used with the matching HarmonyOS ArkTS and Node-API wrapper source.
+https://github.com/k2-fsa/sherpa-onnx/tree/v2.0.2
+
+Sherpa-ONNX streaming Zipformer English model (20M, 2023-02-17)
+The model export and the original Icefall English model are licensed under
+the Apache License, Version 2.0. Nuwa uses the exported INT8 encoder and
+the original decoder, joiner and token list.
+https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17
+https://huggingface.co/desh2608/icefall-asr-librispeech-pruned-transducer-stateless7-streaming-small
+
+Node.js Node-API C++ headers, Node.js contributors
+MIT License. The packaged wrapper is built using the Sherpa-ONNX HarmonyOS
+patch to napi-inl.h. The patch supplies the buffer-length output pointer
+required by HarmonyOS.
+https://github.com/nodejs/node-addon-api/tree/c679f6f4c9dc6bf9fc0d99cbe5982bd24a5e2c7b
+
+ONNX Runtime 1.16.3, Microsoft Corporation and contributors
+MIT License. See the accompanying ONNX Runtime license and third-party
+notices.
+https://github.com/microsoft/onnxruntime
+
+The native runtime also incorporates Kaldi Native Fbank, Kaldi Native IO,
+KissFFT, OpenFst, utf8proc, KaldiFST, Kaldi Decoder, Kaldi HMM-GMM,
+Simple SentencePiece, JSON for Modern C++, hclust-cpp and LLVM libc++.
+Their respective license texts accompany this notice.
