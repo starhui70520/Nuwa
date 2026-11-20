@@ -145,6 +145,7 @@ const DEEPSEEK_DOCS_URL = 'https://api-docs.deepseek.com/zh-cn/';
 const DELETE_FILE_DOCS_URL = 'https://api-docs.deepseek.com/api/delete-file';
 const HISTORY_SAVE_RETRY_DELAYS = [1000, 2500];
 const STREAM_CHECKPOINT_MS = 1500;
+const USER_BUBBLE_HORIZONTAL_PADDING = 16;
 
 @Component
 struct NativeAssistantMessageRow {
@@ -3534,6 +3535,12 @@ struct NativeChat {
     else if (this.hoveredMessageId === id) this.hoveredMessageId = '';
   }
 
+  private userBubbleWidth(content: string): number {
+    const ui = this.getUIContext();
+    const textWidth = ui.getMeasureUtils().measureText({ textContent: content, fontSize: this.appFontSize(16) });
+    return ui.px2vp(textWidth) + 2 * USER_BUBBLE_HORIZONTAL_PADDING;
+  }
+
   @Builder
   private userMessage(message: NativeConversationMessage, index: number) {
     Column({ space: 6 }) {
@@ -3577,8 +3584,10 @@ struct NativeChat {
       } else {
         if (message.content) {
           Text(message.content).fontSize(this.appFontSize(16)).lineHeight(this.appFontSize(24)).fontColor($r('app.color.native_chat_primary'))
-          .constraintSize({ maxWidth: Math.max(140, Math.min(this.viewportWidth - 40, 752) - 68) })
-          .padding({ left: 16, right: 16, top: 10, bottom: 10 }).borderRadius(22)
+            .width(this.userBubbleWidth(message.content))
+            .constraintSize({ maxWidth: this.viewportWidth < 440 ? 'calc(100% - 68vp)' : 'calc(100% - 88vp)' })
+            .padding({ left: USER_BUBBLE_HORIZONTAL_PADDING, right: USER_BUBBLE_HORIZONTAL_PADDING, top: 10, bottom: 10 })
+            .borderRadius(22)
             .backgroundColor($r('app.color.native_chat_bubble')).copyOption(CopyOptions.LocalDevice)
         }
         Row({ space: 10 }) {
@@ -5289,7 +5298,7 @@ struct NativeChat {
             ListItem() { this.messagePager(false) }
           }
         }
-        .width('100%').constraintSize({ maxWidth: this.wide() ? (this.viewportWidth >= 1024 ? 792 : 680) : 840 })
+        .width('100%').constraintSize({ maxWidth: this.viewportWidth >= 1024 ? 792 : 680 })
         .layoutWeight(1).scrollBar(BarState.Auto)
         .cachedCount(4).onScrollIndex((start: number) => { this.firstVisibleRow = start; })
         .onScroll((offset: number, state: ScrollState) => { this.observeMessageScroll(offset, state); })
@@ -5300,7 +5309,7 @@ struct NativeChat {
             if (this.followLatest && this.laterCount === 0) this.scrollToLatest();
           }
         })
-        .padding({ left: this.compact() ? 10 : 20, right: this.compact() ? 10 : 20, bottom: 16 })
+        .padding({ left: 20, right: 20, bottom: 16 })
       }
       if (this.loaded && this.status) {
         Text(this.status).fontSize(this.appFontSize(13)).fontColor($r('app.color.native_chat_error'))
