@@ -164,8 +164,20 @@ final class SettingsStore: ObservableObject {
         dshToken = loadedToken
         apiKey = loadedKey
         dshAccountLabel = defaults.string(forKey: Keys.dshAccountLabel) ?? ""
-        authMode = AuthMode(rawValue: defaults.string(forKey: Keys.authMode) ?? "")
-            ?? (!loadedToken.isEmpty ? .deepseekAccount : .apiKey)
+        let storedAuthMode = AuthMode(rawValue: defaults.string(forKey: Keys.authMode) ?? "")
+        let hasToken = !loadedToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasKey = !loadedKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if let storedAuthMode {
+            if storedAuthMode == .apiKey && !hasKey && hasToken {
+                authMode = .deepseekAccount
+            } else if storedAuthMode == .deepseekAccount && !hasToken && hasKey {
+                authMode = .apiKey
+            } else {
+                authMode = storedAuthMode
+            }
+        } else {
+            authMode = hasToken ? .deepseekAccount : .apiKey
+        }
         // Default to DeepSeek Anthropic protocol + deepseek-flash matching Android v0.1.31
         apiProtocol = ApiProtocol(rawValue: defaults.string(forKey: Keys.apiProtocol) ?? "") ?? .anthropic
         apiBaseUrl = defaults.string(forKey: Keys.apiBaseUrl) ?? "https://api.deepseek.com"
@@ -301,7 +313,6 @@ final class SettingsStore: ObservableObject {
         apiProtocol = preset.apiProtocol
         apiBaseUrl = preset.baseUrl
         apiModel = preset.defaultModel
-        authMode = .apiKey
     }
 
     func refreshBalance(force: Bool = false) async {

@@ -43,6 +43,9 @@ struct SettingsView: View {
 
     @State private var page: SettingsSubpage = .root
     @State private var showApiKey = false
+    @State private var apiProtocolDraft: ApiProtocol = .anthropic
+    @State private var apiBaseUrlDraft = ""
+    @State private var apiModelDraft = ""
     @State private var apiKeyDraft = ""
     @State private var verifyingKey = false
     @State private var keyVerifyError: String?
@@ -167,7 +170,7 @@ struct SettingsView: View {
         }
         .environment(\.nuwaFontScale, fontScale)
         .task {
-            apiKeyDraft = settings.apiKey
+            syncAccountDrafts()
             await settings.refreshBalance()
         }
         .sheet(isPresented: $showDeepSeekAuth) {
@@ -289,8 +292,7 @@ struct SettingsView: View {
                 label: L10n.t("accountManage", locale: loc),
                 value: settings.profileDisplayName
             ) {
-                apiKeyDraft = settings.apiKey
-                keyVerifyError = nil
+                syncAccountDrafts()
                 withAnimation(.easeInOut(duration: 0.2)) { page = .account }
             }
             rowDivider
@@ -537,34 +539,42 @@ struct SettingsView: View {
         }
         .padding(.top, 8)
 
-        groupTitle("自定义 API 配置")
-        groupCard {
-            VStack(alignment: .leading, spacing: 14) {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(ProviderPreset.presets) { preset in
-                            let selected = settings.apiBaseUrl == preset.baseUrl && settings.apiProtocol == preset.apiProtocol
-                            Button {
-                                settings.applyPreset(preset)
-                            } label: {
-                                Text(preset.name)
-                                    .font(NuwaFont.badge(fontScale))
-                                    .foregroundStyle(selected ? Color.nuwaBrandText : Color.nuwaLabelPrimary)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 6)
-                                    .nuwaPillSurface(selected: selected)
-                            }
-                            .buttonStyle(NuwaTactileButtonStyle())
-                        }
+        HStack {
+            Text("自定义 API 配置")
+                .font(NuwaFont.sectionHeader(fontScale))
+                .foregroundStyle(Color.nuwaLabelTertiary)
+            Spacer()
+            Menu {
+                ForEach(ProviderPreset.presets) { preset in
+                    Button(preset.name) {
+                        apiProtocolDraft = preset.apiProtocol
+                        apiBaseUrlDraft = preset.baseUrl
+                        apiModelDraft = preset.defaultModel
+                        keyVerifyError = nil
                     }
                 }
+            } label: {
+                HStack(spacing: 4) {
+                    Text("填充模板")
+                        .font(NuwaFont.captionMedium(fontScale))
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+                .foregroundStyle(Color.nuwaBrandText)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 14)
+        .padding(.bottom, 6)
 
+        groupCard {
+            VStack(alignment: .leading, spacing: 14) {
                 HStack {
                     Text("接口协议")
                         .font(NuwaFont.sublabel(fontScale))
                         .foregroundStyle(Color.nuwaLabelPrimary)
                     Spacer()
-                    Picker("接口协议", selection: $settings.apiProtocol) {
+                    Picker("接口协议", selection: $apiProtocolDraft) {
                         ForEach(ApiProtocol.allCases) { proto in
                             Text(proto.displayName).tag(proto)
                         }
@@ -574,8 +584,8 @@ struct SettingsView: View {
                     .font(NuwaFont.control(fontScale))
                 }
 
-                labeledInput("API 地址 (Base URL)", placeholder: "https://api.deepseek.com", text: $settings.apiBaseUrl)
-                labeledInput("模型名称", placeholder: "deepseek-flash", text: $settings.apiModel)
+                labeledInput("API 地址 (Base URL)", placeholder: "https://api.deepseek.com", text: $apiBaseUrlDraft)
+                labeledInput("模型名称", placeholder: "deepseek-flash", text: $apiModelDraft)
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text("API Key")
@@ -637,6 +647,11 @@ struct SettingsView: View {
             }
             .padding(16)
         }
+        Text("仅在点击「验证并保存 API Key」并通过校验后才会切换为自定义 API，查看或编辑草稿不会影响当前登录状态。")
+            .font(NuwaFont.badge(fontScale))
+            .foregroundStyle(Color.nuwaLabelTertiary)
+            .padding(.horizontal, 12)
+            .padding(.top, 8)
     }
 
     // MARK: - Subpage: 数据管理
@@ -1121,18 +1136,32 @@ struct SettingsView: View {
         migrationOptions = MigrationLaunchOptions(clearSession: clearSession, forceReExport: forceReExport)
     }
 
+    private func syncAccountDrafts() {
+        apiProtocolDraft = settings.apiProtocol
+        apiBaseUrlDraft = settings.apiBaseUrl
+        apiModelDraft = settings.apiModel
+        apiKeyDraft = settings.apiKey
+        keyVerifyError = nil
+    }
+
     private func verifyAndSaveApiKey() async {
         let trimmed = apiKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        let trimmedBase = apiBaseUrlDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let effectiveBase = trimmedBase.isEmpty ? "https://api.deepseek.com" : trimmedBase
+        let trimmedModel = apiModelDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         verifyingKey = true
         keyVerifyError = nil
         defer { verifyingKey = false }
         do {
             try await AIClient.verifyApiKey(
                 apiKey: trimmed,
-                apiProtocol: settings.apiProtocol,
-                baseUrl: settings.apiBaseUrl
+                apiProtocol: apiProtocolDraft,
+                baseUrl: effectiveBase
             )
+            settings.apiProtocol = apiProtocolDraft
+            settings.apiBaseUrl = effectiveBase
+            settings.apiModel = trimmedModel
             settings.apiKey = trimmed
             settings.authMode = .apiKey
             await settings.refreshBalance(force: true)
