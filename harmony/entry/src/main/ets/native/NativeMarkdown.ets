@@ -7,6 +7,7 @@ import { NativeChatSource, safeNativeSourceUrl } from './NativeChatSources';
 import { NativeHighlightedCode } from './NativeHighlightedCode';
 import { NativeLocale } from './NativeLocation';
 import { NativeMathEquation } from './NativeMathEquation';
+import { NativeMessageSelection } from './NativeMessageSelection';
 import {
   NativeMathPicture, NativeMathPictureRequest, nativeMathPictureKey, requestNativeMathPicture,
 } from './NativeMathRenderQueue';
@@ -742,7 +743,8 @@ export struct NativeMarkdown {
     }, (block: NativeMarkdownBlock, index: number): string => this.renderKey(block, index))
   }
 
-  build() {
+  @Builder
+  private markdownBody() {
     Column() {
       this.renderBlocks(this.blocks(), 'markdown')
     }
@@ -752,5 +754,9 @@ export struct NativeMarkdown {
       const width = Number(area.width);
       if (width > 0 && width !== this.contentWidth) this.contentWidth = width;
     })
+  }
+
+  build() {
+    NativeMessageSelection({ content: () => { this.markdownBody() } })
   }
 }
