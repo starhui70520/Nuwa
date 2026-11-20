@@ -54,6 +54,8 @@ harmony/entry/src/main/resources/rawfile/math/KATEX-LICENSE.txt
 /harmony/entry/src/main/ets/native/prism/PrismGrammars.js
 /harmony/entry/src/main/ets/native/prism/PrismStyles.js
 /harmony/entry/src/main/resources/rawfile/prism/PRISM-LICENSE.txt
+/harmony/entry/src/main/ets/native/markdown/MarkdownAstBundle.js
+/harmony/entry/src/main/resources/rawfile/markdown/MARKDOWN-LICENSES.txt
 /harmony/vendor/sherpa_onnx-2.0.2.har
 /harmony/entry/src/main/resources/rawfile/en-model/
 /harmony/entry/oh-package-lock.json5

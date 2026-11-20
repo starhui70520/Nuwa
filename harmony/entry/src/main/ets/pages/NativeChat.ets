@@ -3124,7 +3124,7 @@ struct NativeChat {
     if (message().content.length > (message().toolTimeline?.answerOffset ?? 0)) {
       NativeMarkdown({
         content: this.withCitationMarkers(message().content, message().citations ?? [], message().toolTimeline?.answerOffset ?? 0),
-        fontScale: this.settings.chatFontSize / 16, hasCitations: !!message().citations?.length,
+        fontScale: this.settings.chatFontSize / 16, viewportWidth: this.viewportWidth, hasCitations: true,
         citationSources: message().sources ?? [], citationHoverEnabled: this.wide(),
         locale: this.settings.locale, theme: this.settings.theme,
         loading: message().status === 'pending' || message().status === 'streaming',

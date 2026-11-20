@@ -57,6 +57,22 @@
       "value": "#1FFFFFFF"
     },
     {
+      "name": "native_chat_table_header_border",
+      "value": "#29FFFFFF"
+    },
+    {
+      "name": "native_chat_inline_code",
+      "value": "#2C2C2E"
+    },
+    {
+      "name": "native_chat_citation_bg",
+      "value": "#2C2C2E"
+    },
+    {
+      "name": "native_chat_citation_text",
+      "value": "#ADB2B8"
+    },
+    {
       "name": "native_chat_glass_stroke",
       "value": "#24FFFFFF"
     },

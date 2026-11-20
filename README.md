@@ -39,7 +39,7 @@ npx cap open android
 
 ### HarmonyOS 原生构建
 
-安装带原生工具链的 HarmonyOS CLI、Java 17、Node.js 22.2 或更新版本、`curl` 和 `tar`。初始化 HarmonyOS SDK 环境后运行以下命令。英文听写模型和原生库在构建前按固定版本下载并校验，运行时可离线识别。
+安装带原生工具链的 HarmonyOS CLI、Java 17、Node.js 22.12 或更新版本、`curl` 和 `tar`。初始化 HarmonyOS SDK 环境后运行以下命令。英文听写模型和原生库在构建前按固定版本下载并校验，运行时可离线识别。
 
 ```bash
 cd chat-demo
@@ -49,6 +49,7 @@ cp -R dist/. ../harmony/entry/src/main/resources/rawfile/web/
 node ../harmony/scripts/stage-mermaid.mjs
 node ../harmony/scripts/stage-katex.mjs
 node ../harmony/scripts/stage-prism.mjs
+node ../harmony/scripts/stage-markdown.mjs
 cd ../harmony
 node scripts/prepare-offline-english.mjs
 ohpm install --all

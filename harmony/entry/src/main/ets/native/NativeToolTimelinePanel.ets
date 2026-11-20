@@ -304,7 +304,8 @@ export struct NativeToolTimelinePanel {
           NativeMarkdown({
             content: this.sourceText(step), fontScale: this.fontScale * 0.85,
             locale: this.locale, citationSources: this.sources, citationHoverEnabled: this.citationHoverEnabled,
-            hasCitations: this.citations.length > 0, onCitation: (index: number): void => { this.openCitation(index); },
+            hasCitations: true, loading: this.streaming && step.key === this.view.steps[this.view.steps.length - 1]?.key,
+            onCitation: (index: number): void => { this.openCitation(index); },
           })
         } else if (step.type === 'thinking' && step.text) {
           NativeMarkdown({
