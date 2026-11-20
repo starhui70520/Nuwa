@@ -35,6 +35,12 @@ interface MarkdownBlock {
   math?: NativeMathNode;
 }
 
+interface MarkdownCodeFence {
+  marker: string;
+  indent: number;
+  language: string;
+}
+
 interface InlinePart {
   text: string;
   strong: boolean;
@@ -284,12 +290,12 @@ export struct NativeMarkdown {
     if (this.content === this.cachedContent) {
       return this.cachedBlocks;
     }
-    const lines: string[] = this.content.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+    const lines: string[] = this.content.split(/\r\n|[\r\n]/);
+    const lineBreaks: string[] = this.content.match(/\r\n|[\r\n]/g) ?? [];
     const result: MarkdownBlock[] = [];
     let paragraph: string[] = [];
     let codeLines: string[] = [];
-    let inCode: boolean = false;
-    let codeLanguage: string = 'text';
+    let codeFence: MarkdownCodeFence | undefined;
 
     const flushParagraph = (): void => {
       if (paragraph.length > 0) {
@@ -297,29 +303,41 @@ export struct NativeMarkdown {
         paragraph = [];
       }
     };
+    const flushCode = (closed: boolean): void => {
+      if (codeFence) {
+        result.push({
+          kind: 'code', text: codeLines.join(''), level: 0, ordered: false, marker: '',
+          lang: codeFence.language, closed: closed,
+        });
+        codeLines = [];
+        codeFence = undefined;
+      }
+    };
 
     for (let i: number = 0; i < lines.length; i++) {
       const line: string = lines[i];
-      const trimmed: string = line.trim();
-      if (trimmed.startsWith('```') || trimmed.startsWith('~~~')) {
-        if (inCode) {
-          result.push({
-            kind: 'code', text: codeLines.join('\n'), level: 0, ordered: false, marker: '',
-            lang: codeLanguage, closed: true,
-          });
-          codeLines = [];
-          inCode = false;
-        } else {
-          flushParagraph();
-          inCode = true;
-          codeLanguage = trimmed.substring(3).trim().split(/\s+/)[0] || 'text';
+      const fence = line.match(/^([ \t]*)(\x60{3,}|~{3,})([\s\S]*)$/);
+      if (codeFence) {
+        if (fence && fence[2].charAt(0) === codeFence.marker.charAt(0) && fence[2].length >= codeFence.marker.length &&
+          /^[ \t]*$/.test(fence[3])) {
+          flushCode(true);
+        } else if (line.length > 0 || i < lines.length - 1) {
+          // Copy the original line endings between code lines. The final split entry can be a separator.
+          if (codeLines.length > 0) codeLines.push(lineBreaks[i - 1]);
+          codeLines.push(this.stripCodeFenceIndent(line, codeFence.indent));
         }
         continue;
       }
-      if (inCode) {
-        codeLines.push(line);
+      if (fence && (fence[2].charAt(0) === '~' || !fence[3].includes('`'))) {
+        flushParagraph();
+        let indent = 0;
+        for (const whitespace of fence[1]) {
+          indent += whitespace === '\t' ? 4 - indent % 4 : 1;
+        }
+        codeFence = { marker: fence[2], indent: indent, language: fence[3].trim().split(/\s+/)[0] || 'text' };
         continue;
       }
+      const trimmed: string = line.trim();
       if (trimmed.length === 0) {
         flushParagraph();
         continue;
@@ -405,13 +423,28 @@ export struct NativeMarkdown {
       paragraph.push(line);
     }
 
-    if (inCode) {
-      result.push({ kind: 'code', text: codeLines.join('\n'), level: 0, ordered: false, marker: '', lang: codeLanguage });
-    }
+    flushCode(false);
     flushParagraph();
     this.cachedContent = this.content;
     this.cachedBlocks = result;
     return result;
+  }
+
+  private stripCodeFenceIndent(line: string, indent: number): string {
+    let offset = 0;
+    let columns = 0;
+    while (columns < indent) {
+      const char = line.charAt(offset);
+      if (char === ' ') {
+        columns += 1;
+      } else if (char === '\t') {
+        columns += 4 - columns % 4;
+      } else {
+        break;
+      }
+      offset++;
+    }
+    return ' '.repeat(Math.max(0, columns - indent)) + line.slice(offset);
   }
 
   private tableCells(line: string): string[] {

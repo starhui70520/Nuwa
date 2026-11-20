@@ -1,6 +1,7 @@
 import { util } from '@kit.ArkTS';
 import { http } from '@kit.NetworkKit';
 import { NativeConversation, NativeConversationMessage } from './NativeConversation';
+import { buildArchivedNativeTimeline, NativeArchiveTimelineFragment } from './NativeToolTimeline';
 
 const SHARE_ENDPOINT = 'https://chat.deepseek.com/api/v0/share/content?share_id=';
 const SHARE_URL = /(?:^|[^A-Za-z0-9_@%/.\-])(?:https?:\/\/)?chat\.deepseek\.com\/share\/([A-Za-z0-9_-]{4,64})(?=$|[/?#\s)"'!.,;>\]，。！？）】”》])/i;
@@ -49,12 +50,6 @@ interface ShareResponse {
   data?: ShareResult | null;
 }
 
-interface ShareArchiveFragment {
-  type: string;
-  content: string;
-  elapsed_secs?: number | null;
-}
-
 interface ShareArchiveMessage {
   id: number;
   parent_id: number | null;
@@ -64,7 +59,7 @@ interface ShareArchiveMessage {
   search_enabled: boolean;
   accumulated_token_usage: number;
   inserted_at: string;
-  fragments: ShareArchiveFragment[];
+  fragments: NativeArchiveTimelineFragment[];
 }
 
 interface ShareArchiveSession {
@@ -177,7 +172,7 @@ function normalizedNode(row: ShareRow, role: string, now: number): ShareNode {
   if (parent !== null && (!numberId(parent) || parent === id)) {
     return invalidGraph();
   }
-  const fragments: ShareArchiveFragment[] = [];
+  const fragments: NativeArchiveTimelineFragment[] = [];
   const response: string[] = [];
   const thoughts: string[] = [];
   const raw = Array.isArray(row.fragments) ? row.fragments : [];
@@ -211,7 +206,7 @@ function normalizedNode(row: ShareRow, role: string, now: number): ShareNode {
       });
     }
   }
-  const content = role === 'USER' ? response.join('\n').trim() : response.join('\n');
+  const content = role === 'USER' ? response.join('\n').trim() : response.join('');
   if (role === 'USER' && content) {
     fragments.push({ type: 'REQUEST', content: content });
   }
@@ -226,6 +221,15 @@ function normalizedNode(row: ShareRow, role: string, now: number): ShareNode {
     createdAt: time,
     status: role === 'ASSISTANT' ? (error ? 'error' : 'done') : undefined,
   };
+  if (role === 'ASSISTANT') {
+    message.thinking = row.thinking_enabled === true;
+    message.search = row.search_enabled === true;
+    const view = buildArchivedNativeTimeline(fragments, message.id);
+    if (view.steps.length) {
+      message.toolTimeline = { steps: view.steps, answer: '', answerOffset: view.answerOffset,
+        thinkingSeconds: view.thinkingSeconds };
+    }
+  }
   const archived: ShareArchiveMessage = {
     id: id,
     parent_id: parent,

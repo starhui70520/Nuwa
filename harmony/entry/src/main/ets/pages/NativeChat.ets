@@ -217,6 +217,7 @@ struct NativeChat {
   private readonly updateSchedule = new NativeUpdateSchedule();
   private updatePreferences: NativeUpdatePreferences = { checkAt: 0, dismissedAt: 0, dismissedVersion: '' };
   private pendingUpdate: NativeUpdateCheck | null = null;
+  private updateDialogOpen: boolean = false;
   private updateTimer: number = -1;
   private readonly attachments = new NativeChatAttachments();
   private readonly backup = new NativeChatBackup();
@@ -1368,13 +1369,13 @@ struct NativeChat {
   }
 
   private pasteComposerAttachments(selection: TextRange): boolean {
-    if (!this.canReceiveAttachmentDrop() || !hasNativeClipboardAttachments()) return false;
+    if (!this.authenticated() || !this.canReceiveFileDrop() || !hasNativeClipboardAttachments()) return false;
     void this.acceptDraftFiles(undefined, selection);
     return true;
   }
 
   private async acceptDraftFiles(drop?: DragEvent, pasteSelection?: TextRange): Promise<void> {
-    if (this.attachmentIntakeDraftId !== null || this.backupBusy || this.signingOut || !this.authenticated()) {
+    if (this.attachmentIntakeDraftId !== null || this.backupBusy || this.signingOut || (!drop && !this.authenticated())) {
       drop?.setResult(DragResult.DRAG_FAILED);
       return;
     }
@@ -1400,6 +1401,10 @@ struct NativeChat {
       if (archive && drop) {
         const imported = await this.importChatHistory(false, archive);
         drop.setResult(imported ? DragResult.DRAG_SUCCESSFUL : DragResult.DRAG_FAILED);
+        return;
+      }
+      if (!this.authenticated()) {
+        drop?.setResult(DragResult.DRAG_FAILED);
         return;
       }
       const config = this.requestConfig();
@@ -1445,8 +1450,8 @@ struct NativeChat {
     }
   }
 
-  private canReceiveAttachmentDrop(): boolean {
-    return this.loaded && this.authenticated() && this.attachmentIntakeDraftId === null && !this.backupBusy &&
+  private canReceiveFileDrop(): boolean {
+    return this.loaded && this.attachmentIntakeDraftId === null && !this.backupBusy &&
       !this.settingsVisible && !this.authorizing && !this.signingOut && !this.imagePreview &&
       !this.migrationPromptVisible && !this.migrationChoiceVisible && !this.shareImportVisible;
   }
@@ -1456,8 +1461,9 @@ struct NativeChat {
       this.fileDropHint = null;
       return;
     }
-    const canDrop = this.canReceiveAttachmentDrop();
-    this.fileDropHint = canDrop ? (hasNativeBackupDropType(event) ? 'history' : 'attachment') : null;
+    const canDrop = this.canReceiveFileDrop();
+    this.fileDropHint = canDrop ? (hasNativeBackupDropType(event) ? 'history' :
+      this.authenticated() ? 'attachment' : null) : null;
     event.dragBehavior = DragBehavior.COPY;
     event.setResult(canDrop ? DragResult.DROP_ENABLED : DragResult.DROP_DISABLED);
   }
@@ -1466,7 +1472,7 @@ struct NativeChat {
     this.fileDropHint = null;
     // The TextArea also receives drops directly. An intake already started by either target owns this drop.
     if (!hasNativeAttachmentDropType(event) || this.attachmentIntakeDraftId !== null) return;
-    if (!this.canReceiveAttachmentDrop()) {
+    if (!this.canReceiveFileDrop()) {
       event.setResult(DragResult.DRAG_FAILED);
       return;
     }
@@ -2668,7 +2674,7 @@ struct NativeChat {
         .onDrop((event: DragEvent) => { this.dropAttachments(event); })
         .editMenuOptions({
           onCreateMenu: (items: TextMenuItem[]): TextMenuItem[] => {
-            if (this.canReceiveAttachmentDrop() &&
+            if (this.authenticated() && this.canReceiveFileDrop() &&
               !items.some((item: TextMenuItem): boolean => item.id.equals(TextMenuItemId.PASTE)) &&
               hasNativeClipboardAttachments()) {
               items.unshift({ content: this.label('粘贴', 'Paste'), id: TextMenuItemId.PASTE });
@@ -3360,6 +3366,7 @@ struct NativeChat {
   private async startUpdateChecks(): Promise<void> {
     try {
       this.updatePreferences = await this.updateSchedule.load(this.host());
+      this.pendingUpdate = this.updatePreferences.pendingUpdate ?? null;
     } catch {
       // Update checks remain available if the schedule could not be restored.
     }
@@ -3369,41 +3376,40 @@ struct NativeChat {
           void this.checkUpdate(true, false);
         }
       }, UPDATE_POLL_MS);
-      await this.checkUpdate(true);
+      await this.resumeUpdateChecks(true);
     }
   }
 
-  private async resumeUpdateChecks(): Promise<void> {
-    if (this.pendingUpdate && !this.checkingUpdate && !this.authorizing && !this.backupBusy &&
+  private async resumeUpdateChecks(force: boolean = false): Promise<void> {
+    if (this.pendingUpdate && this.visible && !this.checkingUpdate && !this.authorizing && !this.backupBusy &&
       !isUpdateSnoozed(this.pendingUpdate, this.updatePreferences, Date.now())) {
-      const update = this.pendingUpdate;
-      this.checkingUpdate = true;
-      try {
-        await this.presentUpdate(update);
-      } catch {
-        // The visible page can change before the update dialog opens.
-      } finally {
-        this.checkingUpdate = false;
-      }
+      // Refresh the release metadata while the cached dialog is visible.
+      void this.presentUpdate(this.pendingUpdate).catch(() => {});
     }
-    if (Date.now() - this.updatePreferences.checkAt >= UPDATE_RESUME_MS) {
+    if (force || Date.now() - this.updatePreferences.checkAt >= UPDATE_RESUME_MS) {
       await this.checkUpdate(true);
     }
   }
 
   private async presentUpdate(update: NativeUpdateCheck): Promise<void> {
-    const result = await this.getUIContext().getPromptAction().showDialog({
-      title: this.label(`发现新版本 v${update.latestVersion}`, `Version ${update.latestVersion} is available`),
-      message: `${this.label('当前版本', 'Current version')} v${update.currentVersion}\n\n${update.notes ||
-        this.label('包含体验优化与问题修复。', 'Includes improvements and bug fixes.')}`,
-      buttons: [{ text: this.label('暂不更新', "Not now"), color: '#61666B' }, { text: this.label('前往下载', "Download"), color: '#3964FE' }],
-    });
-    if (result.index === 1) {
-      await this.openLink(update.appGalleryUrl ?? update.downloadUrl ?? update.releaseUrl);
-    } else {
-      this.updatePreferences.dismissedVersion = update.latestVersion;
-      this.updatePreferences.dismissedAt = Date.now();
-      void this.updateSchedule.dismissed(this.host(), update.latestVersion, this.updatePreferences.dismissedAt).catch(() => {});
+    if (this.updateDialogOpen) return;
+    this.updateDialogOpen = true;
+    try {
+      const result = await this.getUIContext().getPromptAction().showDialog({
+        title: this.label(`发现新版本 v${update.latestVersion}`, `Version ${update.latestVersion} is available`),
+        message: `${this.label('当前版本', 'Current version')} v${update.currentVersion}\n\n${update.notes ||
+          this.label('包含体验优化与问题修复。', 'Includes improvements and bug fixes.')}`,
+        buttons: [{ text: this.label('暂不更新', "Not now"), color: '#61666B' }, { text: this.label('前往下载', "Download"), color: '#3964FE' }],
+      });
+      if (result.index === 1) {
+        await this.openLink(update.appGalleryUrl ?? update.downloadUrl ?? update.releaseUrl);
+      } else {
+        this.updatePreferences.dismissedVersion = update.latestVersion;
+        this.updatePreferences.dismissedAt = Date.now();
+        void this.updateSchedule.dismissed(this.host(), update.latestVersion, this.updatePreferences.dismissedAt).catch(() => {});
+      }
+    } finally {
+      this.updateDialogOpen = false;
     }
   }
 
@@ -3415,7 +3421,7 @@ struct NativeChat {
     try {
       const update = await checkNativeUpdate();
       this.updatePreferences.checkAt = Date.now();
-      void this.updateSchedule.checked(this.host(), this.updatePreferences.checkAt).catch(() => {});
+      void this.updateSchedule.checked(this.host(), this.updatePreferences.checkAt, update).catch(() => {});
       this.pendingUpdate = update.hasUpdate ? update : null;
       if (!update.hasUpdate) {
         if (!silent) {
@@ -4441,7 +4447,7 @@ struct NativeChat {
       if (this.uploadQuotaText) {
         this.uploadQuotaToast()
       }
-      if (this.fileDropHint && this.canReceiveAttachmentDrop()) {
+      if (this.fileDropHint && this.canReceiveFileDrop()) {
         if (this.fileDropHint === 'history') {
           this.historyDragMask()
         } else {

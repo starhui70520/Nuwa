@@ -10,6 +10,7 @@ export interface NativeClipboardAttachments {
 }
 
 const ATTACHMENT_MIME_TYPES: string[] = [pasteboard.MIMETYPE_PIXELMAP, pasteboard.MIMETYPE_TEXT_URI];
+const WEB_LINK = /^https?:\/\/[^/?#\s\\]+(?:[/?#][^\s\\]*)?$/i;
 
 function hasAttachmentMime(board: pasteboard.SystemPasteboard): boolean {
   return ATTACHMENT_MIME_TYPES.some((mimeType: string): boolean => board.hasDataType(mimeType));
@@ -36,6 +37,7 @@ export async function readNativeAttachmentClipboard(ownBundle: string): Promise<
   const data = await board.getData();
   const uris = new Set<string>();
   const pixelMaps = new Set<image.PixelMap>();
+  let webLink = '';
   const recordCount = data.getRecordCount();
   try {
     for (let index = 0; index < recordCount; index++) {
@@ -46,6 +48,7 @@ export async function readNativeAttachmentClipboard(ownBundle: string): Promise<
       if (typeof uri === 'string') {
         const localUri = localAttachmentUri(uri, ownBundle);
         if (localUri) uris.add(localUri);
+        else if (!webLink && uri.length <= 4096 && !/[\u0000-\u001f\u007f]/.test(uri) && WEB_LINK.test(uri)) webLink = uri;
       }
       const value = record.mimeType === pasteboard.MIMETYPE_PIXELMAP ? record.pixelMap :
         (additional.includes(pasteboard.MIMETYPE_PIXELMAP) ? await record.getData(pasteboard.MIMETYPE_PIXELMAP) : undefined);
@@ -59,7 +62,7 @@ export async function readNativeAttachmentClipboard(ownBundle: string): Promise<
     }
     result.uris = Array.from(uris);
     if (!result.uris.length && !result.pixelMaps.length) {
-      result.plainText = data.getPrimaryText() ?? '';
+      result.plainText = data.getPrimaryText() || webLink;
     }
     return result;
   } catch (error) {

@@ -4,6 +4,7 @@ import { url } from '@kit.ArkTS';
 import { http } from '@kit.NetworkKit';
 
 const STORE_NAME = 'nuwa_native_updates';
+const PENDING_UPDATE_KEY = 'pendingUpdate';
 export const UPDATE_POLL_MS: number = 30 * 60 * 1000;
 export const UPDATE_RESUME_MS: number = 10 * 60 * 1000;
 const UPDATE_SNOOZE_MS = 6 * 60 * 60 * 1000;
@@ -86,6 +87,12 @@ function compareVersions(left: string, right: string): number {
     }
   }
   return 0;
+}
+
+function isNewerBuild(latestVersion: string, latestVersionCode: number, bundle: NativeBundleVersion): boolean {
+  return latestVersionCode > 0 && bundle.versionCode > 0
+    ? latestVersionCode > bundle.versionCode
+    : compareVersions(latestVersion, bundle.versionName) > 0;
 }
 
 async function getBundleVersion(): Promise<NativeBundleVersion> {
@@ -211,9 +218,7 @@ export async function checkNativeUpdate(): Promise<NativeUpdateCheck> {
   const latestVersion = normalizeVersion(latest.version || currentVersion);
   const latestVersionCode = typeof latest.versionCode === 'number' && Number.isFinite(latest.versionCode)
     ? latest.versionCode : 0;
-  const hasUpdate = latestVersionCode > 0 && bundle.versionCode > 0
-    ? latestVersionCode > bundle.versionCode
-    : compareVersions(latestVersion, currentVersion) > 0;
+  const hasUpdate = isNewerBuild(latestVersion, latestVersionCode, bundle);
   const downloadUrl = hasUpdate && latest.id
     ? `${PORTAL_RELEASES_URL}/${encodeURIComponent(latest.id)}/download`
     : null;
@@ -235,21 +240,67 @@ export interface NativeUpdatePreferences {
   checkAt: number;
   dismissedAt: number;
   dismissedVersion: string;
+  pendingUpdate?: NativeUpdateCheck;
+}
+
+function restorePendingUpdate(raw: string, bundle: NativeBundleVersion): NativeUpdateCheck | undefined {
+  const parsed = JSON.parse(raw) as Object;
+  if (!isRecord(parsed)) return undefined;
+  const cached = parsed as NativeUpdateCheck;
+  if (cached.hasUpdate !== true || typeof cached.latestVersion !== 'string') return undefined;
+  const latestVersion = normalizeVersion(cached.latestVersion);
+  const latestVersionCode = typeof cached.latestVersionCode === 'number' && Number.isFinite(cached.latestVersionCode)
+    ? cached.latestVersionCode : 0;
+  if (!latestVersion || !isNewerBuild(latestVersion, latestVersionCode, bundle)) return undefined;
+
+  const downloadPrefix = PORTAL_RELEASES_URL + '/';
+  const downloadUrl = typeof cached.downloadUrl === 'string' && cached.downloadUrl.startsWith(downloadPrefix) &&
+    /^[^/?#\\]+\/download$/.test(cached.downloadUrl.slice(downloadPrefix.length)) ? cached.downloadUrl : null;
+  const appGalleryUrl = typeof cached.appGalleryUrl === 'string' ?
+    appGalleryLink({ status: 'appgallery', url: cached.appGalleryUrl }) : null;
+  return {
+    currentVersion: normalizeVersion(bundle.versionName),
+    currentVersionCode: bundle.versionCode,
+    latestVersion: latestVersion,
+    latestVersionCode: latestVersionCode,
+    hasUpdate: true,
+    notes: typeof cached.notes === 'string' ? cached.notes : '',
+    releaseUrl: PORTAL_BASE_URL,
+    downloadUrl: downloadUrl,
+    appGalleryUrl: appGalleryUrl,
+    appGalleryNote: appGalleryUrl && typeof cached.appGalleryNote === 'string' ? cached.appGalleryNote : '',
+  };
 }
 
 export class NativeUpdateSchedule {
   async load(context: common.UIAbilityContext): Promise<NativeUpdatePreferences> {
     const store = await preferences.getPreferences(context, STORE_NAME);
-    return {
-      checkAt: await store.get('checkAt', 0) as number,
-      dismissedAt: await store.get('dismissedAt', 0) as number,
-      dismissedVersion: await store.get('dismissedVersion', '') as string,
+    const state: NativeUpdatePreferences = {
+      checkAt: store.getSync('checkAt', 0) as number,
+      dismissedAt: store.getSync('dismissedAt', 0) as number,
+      dismissedVersion: store.getSync('dismissedVersion', '') as string,
     };
+    const cached = store.getSync(PENDING_UPDATE_KEY, '');
+    if (typeof cached === 'string' && cached) {
+      try {
+        state.pendingUpdate = restorePendingUpdate(cached, await getBundleVersion());
+      } catch {
+        // An invalid cache or unavailable local version should not block an update check.
+      }
+    }
+    return state;
   }
 
-  async checked(context: common.UIAbilityContext, checkAt: number): Promise<void> {
+  async checked(context: common.UIAbilityContext, checkAt: number, update: NativeUpdateCheck): Promise<void> {
     const store = await preferences.getPreferences(context, STORE_NAME);
-    await store.put('checkAt', checkAt);
+    const previousCheck = store.getSync('checkAt', 0);
+    if (typeof previousCheck === 'number' && previousCheck > checkAt) return;
+    if (update.hasUpdate) {
+      store.putSync(PENDING_UPDATE_KEY, JSON.stringify(update));
+    } else {
+      store.deleteSync(PENDING_UPDATE_KEY);
+    }
+    store.putSync('checkAt', checkAt);
     await store.flush();
   }
 
