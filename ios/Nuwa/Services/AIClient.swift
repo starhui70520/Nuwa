@@ -424,7 +424,7 @@ enum AIClient {
         }
 
         if isDeepSeekTarget, let reminder = params.latestReminder, !reminder.isEmpty {
-            payloadMessages.append(["role": "latest_reminder", "content": reminder])
+            payloadMessages.append(["role": "latest_reminder", "content": LocationCatalog.normalizeLatestReminder(reminder)])
         }
 
         let (qObj, qHasFile) = buildAnthropicUserMessage(params.question, rejectedFileIds: params.rejectedFileIds)

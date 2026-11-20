@@ -13,6 +13,8 @@ struct LocationProvince: Identifiable, Hashable {
 }
 
 enum LocationCatalog {
+    private static let reminderPlatform = "App"
+
     static let regions: [(code: String, zh: String, en: String)] = [
         ("CN", "中国大陆", "China"),
         ("HK", "中国香港", "Hong Kong"),
@@ -90,6 +92,13 @@ enum LocationCatalog {
 
         let locName = location != nil ? displayName(for: location, locale: locale) : ""
         let langName = locale == .zhCN ? "中文" : "English"
-        return [dateStr, weekday, locName, "iOS", langName].joined(separator: ",")
+        return [dateStr, weekday, locName, reminderPlatform, langName].joined(separator: ",")
+    }
+
+    static func normalizeLatestReminder(_ reminder: String) -> String {
+        var fields = reminder.split(separator: ",", omittingEmptySubsequences: false)
+        guard fields.count == 5, fields[3] == "iOS" else { return reminder }
+        fields[3] = Substring(reminderPlatform)
+        return fields.joined(separator: ",")
     }
 }
