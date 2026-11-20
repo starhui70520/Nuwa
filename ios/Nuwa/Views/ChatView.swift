@@ -51,80 +51,96 @@ struct ChatView: View {
         ZStack {
             Color.nuwaSidebarFill.ignoresSafeArea()
 
-            GeometryReader { geo in
-                let wide = geo.size.width >= 680
-                let drawerWidth = wide ? min(geo.size.width * 0.31, 300) : min(geo.size.width * 0.82, 310)
-                let showSidebar = wide ? sidebarVisible : drawerOpen
-                ZStack(alignment: .leading) {
-                    ChatDrawerLayout(
-                        size: geo.size,
-                        drawerWidth: drawerWidth,
-                        wide: wide,
-                        wideOpen: sidebarVisible,
-                        compactOpen: $drawerOpen,
-                        gestureEnabled: !settings.showMigrationPrompt && !showSettings &&
-                            editingMessageId == nil && previewImage == nil,
-                        hapticEnabled: UIDevice.current.userInterfaceIdiom == .phone && settings.hapticFeedbackEnabled,
-                        dismissKeyboard: dismissKeyboard
-                    ) {
-                        SessionDrawerView(
-                            listStore: listStore,
-                            settings: settings,
-                            activeSessionId: chatStore.activeSessionId,
-                            isOpen: showSidebar,
-                            onSelectSession: { chatStore.selectSession($0) },
-                            onCreateNewSession: { chatStore.createNewSession(silentIfAlreadyNew: true) },
-                            onTogglePin: { chatStore.togglePin($0) },
-                            onSetSessionsPinned: { chatStore.setSessionsPinned($0, pinned: $1) },
-                            onRenameSession: { chatStore.renameSession($0, title: $1) },
-                            onDeleteSession: { chatStore.deleteSession($0) },
-                            onDeleteSessions: { chatStore.deleteSessions($0) },
-                            onSearch: { await chatStore.matchingSessionIDs(query: $0) },
-                            onClose: { if !wide { closeDrawer() } },
-                            onOpenSettings: { showSettings = true }
-                        )
-                        .task {
-                            if wide { await settings.refreshBalance() }
-                        }
-                    } surface: {
-                        mainSurface(sidebarShown: showSidebar, drawerModal: !wide && drawerOpen) {
-                            if wide {
-                                sidebarVisible.toggle()
-                            } else if drawerOpen {
-                                closeDrawer()
-                            } else {
-                                dismissKeyboard()
-                                drawerOpen = true
+            GeometryReader { safeGeo in
+                let safeFrame = safeGeo.frame(in: .named("nuwaRoot"))
+                GeometryReader { fullGeo in
+                    let fullFrame = fullGeo.frame(in: .named("nuwaRoot"))
+                    let topSafe = max(0, safeFrame.minY - fullFrame.minY)
+                    let bottomSafe = max(0, fullFrame.maxY - safeFrame.maxY)
+                    let wide = fullGeo.size.width >= 680
+                    let drawerWidth = wide ? min(fullGeo.size.width * 0.31, 300) : min(fullGeo.size.width * 0.82, 310)
+                    let showSidebar = wide ? sidebarVisible : drawerOpen
+
+                    ZStack(alignment: .leading) {
+                        ChatDrawerLayout(
+                            size: fullGeo.size,
+                            drawerWidth: drawerWidth,
+                            wide: wide,
+                            wideOpen: sidebarVisible,
+                            compactOpen: $drawerOpen,
+                            gestureEnabled: !settings.showMigrationPrompt && !showSettings &&
+                                editingMessageId == nil && previewImage == nil,
+                            hapticEnabled: UIDevice.current.userInterfaceIdiom == .phone && settings.hapticFeedbackEnabled,
+                            dismissKeyboard: dismissKeyboard
+                        ) {
+                            SessionDrawerView(
+                                listStore: listStore,
+                                settings: settings,
+                                activeSessionId: chatStore.activeSessionId,
+                                isOpen: showSidebar,
+                                onSelectSession: { chatStore.selectSession($0) },
+                                onCreateNewSession: { chatStore.createNewSession(silentIfAlreadyNew: true) },
+                                onTogglePin: { chatStore.togglePin($0) },
+                                onSetSessionsPinned: { chatStore.setSessionsPinned($0, pinned: $1) },
+                                onRenameSession: { chatStore.renameSession($0, title: $1) },
+                                onDeleteSession: { chatStore.deleteSession($0) },
+                                onDeleteSessions: { chatStore.deleteSessions($0) },
+                                onSearch: { await chatStore.matchingSessionIDs(query: $0) },
+                                onClose: { if !wide { closeDrawer() } },
+                                onOpenSettings: { showSettings = true }
+                            )
+                            .padding(.top, topSafe)
+                            .padding(.bottom, bottomSafe)
+                            .task {
+                                if wide { await settings.refreshBalance() }
+                            }
+                        } surface: {
+                            mainSurface(
+                                sidebarShown: showSidebar,
+                                drawerModal: !wide && drawerOpen,
+                                topSafe: topSafe,
+                                bottomSafe: bottomSafe
+                            ) {
+                                if wide {
+                                    sidebarVisible.toggle()
+                                } else if drawerOpen {
+                                    closeDrawer()
+                                } else {
+                                    dismissKeyboard()
+                                    drawerOpen = true
+                                }
                             }
                         }
-                    }
 
-                    if settings.showMigrationPrompt {
-                        MigrationPromptModalView(
-                            settings: settings,
-                            chatStore: chatStore,
-                            onStartOneClickMigration: {
-                                settings.hasUsedOneClickMigration = true
-                                showMigrationWeb = true
-                            },
-                            onStartZipImport: { showZipImporter = true }
-                        )
-                        .transition(.opacity)
-                        .zIndex(50)
-                    }
-
-                    if let previewImage {
-                        ImageLightboxOverlay(image: previewImage) {
-                            withAnimation(.easeOut(duration: 0.16)) {
-                                self.previewImage = nil
-                            }
+                        if settings.showMigrationPrompt {
+                            MigrationPromptModalView(
+                                settings: settings,
+                                chatStore: chatStore,
+                                onStartOneClickMigration: {
+                                    settings.hasUsedOneClickMigration = true
+                                    showMigrationWeb = true
+                                },
+                                onStartZipImport: { showZipImporter = true }
+                            )
+                            .transition(.opacity)
+                            .zIndex(50)
                         }
-                        .transition(.opacity)
-                        .zIndex(60)
+
+                        if let previewImage {
+                            ImageLightboxOverlay(image: previewImage) {
+                                withAnimation(.easeOut(duration: 0.16)) {
+                                    self.previewImage = nil
+                                }
+                            }
+                            .transition(.opacity)
+                            .zIndex(60)
+                        }
                     }
+                    .onChange(of: wide) { _, _ in closeDrawer() }
                 }
-                .onChange(of: wide) { _, _ in closeDrawer() }
+                .ignoresSafeArea(.container, edges: .vertical)
             }
+            .coordinateSpace(name: "nuwaRoot")
         }
         .task(id: chatStore.historyLoaded) {
             guard chatStore.historyLoaded else { return }
@@ -224,7 +240,13 @@ struct ChatView: View {
     }
 
     @ViewBuilder
-    private func mainSurface(sidebarShown: Bool, drawerModal: Bool, onToggleSidebar: @escaping () -> Void) -> some View {
+    private func mainSurface(
+        sidebarShown: Bool,
+        drawerModal: Bool,
+        topSafe: CGFloat,
+        bottomSafe: CGFloat,
+        onToggleSidebar: @escaping () -> Void
+    ) -> some View {
         let session = chatStore.activeSession
         let timeline = chatStore.activeTimeline
         let hasMessages = timeline?.messages.isEmpty == false
@@ -237,6 +259,8 @@ struct ChatView: View {
                 timeline: timeline,
                 hasMessages: hasMessages,
                 drawerModal: drawerModal,
+                topSafe: topSafe,
+                bottomSafe: bottomSafe,
                 onToggleSidebar: onToggleSidebar
             )
             .scrollEdgeEffectStyle(.soft, for: .vertical)
@@ -271,6 +295,8 @@ struct ChatView: View {
                     }
                 })
             }
+            .safeAreaPadding(.top, topSafe)
+            .safeAreaPadding(.bottom, bottomSafe)
         } else {
             legacyMainSurface(
                 session: session,
@@ -279,6 +305,8 @@ struct ChatView: View {
                 sidebarShown: sidebarShown,
                 drawerModal: drawerModal,
                 allowComposerPress: allowComposerPress,
+                topSafe: topSafe,
+                bottomSafe: bottomSafe,
                 onToggleSidebar: onToggleSidebar
             )
         }
@@ -290,6 +318,8 @@ struct ChatView: View {
             sidebarShown: sidebarShown,
             drawerModal: drawerModal,
             allowComposerPress: allowComposerPress,
+            topSafe: topSafe,
+            bottomSafe: bottomSafe,
             onToggleSidebar: onToggleSidebar
         )
         #endif
@@ -300,6 +330,8 @@ struct ChatView: View {
         timeline: ChatStore.ActiveTimeline?,
         hasMessages: Bool,
         drawerModal: Bool,
+        topSafe: CGFloat,
+        bottomSafe: CGFloat,
         onToggleSidebar: @escaping () -> Void
     ) -> some View {
         Group {
@@ -311,16 +343,16 @@ struct ChatView: View {
                         ? "Your data hasn’t been changed. Reopen Nuwa to try again."
                         : "数据未被修改，请重新打开 Nuwa 后重试。")
                 )
-                .padding(.top, usesSystemSafeAreaBars ? 0 : headerHeight)
-                .padding(.bottom, usesSystemSafeAreaBars ? 0 : composerHeight)
+                .padding(.top, usesSystemSafeAreaBars ? 0 : topSafe + headerHeight)
+                .padding(.bottom, usesSystemSafeAreaBars ? 0 : bottomSafe + composerHeight)
             } else if !chatStore.historyLoaded {
                 ProgressView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let session, let timeline, hasMessages {
-                messageList(timeline)
+                messageList(timeline, topSafe: topSafe, bottomSafe: bottomSafe)
                     .id(session.id)
             } else {
-                welcomeView
+                welcomeView(topSafe: topSafe, bottomSafe: bottomSafe)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -429,6 +461,8 @@ struct ChatView: View {
         sidebarShown: Bool,
         drawerModal: Bool,
         allowComposerPress: Bool,
+        topSafe: CGFloat,
+        bottomSafe: CGFloat,
         onToggleSidebar: @escaping () -> Void
     ) -> some View {
         ZStack {
@@ -437,6 +471,8 @@ struct ChatView: View {
                 timeline: timeline,
                 hasMessages: hasMessages,
                 drawerModal: drawerModal,
+                topSafe: topSafe,
+                bottomSafe: bottomSafe,
                 onToggleSidebar: onToggleSidebar
             )
 
@@ -452,11 +488,11 @@ struct ChatView: View {
                         composerHeight = height
                     }
                 })
+                .padding(.bottom, bottomSafe)
                 .background {
                     if hasMessages {
                         ProgressiveEdgeBlur(edge: .bottom, baseColor: .nuwaChatBackground)
                             .padding(.top, -36)
-                            .ignoresSafeArea(.container, edges: .bottom)
                     }
                 }
             }
@@ -464,8 +500,7 @@ struct ChatView: View {
             if drawerModal {
                 Color.clear
                     .contentShape(Rectangle())
-                    .padding(.top, headerHeight)
-                    .ignoresSafeArea(.container, edges: .bottom)
+                    .padding(.top, topSafe + headerHeight)
                     .onTapGesture(perform: onToggleSidebar)
                     .accessibilityHidden(true)
             }
@@ -483,11 +518,11 @@ struct ChatView: View {
                         headerHeight = height
                     }
                 })
+                .padding(.top, topSafe)
                 .background {
                     if hasMessages {
                         ProgressiveEdgeBlur(edge: .top, baseColor: .nuwaChatBackground)
                             .padding(.bottom, -32)
-                            .ignoresSafeArea(.container, edges: .top)
                     }
                 }
 
@@ -510,7 +545,7 @@ struct ChatView: View {
         }
     }
 
-    private var welcomeView: some View {
+    private func welcomeView(topSafe: CGFloat, bottomSafe: CGFloat) -> some View {
         VStack(spacing: 16) {
             Spacer()
             Image("NuwaLogo")
@@ -527,8 +562,8 @@ struct ChatView: View {
             Spacer()
         }
         .padding(.horizontal, 24)
-        .padding(.top, usesSystemSafeAreaBars ? 0 : headerHeight)
-        .padding(.bottom, usesSystemSafeAreaBars ? 0 : composerHeight)
+        .padding(.top, usesSystemSafeAreaBars ? 0 : topSafe + headerHeight)
+        .padding(.bottom, usesSystemSafeAreaBars ? 0 : bottomSafe + composerHeight)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
         .onTapGesture {
@@ -536,7 +571,7 @@ struct ChatView: View {
         }
     }
 
-    private func messageList(_ timeline: ChatStore.ActiveTimeline) -> some View {
+    private func messageList(_ timeline: ChatStore.ActiveTimeline, topSafe: CGFloat, bottomSafe: CGFloat) -> some View {
         let messages = timeline.messages
         let versions = timeline.versions
         let last = messages.last
@@ -554,6 +589,8 @@ struct ChatView: View {
             ),
             topInset: headerHeight,
             bottomInset: composerHeight,
+            topSafeInset: topSafe,
+            bottomSafeInset: bottomSafe,
             usesSystemSafeAreaBars: usesSystemSafeAreaBars,
             topCommand: scrollToTopToken,
             disclosureAnchorID: disclosureAnchorID,
@@ -973,14 +1010,15 @@ private struct ChatDrawerLayout<Sidebar: View, Surface: View>: View {
         let surfaceWidth = max(0, size.width - inset)
         let offset = wide ? inset : dragOffset ?? (compactOpen ? drawerWidth : 0)
         let progress: CGFloat = wide ? 0 : (drawerWidth > 0 ? min(1, max(0, offset / drawerWidth)) : 0)
-        let cardScale: CGFloat = wide ? 1 : (1 - 0.045 * progress)
-        let cardClip = DrawerCardClipShape(progress: progress)
+        let cardScale: CGFloat = wide ? 1 : (1 - 0.055 * progress)
+        let cornerRadius: CGFloat = wide ? 0 : 28 * progress
+        let cardShape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         let anim = wide || dragOffset != nil ? nil : spring
 
         return ZStack(alignment: .leading) {
             if !wide || open {
                 sidebar
-                    .frame(width: drawerWidth)
+                    .frame(width: drawerWidth, height: size.height)
                     .offset(x: wide ? 0 : (progress - 1) * 24)
                     .opacity(wide ? 1 : (0.35 + 0.65 * progress))
                     .allowsHitTesting(open)
@@ -990,24 +1028,28 @@ private struct ChatDrawerLayout<Sidebar: View, Surface: View>: View {
 
             surface
                 .frame(width: surfaceWidth, height: size.height)
-                .background(Color.nuwaChatBackground.ignoresSafeArea(.container, edges: .vertical))
-                .clipShape(cardClip)
+                .background(Color.nuwaChatBackground)
+                .clipShape(cardShape)
                 .overlay {
-                    cardClip
-                        .stroke(
+                    cardShape
+                        .strokeBorder(
                             colorScheme == .dark
                                 ? Color.white.opacity(0.08 * progress)
                                 : Color.black.opacity(0.06 * progress),
-                            lineWidth: progress > 0.01 ? 0.75 : 0
+                            lineWidth: progress > 0.005 ? 0.75 : 0
                         )
                         .allowsHitTesting(false)
                 }
-                .shadow(
-                    color: Color.black.opacity((colorScheme == .dark ? 0.45 : 0.10) * progress),
-                    radius: 24 * progress,
-                    x: -8 * progress,
-                    y: 0
-                )
+                .background {
+                    cardShape
+                        .fill(Color.nuwaChatBackground)
+                        .shadow(
+                            color: Color.black.opacity((colorScheme == .dark ? 0.45 : 0.10) * progress),
+                            radius: 24 * progress,
+                            x: -8 * progress,
+                            y: 0
+                        )
+                }
                 .scaleEffect(cardScale, anchor: .leading)
                 .geometryGroup()
                 .position(x: offset + surfaceWidth / 2, y: size.height / 2)
@@ -1377,28 +1419,5 @@ private struct MessageReadAloudButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(NuwaTactileButtonStyle())
-    }
-}
-
-/// Smoothly interpolates from full-bleed unclipped surface (`progress == 0`, preserving Dynamic Island & Home Bar
-/// scroll blur bleed) into a crisp 28pt rounded floating card (`progress == 1`, matching Android 0.1.31 pushed drawer).
-private struct DrawerCardClipShape: Shape {
-    var progress: CGFloat
-
-    var animatableData: CGFloat {
-        get { progress }
-        set { progress = newValue }
-    }
-
-    func path(in rect: CGRect) -> Path {
-        let p = min(1, max(0, progress))
-        let bleed = (1 - p) * 120
-        let cardRect = CGRect(
-            x: rect.minX,
-            y: rect.minY - bleed,
-            width: rect.width,
-            height: rect.height + bleed * 2
-        )
-        return RoundedRectangle(cornerRadius: 28 * p, style: .continuous).path(in: cardRect)
     }
 }

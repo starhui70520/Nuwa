@@ -23,6 +23,8 @@ struct ChatTimeline<Row: View>: View {
     let appearance: ChatTimelineAppearance
     let topInset: CGFloat
     let bottomInset: CGFloat
+    let topSafeInset: CGFloat
+    let bottomSafeInset: CGFloat
     let usesSystemSafeAreaBars: Bool
     let topCommand: Int
     let disclosureAnchorID: UUID?
@@ -55,7 +57,7 @@ struct ChatTimeline<Row: View>: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel(latestLabel)
                 .padding(.trailing, 16)
-                .padding(.bottom, usesSystemSafeAreaBars ? 12 : bottomInset + 12)
+                .padding(.bottom, usesSystemSafeAreaBars ? 12 : bottomSafeInset + bottomInset + 12)
             }
         }
     }
@@ -70,6 +72,8 @@ struct ChatTimeline<Row: View>: View {
             colorScheme: colorScheme,
             topInset: topInset,
             bottomInset: bottomInset,
+            topSafeInset: topSafeInset,
+            bottomSafeInset: bottomSafeInset,
             usesSystemSafeAreaBars: usesSystemSafeAreaBars,
             topCommand: topCommand,
             latestCommand: latestCommand,
@@ -99,6 +103,8 @@ private struct TimelineCollection<Row: View>: UIViewRepresentable {
     let colorScheme: ColorScheme
     let topInset: CGFloat
     let bottomInset: CGFloat
+    let topSafeInset: CGFloat
+    let bottomSafeInset: CGFloat
     let usesSystemSafeAreaBars: Bool
     let topCommand: Int
     let latestCommand: Int
@@ -141,7 +147,7 @@ private struct TimelineCollection<Row: View>: UIViewRepresentable {
                 view.bottomEdgeEffect.isHidden = true
             }
         }
-        view.applyInsets(top: topInset, bottom: bottomInset)
+        view.applyInsets(top: topInset, bottom: bottomInset, hardwareTop: topSafeInset, hardwareBottom: bottomSafeInset)
 
         streamingCoordinator.onLiveRowUpdated = { [weak view] in
             view?.syncStreamingLayout()
@@ -186,7 +192,12 @@ private struct TimelineCollection<Row: View>: UIViewRepresentable {
             input = updated
             guard let dataSource else { return }
 
-            view.applyInsets(top: updated.topInset, bottom: updated.bottomInset)
+            view.applyInsets(
+                top: updated.topInset,
+                bottom: updated.bottomInset,
+                hardwareTop: updated.topSafeInset,
+                hardwareBottom: updated.bottomSafeInset
+            )
 
             let isStreamingReply = updated.appearance.isGenerating && updated.messages.last?.isStreaming == true
             view.setStreamingState(active: isStreamingReply, lastIndex: updated.messages.count - 1)
@@ -372,6 +383,8 @@ private final class TimelineCollectionView: UICollectionView {
     private var lastAdjustedInset = UIEdgeInsets.zero
     private var chromeTopInset: CGFloat = 0
     private var chromeBottomInset: CGFloat = 0
+    private var hardwareTopInset: CGFloat = 0
+    private var hardwareBottomInset: CGFloat = 0
     private var focusAnchor: (IndexPath, CGFloat)?
     private var disclosureAnchor: (IndexPath, CGFloat)?
     var hasDisclosureAnchor: Bool { disclosureAnchor != nil }
@@ -438,9 +451,11 @@ private final class TimelineCollectionView: UICollectionView {
         }
     }
 
-    func applyInsets(top: CGFloat, bottom: CGFloat) {
+    func applyInsets(top: CGFloat, bottom: CGFloat, hardwareTop: CGFloat, hardwareBottom: CGFloat) {
         chromeTopInset = max(0, top)
         chromeBottomInset = max(0, bottom)
+        hardwareTopInset = max(0, hardwareTop)
+        hardwareBottomInset = max(0, hardwareBottom)
         reconcileInsets()
     }
 
@@ -462,22 +477,12 @@ private final class TimelineCollectionView: UICollectionView {
     }
 
     /// Guarantees the first message NEVER hides behind the floating top header and the last message
-    /// NEVER hides behind the floating composer — whether SwiftUI propagated `.safeAreaBar` into
-    /// `UIView.safeAreaInsets` or `.ignoresSafeArea(.container)` stripped it.
+    /// NEVER hides behind the floating composer — unaffected by drawer scale transforms.
     private func reconcileInsets() {
         let next: UIEdgeInsets
         if usesSystemSafeAreaBars {
-            let windowTop = window?.safeAreaInsets.top ?? safeAreaInsets.top
-            let windowBottom = window?.safeAreaInsets.bottom ?? 0
-            let bottomHardwareOverlap: CGFloat
-            if let window, bounds.height > 0 {
-                let frameInWindow = convert(bounds, to: window)
-                bottomHardwareOverlap = max(0, min(windowBottom, frameInWindow.maxY - (window.bounds.height - windowBottom)))
-            } else {
-                bottomHardwareOverlap = min(windowBottom, safeAreaInsets.bottom)
-            }
-            let requiredTop = windowTop + chromeTopInset
-            let requiredBottom = bottomHardwareOverlap + chromeBottomInset
+            let requiredTop = hardwareTopInset + chromeTopInset
+            let requiredBottom = hardwareBottomInset + chromeBottomInset
             next = UIEdgeInsets(
                 top: max(0, requiredTop - safeAreaInsets.top),
                 left: 0,
@@ -486,9 +491,9 @@ private final class TimelineCollectionView: UICollectionView {
             )
         } else {
             next = UIEdgeInsets(
-                top: safeAreaInsets.top + chromeTopInset,
+                top: max(safeAreaInsets.top, hardwareTopInset) + chromeTopInset,
                 left: 0,
-                bottom: safeAreaInsets.bottom + chromeBottomInset,
+                bottom: max(safeAreaInsets.bottom, hardwareBottomInset) + chromeBottomInset,
                 right: 0
             )
         }
