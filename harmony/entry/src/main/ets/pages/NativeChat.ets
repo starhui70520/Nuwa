@@ -131,6 +131,8 @@ interface NativeDraft {
   files: NativeDraftAttachment[];
 }
 
+type ComposerToggle = 'thinking' | 'search';
+
 interface NativeImagePreview {
   uri: string;
   originalPath: string;
@@ -321,6 +323,9 @@ struct NativeChat {
   @State private collapsedThoughts: string[] = [];
   @State private viewportWidth: number = 390;
   @State private viewportHeight: number = 820;
+  @State private composerTooltip: ComposerToggle | undefined = undefined;
+  private hoveredComposerToggle?: ComposerToggle;
+  private composerTooltipTimer: number = -1;
 
   private readonly storage = new NativeChatStorage();
   private historySaveSequence: number = 0;
@@ -523,6 +528,7 @@ struct NativeChat {
       this.cancelAllReplies();
     }
     this.branchScrollAnchor.cancel();
+    this.dismissComposerTooltip();
     this.fileDropHint = null;
     this.clearUploadQuota();
     this.sidebarSearch.cancel();
@@ -1410,6 +1416,7 @@ struct NativeChat {
   }
 
   private observeMessageScroll(offset: number, state: ScrollState): void {
+    if (offset !== 0) this.dismissComposerTooltip();
     if (this.nearListEnd()) this.followLatest = true;
     if (state === ScrollState.Idle) return;
     if (offset < 0) {
@@ -3134,7 +3141,41 @@ struct NativeChat {
   }
 
   @Builder
-  private togglePill(icon: Resource, label: () => string, active: () => boolean, change: () => void) {
+  private composerTooltipContent(toggle: ComposerToggle) {
+    Text(toggle === 'thinking' ? this.label('先思考后回答，解决推理问题',
+      'Think before responding to solve reasoning problems') :
+      this.label('按需搜索网页', 'Search the web when necessary'))
+      .fontSize(this.appFontSize(12)).lineHeight(this.appFontSize(18))
+      .fontColor($r('app.color.native_composer_tooltip_text'))
+      .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+      .hitTestBehavior(HitTestMode.None)
+  }
+
+  private dismissComposerTooltip(): void {
+    this.hoveredComposerToggle = undefined;
+    if (this.composerTooltipTimer >= 0) {
+      clearTimeout(this.composerTooltipTimer);
+      this.composerTooltipTimer = -1;
+    }
+    if (this.composerTooltip) this.composerTooltip = undefined;
+  }
+
+  private hoverComposerToggle(toggle: ComposerToggle, hovered: boolean): void {
+    if (!hovered) {
+      if (this.hoveredComposerToggle === toggle) this.dismissComposerTooltip();
+      return;
+    }
+    if (!this.wide() || !this.visible || this.settingsVisible || this.hoveredComposerToggle === toggle) return;
+    this.dismissComposerTooltip();
+    this.hoveredComposerToggle = toggle;
+    this.composerTooltipTimer = setTimeout((): void => {
+      this.composerTooltipTimer = -1;
+      this.composerTooltip = toggle;
+    }, 100);
+  }
+
+  @Builder
+  private togglePill(toggle: ComposerToggle, icon: Resource, label: () => string, active: () => boolean, change: () => void) {
     Button({ type: ButtonType.Capsule }) {
       Row({ space: 5 }) {
         Image(icon).width(14).height(14).colorFilter(nativeIconTint(active() ? $r('app.color.native_chat_blue_text') :
@@ -3149,6 +3190,13 @@ struct NativeChat {
     .backgroundColor(active() ? $r('app.color.native_chat_selected') : Color.Transparent)
     .border({ width: 1, color: active() ? Color.Transparent : $r('app.color.native_chat_stroke') })
     .accessibilityText(label()).accessibilitySelected(active()).onClick(change)
+    .onHover((hovered: boolean): void => { this.hoverComposerToggle(toggle, hovered); })
+    .bindPopup(this.composerTooltip === toggle, {
+      builder: () => { this.composerTooltipContent(toggle); },
+      placement: Placement.Top, targetSpace: 4, enableArrow: false, mask: false,
+      autoCancel: false, focusable: false, radius: 10,
+      popupColor: $r('app.color.native_composer_tooltip_bg'), backgroundBlurStyle: BlurStyle.NONE,
+    })
   }
 
   @Builder
@@ -3479,11 +3527,11 @@ struct NativeChat {
 
   @Builder
   private composerToggles() {
-    this.togglePill($r('app.media.native_think'), () => this.label('深度思考', 'DeepThink'), () => this.settings.thinking, () => {
+    this.togglePill('thinking', $r('app.media.native_think'), () => this.label('深度思考', 'DeepThink'), () => this.settings.thinking, () => {
       this.settings.thinking = !this.settings.thinking;
       void this.saveSettings();
     })
-    this.togglePill($r('app.media.native_web_search'), () => this.label('智能搜索', 'Search'), () => this.settings.search, () => {
+    this.togglePill('search', $r('app.media.native_web_search'), () => this.label('智能搜索', 'Search'), () => this.settings.search, () => {
       this.settings.search = !this.settings.search;
       void this.saveSettings();
     })
@@ -3947,6 +3995,7 @@ struct NativeChat {
   }
 
   private openSettings(section: string = 'root'): void {
+    this.dismissComposerTooltip();
     if (section === 'account') {
       this.prepareCredentialSettings();
     }
@@ -5691,6 +5740,7 @@ struct NativeChat {
       const resized = width !== this.viewportWidth || height !== this.viewportHeight;
       this.viewportWidth = width;
       this.viewportHeight = height;
+      if (resized && !this.wide()) this.dismissComposerTooltip();
       if (resized && this.updateNotice) this.presentUpdate(this.updateNotice.update);
       if (resized && this.deleteNotice) {
         this.refreshDeleteNotice(this.deleteNotice.mode, this.deleteNotice.count, this.deleteNotice.busy);

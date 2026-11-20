@@ -1,6 +1,14 @@
 {
   "color": [
     {
+      "name": "native_composer_tooltip_bg",
+      "value": "#43454A"
+    },
+    {
+      "name": "native_composer_tooltip_text",
+      "value": "#F9FAFB"
+    },
+    {
       "name": "native_settings_balance",
       "value": "#85A5FF"
     },
