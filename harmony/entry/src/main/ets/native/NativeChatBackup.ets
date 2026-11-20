@@ -20,7 +20,7 @@ import {
   readBackupZipEntry, writeBackupZip,
 } from './NativeBackupZip';
 import {
-  backupImagePath, copyBackupFile, removeBackupImage, stageBackupImage, withBackupInput, writeBackupFile,
+  backupImageIds, backupImagePath, copyBackupFile, removeBackupImage, stageBackupImage, withBackupInput, writeBackupFile,
 } from './NativeBackupFiles';
 
 const MANIFEST = 'manifest.json';
@@ -135,7 +135,7 @@ interface ArchiveOrigin {
 interface PreparedSession {
   session: NativeConversation;
   origin: ArchiveOrigin;
-  imagePaths: string[];
+  imagePaths: Map<string, string>;
 }
 
 export interface NativeBackupMergeResult {
@@ -740,8 +740,47 @@ function nativeSession(source: ArchiveSession): PreparedSession {
     messages: messages,
   };
   return {
-    session: session, origin: { session: source, images: [] }, imagePaths: Array.from(imagePaths.keys()),
+    session: session, origin: { session: source, images: [] }, imagePaths: imagePaths,
   };
+}
+
+function addImageAlias(prepared: PreparedSession, image: ArchiveImage, path: string): void {
+  prepared.origin.images.push({ path: path, blobId: image.blobId, bytes: image.bytes, size: image.size,
+    crc: image.crc, mimeType: image.mimeType });
+}
+
+function restorePreparedImages(prepared: PreparedSession, images: Map<string, ArchiveImage>): void {
+  const availablePaths = new Map<string, string>();
+  prepared.imagePaths.forEach((id: string, path: string): void => {
+    const image = images.get(id);
+    if (image) {
+      addImageAlias(prepared, image, path);
+      availablePaths.set(id, path);
+    }
+  });
+  for (const message of prepared.origin.session.messages) {
+    for (const fragment of message.fragments) {
+      if (fragment.type !== 'FILE') continue;
+      for (const file of fragment.files ?? []) {
+        if (!file.is_image || file.export_path) continue;
+        const image = images.get(file.id);
+        if (!image) continue;
+        let path = availablePaths.get(file.id);
+        if (!path) {
+          const base = filesPrefix(prepared.session.id) + safeFileName(file.id) + '_' + safeFileName(file.file_name);
+          path = backupPath(base);
+          let suffix = 1;
+          while (prepared.imagePaths.has(path)) {
+            path = backupPath(base + '_' + suffix++);
+          }
+          prepared.imagePaths.set(path, file.id);
+          availablePaths.set(file.id, path);
+          addImageAlias(prepared, image, path);
+        }
+        file.export_path = path;
+      }
+    }
+  }
 }
 
 export async function decodeChatBackup(bytes: Uint8Array): Promise<NativeConversation[]> {
@@ -753,10 +792,10 @@ async function readChatBackup(input: NativeBackupZipInput, context?: common.UIAb
   onProgress?: (sessions: number, images: number) => void): Promise<NativeConversation[]> {
   const sessions: PreparedSession[] = [];
   const ids = new Set<string>();
-  const wantedImages = new Map<string, ArchiveImage[]>();
+  const wantedImages = new Map<string, string>();
+  const loadedImages = new Map<string, ArchiveImage>();
   const staged: string[] = [];
   let inlineBytes = 0;
-  let imageCount = 0;
   let manifest = false;
   let index: ArchiveIndexEntry[] | undefined;
   try {
@@ -792,19 +831,17 @@ async function readChatBackup(input: NativeBackupZipInput, context?: common.UIAb
         const prepared = nativeSession(original);
         sessions.push(prepared);
         ids.add(original.id);
-        for (const imagePath of prepared.imagePaths) {
-          wantedImages.set(imagePath, prepared.origin.images);
-        }
-        onProgress?.(sessions.length, imageCount);
+        prepared.imagePaths.forEach((id: string, imagePath: string): void => { wantedImages.set(imagePath, id); });
+        onProgress?.(sessions.length, loadedImages.size);
         return;
       }
       const imageOwner = /^chat_sessions\/([^/]+)_files\/[^/]/.exec(path)?.[1];
       if (!imageOwner || (index ? !ids.has(imageOwner) : sessions[sessions.length - 1]?.session.id !== imageOwner)) {
         return invalidArchive();
       }
-      const images = wantedImages.get(path);
-      if (!images) {
-        // Android accepts files in the session directory even when no fragment references them.
+      const imageId = wantedImages.get(path);
+      if (imageId === undefined || loadedImages.has(imageId)) {
+        // Unreferenced and repeated originals still have their ZIP size and CRC checked.
         return;
       }
       if (context) {
@@ -813,17 +850,16 @@ async function readChatBackup(input: NativeBackupZipInput, context?: common.UIAb
         const mimeType = await withBackupInput<string>(backupImagePath(context, id),
           async (file: NativeBackupZipInput): Promise<string> =>
             attachmentRasterMime(await file.read(0, Math.min(file.size, 64 * 1024))));
-        images.push({ path: path, blobId: id, size: entry.size, crc: entry.crc, mimeType: mimeType });
+        loadedImages.set(imageId, { path: path, blobId: id, size: entry.size, crc: entry.crc, mimeType: mimeType });
       } else {
         inlineBytes += entry.size;
         if (inlineBytes > MAX_INLINE_IMAGE_BYTES) {
           throw new Error('图片原件超过 16 MB，请使用应用中的文件导入。');
         }
         const bytes = await readBackupZipEntry(entry);
-        images.push({ path: path, bytes: base64.encodeToStringSync(bytes), size: entry.size, crc: entry.crc });
+        loadedImages.set(imageId, { path: path, bytes: base64.encodeToStringSync(bytes), size: entry.size, crc: entry.crc });
       }
-      imageCount++;
-      onProgress?.(sessions.length, imageCount);
+      onProgress?.(sessions.length, loadedImages.size);
     }, limit);
     if (!manifest || !index || index.length !== sessions.length) {
       return invalidArchive();
@@ -835,6 +871,7 @@ async function readChatBackup(input: NativeBackupZipInput, context?: common.UIAb
       }
     }
     return sessions.map((prepared: PreparedSession): NativeConversation => {
+      restorePreparedImages(prepared, loadedImages);
       prepared.session.archiveJson = JSON.stringify(prepared.origin);
       return prepared.session;
     });
@@ -1223,6 +1260,27 @@ export function mergeChatBackup(history: NativeConversationState, imported: Nati
     sessions.push(copyMerged(incoming, util.generateRandomUUID(true), withPrefix(incoming.title, 'D分支·')));
   }
   return { history: { sessions: sessions, activeId: history.activeId }, importedCount: total };
+}
+
+export async function commitChatBackup(context: common.UIAbilityContext, history: NativeConversationState,
+  imported: NativeConversation[], save: (value: NativeConversationState) => Promise<void>): Promise<NativeBackupMergeResult> {
+  const merged = mergeChatBackup(history, imported);
+  await save(merged.history);
+  // Every staged blob ID is unique to this import. Leave potentially committed files intact if the save throws.
+  const acceptedArchives = new Set<string>();
+  for (const session of merged.history.sessions) {
+    if (session.archiveJson) acceptedArchives.add(session.archiveJson);
+  }
+  const unused = new Set<string>();
+  const retained = new Set<string>();
+  for (const session of imported) {
+    const destination = session.archiveJson && acceptedArchives.has(session.archiveJson) ? retained : unused;
+    for (const id of backupImageIds(session.archiveJson)) destination.add(id);
+  }
+  for (const id of unused) {
+    if (!retained.has(id)) await removeBackupImage(context, id);
+  }
+  return merged;
 }
 
 export class NativeChatBackup {

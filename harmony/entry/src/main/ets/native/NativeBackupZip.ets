@@ -276,36 +276,61 @@ async function localData(input: NativeBackupZipInput, entry: DirectoryEntry, bou
   return start;
 }
 
-async function inflateRaw(compressed: Uint8Array, size: number): Promise<Uint8Array> {
+async function inflateRaw(input: NativeBackupZipInput, offset: number, entry: DirectoryEntry,
+  write: (chunk: Uint8Array) => Promise<void>): Promise<void> {
   const zip = await zlib.createZip();
-  const output = new Uint8Array(size);
-  let written = 0;
-  const stream: zlib.ZStream = {
-    nextIn: compressed.byteOffset === 0 && compressed.byteLength === compressed.buffer.byteLength ?
-      compressed.buffer as ArrayBuffer : compressed.slice().buffer as ArrayBuffer,
-    availableIn: compressed.byteLength,
-  };
-  const initialized = await zip.inflateBackInit({}, 15, new ArrayBuffer(32 * 1024));
-  if (initialized !== zlib.ReturnStatus.OK) {
+  const stream: zlib.ZStream = {};
+  if (await zip.inflateInit2(stream, -15) !== zlib.ReturnStatus.OK) {
     return invalidZip();
   }
   try {
-    const result = await zip.inflateBack(stream,
-      (_description: object): ArrayBuffer => new ArrayBuffer(0), new Object(),
-      (_description: object, chunk: ArrayBuffer, length: number): number => {
-        if (length < 0 || length > chunk.byteLength || written + length > size) {
-          return 1;
-        }
-        output.set(new Uint8Array(chunk, 0, length), written);
-        written += length;
-        return 0;
-      }, new Object());
-    if (result !== zlib.ReturnStatus.STREAM_END || written !== size) {
-      return invalidZip();
+    const output = new ArrayBuffer(CHUNK_BYTES);
+    let pending = new ArrayBuffer(0);
+    let cursor = 0;
+    let written = 0;
+    while (true) {
+      if (!pending.byteLength && cursor < entry.compressedSize) {
+        const chunk = await checkedRead(input, offset + cursor, Math.min(CHUNK_BYTES, entry.compressedSize - cursor));
+        pending = chunk.byteOffset === 0 && chunk.byteLength === chunk.buffer.byteLength ?
+          chunk.buffer as ArrayBuffer : chunk.slice().buffer as ArrayBuffer;
+        cursor += chunk.byteLength;
+      }
+      stream.nextIn = pending;
+      stream.availableIn = pending.byteLength;
+      stream.nextOut = output;
+      stream.availableOut = output.byteLength;
+      const result = await zip.inflate(stream, zlib.CompressFlushMode.NO_FLUSH);
+      const state = await zip.getZStream();
+      const availableIn = state.availableIn;
+      const availableOut = state.availableOut;
+      if ((result !== zlib.ReturnStatus.OK && result !== zlib.ReturnStatus.STREAM_END) ||
+        availableIn === undefined || availableOut === undefined || !Number.isSafeInteger(availableIn) ||
+        !Number.isSafeInteger(availableOut) || availableIn < 0 || availableIn > pending.byteLength ||
+        availableOut < 0 || availableOut > output.byteLength) {
+        return invalidZip();
+      }
+      const length = output.byteLength - availableOut;
+      written += length;
+      if (written > entry.size || (result === zlib.ReturnStatus.STREAM_END && written !== entry.size)) {
+        return invalidZip();
+      }
+      if (length) {
+        // Keep the emitted bytes valid after the destination buffer is reused.
+        await write(new Uint8Array(output.slice(0, length)));
+      }
+      if (result === zlib.ReturnStatus.STREAM_END) {
+        return;
+      }
+      if (!length && availableIn === pending.byteLength) {
+        return invalidZip();
+      }
+      // The runtime maintains the zlib state. Carry only the unconsumed input into the next call.
+      if (availableIn !== pending.byteLength) {
+        pending = pending.slice(pending.byteLength - availableIn);
+      }
     }
-    return output;
   } finally {
-    await zip.inflateBackEnd({});
+    await zip.inflateEnd(stream).catch(() => {});
   }
 }
 
@@ -351,17 +376,17 @@ export async function readBackupZipEntries(input: NativeBackupZipInput,
         return invalidZip();
       }
       let crc = 0xffffffff;
+      const append = async (chunk: Uint8Array): Promise<void> => {
+        crc = accumulateCrc(crc, chunk);
+        await write(chunk);
+      };
       if (entry.method === STORED) {
         for (let cursor = 0; cursor < entry.size; cursor += CHUNK_BYTES) {
           const chunk = await checkedRead(input, offset + cursor, Math.min(CHUNK_BYTES, entry.size - cursor));
-          crc = accumulateCrc(crc, chunk);
-          await write(chunk);
+          await append(chunk);
         }
       } else {
-        const compressed = await checkedRead(input, offset, entry.compressedSize);
-        const data = await inflateRaw(compressed, entry.size);
-        crc = accumulateCrc(crc, data);
-        await write(data);
+        await inflateRaw(input, offset, entry, append);
       }
       if (completeCrc(crc) !== entry.crc) {
         return invalidZip();

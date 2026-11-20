@@ -30,7 +30,7 @@ import {
   nativeBackupDropUri, readNativeAttachmentDrop,
 } from '../native/NativeAttachmentDrop';
 import {
-  hydrateImportedAttachment, importedAttachmentPreview, NativeChatBackup, mergeChatBackup, nativeArchivedReplyTemplate,
+  commitChatBackup, hydrateImportedAttachment, importedAttachmentPreview, NativeChatBackup, nativeArchivedReplyTemplate,
 } from '../native/NativeChatBackup';
 import {
   NativeChatCitation, NativeChatSource, NativeChatSources, nativeSearchResults, safeNativeSourceUrl,
@@ -3302,8 +3302,8 @@ struct NativeChat {
         this.historyImportProgress = this.label(`正在写入本地数据库（共 ${sessions.length} 个会话）…`,
           `Writing ${sessions.length} chats to the local database…`);
       }
-      const merged = mergeChatBackup(this.history, sessions);
-      await this.storage.saveConversations(context, merged.history);
+      const merged = await commitChatBackup(context, this.history, sessions,
+        (state: NativeConversationState): Promise<void> => this.storage.saveConversations(context, state));
       this.history = merged.history;
       const count = merged.importedCount;
       const summary = this.label(`已导入 ${count} 个对话`, count === 1 ? 'Imported 1 chat' : `Imported ${count} chats`);

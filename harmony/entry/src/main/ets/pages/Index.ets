@@ -8,7 +8,8 @@ import { http } from '@kit.NetworkKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { HarmonySpeechRecognition } from '../speech/HarmonySpeechRecognition';
 import { HarmonyTextToSpeech } from '../speech/HarmonyTextToSpeech';
-import { NativeChatBackup, mergeChatBackup } from '../native/NativeChatBackup';
+import { commitChatBackup, NativeChatBackup } from '../native/NativeChatBackup';
+import { NativeConversationState } from '../native/NativeConversation';
 import { NativeChatStorage } from '../native/NativeChatStorage';
 import { MAX_FILE_BACKUP_BYTES } from '../native/NativeBackupZip';
 import {
@@ -707,8 +708,8 @@ struct Index {
       const importedCount = await consumePendingNativeMigration(context, async (path: string): Promise<number> => {
         const sessions = await this.backup.importFromUri(path, context);
         const history = await this.conversationStorage.loadConversations(context);
-        const merged = mergeChatBackup(history, sessions);
-        await this.conversationStorage.saveConversations(context, merged.history);
+        const merged = await commitChatBackup(context, history, sessions,
+          (state: NativeConversationState): Promise<void> => this.conversationStorage.saveConversations(context, state));
         return merged.importedCount;
       });
       this.pendingMigrationAvailable = hasPendingNativeMigration(context);
