@@ -31,7 +31,7 @@ import {
 } from '../native/NativeAttachmentDrop';
 import {
   commitChatBackup, hydrateImportedAttachment, importedAttachmentOriginalUri, importedAttachmentPreview,
-  NativeChatBackup, nativeArchivedReplyTemplate,
+  NativeChatBackup, nativeArchivedReplyTemplate, NATIVE_BACKUP_UNREADABLE_CONVERSATION,
 } from '../native/NativeChatBackup';
 import { isBackupSpaceError } from '../native/NativeBackupFiles';
 import {
@@ -147,6 +147,7 @@ struct NativeChat {
   @State private fileDropHint: 'attachment' | 'history' | null = null;
   @State private imagePreview: string = '';
   @State private loaded: boolean = false;
+  @State private retryingConversationIds: string[] = [];
   @State private status: string = '';
   @State private historySaveError: boolean = false;
   @State private drawerOpen: boolean = false;
@@ -1168,6 +1169,24 @@ struct NativeChat {
     return this.history.sessions.find((item: NativeConversation): boolean => item.id === id);
   }
 
+  private async retryConversation(id: string): Promise<void> {
+    const previous = this.session(id);
+    if (!previous?.unreadable || !this.canModifyHistory() || this.deletingSessions ||
+      this.retryingConversationIds.includes(id)) return;
+    this.retryingConversationIds = [...this.retryingConversationIds, id];
+    try {
+      const recovered = await this.storage.loadConversation(this.host(), id);
+      if (!this.canModifyHistory() || this.deletingSessions || this.session(id) !== previous) return;
+      this.history = upsertConversation(this.history, recovered);
+      if (this.history.activeId === id) this.scrollToLatest();
+      if (this.removedDraftFiles.size > 0) this.scheduleDraftSave(true);
+    } catch {
+      // Keep this conversation's error visible and allow another local retry.
+    } finally {
+      this.retryingConversationIds = this.retryingConversationIds.filter((pending: string): boolean => pending !== id);
+    }
+  }
+
   private reply(id: string | null = this.history.activeId): NativeReply | undefined {
     return this.replies.find((item: NativeReply): boolean => item.sessionId === id);
   }
@@ -1307,6 +1326,7 @@ struct NativeChat {
       void this.save();
     }
     this.setDrawer(false);
+    if (id && this.session(id)?.unreadable) void this.retryConversation(id);
   }
 
   private setDrawer(open: boolean): void {
@@ -1710,9 +1730,20 @@ struct NativeChat {
   }
 
   private async removeDraftOriginals(context: common.UIAbilityContext, files: NativeAttachment[]): Promise<void> {
+    if (!files.length || this.history.sessions.some((chat: NativeConversation): boolean => chat.unreadable === true)) return;
+    const retained = new Set<string>();
+    for (const chat of this.history.sessions) {
+      for (const message of chat.messages) {
+        for (const file of message.files ?? []) retained.add(file.id);
+      }
+    }
+    this.drafts.forEach((draft: NativeDraft): void => {
+      for (const file of draft.files) retained.add(file.item.id);
+    });
+    for (const file of this.draftFiles) retained.add(file.item.id);
     for (const item of files) {
       this.removedDraftFiles.delete(item.id);
-      await this.attachments.remove(context, item).catch(() => {});
+      if (!retained.has(item.id)) await this.attachments.remove(context, item).catch(() => {});
     }
   }
 
@@ -1744,7 +1775,8 @@ struct NativeChat {
   }
 
   private async acceptDraftFiles(drop?: DragEvent, pasteSelection?: TextRange): Promise<void> {
-    if (this.attachmentIntakeDraftId !== null || !this.canModifyHistory() || (!drop && !this.authenticated())) {
+    if (this.attachmentIntakeDraftId !== null || !this.canModifyHistory() ||
+      (!drop && (!this.authenticated() || this.session()?.unreadable))) {
       drop?.setResult(DragResult.DRAG_FAILED);
       return;
     }
@@ -1772,7 +1804,7 @@ struct NativeChat {
         drop.setResult(imported ? DragResult.DRAG_SUCCESSFUL : DragResult.DRAG_FAILED);
         return;
       }
-      if (!this.authenticated()) {
+      if (!this.authenticated() || this.session(id)?.unreadable) {
         drop?.setResult(DragResult.DRAG_FAILED);
         return;
       }
@@ -1886,7 +1918,7 @@ struct NativeChat {
   }
 
   private canSendDraft(): boolean {
-    return this.attachmentIntakeDraftId !== (this.history.activeId ?? '') &&
+    return !this.session()?.unreadable && this.attachmentIntakeDraftId !== (this.history.activeId ?? '') &&
       (!this.draftFiles.length || !!this.accountToken() || this.settings.protocol === 'anthropic') &&
       !this.recognitionId && this.canModifyHistory() && (!!this.draft.trim() || this.draftFiles.length > 0) &&
       this.draftFiles.every((file: NativeDraftAttachment): boolean => file.state === 'ready');
@@ -2068,7 +2100,7 @@ struct NativeChat {
 
   private startReply(session: NativeConversation, parentId: string | null,
     prompt?: NativeConversationMessage, clearDraft: boolean = false): boolean {
-    if (!this.loaded || !this.canModifyHistory() || this.reply(session.id)) {
+    if (!this.loaded || session.unreadable || !this.canModifyHistory() || this.reply(session.id)) {
       return false;
     }
     const config = this.requestConfig();
@@ -3746,9 +3778,15 @@ struct NativeChat {
         this.toast(this.label('已导出历史对话', "Chat history exported"));
       }
     } catch (error) {
-      this.toast(isBackupSpaceError(error as Error) ?
-        this.label('设备存储空间不足，请清理空间后重试。', 'Free up storage space and try again.') :
-        (error as Error).message || this.label('导出失败', "Export failed"));
+      const detail = (error as Error).message;
+      if (detail === NATIVE_BACKUP_UNREADABLE_CONVERSATION) {
+        this.toast(this.label('部分对话无法读取。请打开这些对话重试后再导出。',
+          'Some chats could not be loaded. Open those chats and retry before exporting.'));
+      } else {
+        this.toast(isBackupSpaceError(error as Error) ?
+          this.label('设备存储空间不足，请清理空间后重试。', 'Free up storage space and try again.') :
+          detail || this.label('导出失败', "Export failed"));
+      }
     } finally {
       this.backupBusy = false;
     }
@@ -3868,7 +3906,8 @@ struct NativeChat {
     this.shareImportError = '';
     let lateChanges = false;
     try {
-      const imported = await importNativeShareLink(this.shareInput);
+      const ids = new Set<string>(this.history.sessions.map((session: NativeConversation): string => session.id));
+      const imported = await importNativeShareLink(this.shareInput, ids);
       const context = this.host();
       const previous = this.history;
       const next = upsertConversation(previous, imported, true);
@@ -4547,7 +4586,7 @@ struct NativeChat {
   }
 
   private beginSidebarRename(session: NativeSidebarSession): void {
-    if (!this.canModifyHistory() || this.selecting || this.renamingId === session.id || !this.session(session.id)) return;
+    if (!this.canEditSidebarMetadata(session.id) || this.selecting || this.renamingId === session.id) return;
     this.finishSidebarRename(this.renamingId, this.renameText);
     this.renameText = this.sidebarSessionTitle(session.title);
     this.renamingId = session.id;
@@ -4576,7 +4615,8 @@ struct NativeChat {
     this.cancelSidebarRename(id);
     const current = this.session(id);
     const trimmed = title.trim();
-    if (!this.canModifyHistory() || !current || !trimmed || trimmed === this.sidebarSessionTitle(current.title)) return;
+    if (!this.canModifyHistory() || !current || current.unreadable || !trimmed ||
+      trimmed === this.sidebarSessionTitle(current.title)) return;
     this.history = renameConversation(this.history, id, trimmed);
     void this.save();
   }
@@ -4591,14 +4631,23 @@ struct NativeChat {
     return this.loaded && !this.backupBusy && !this.migrationInProgress && !this.signingOut;
   }
 
+  private canEditSidebarMetadata(id: string): boolean {
+    const session = this.session(id);
+    return this.canModifyHistory() && !!session && !session.unreadable;
+  }
+
+  private canPinSidebarSelection(): boolean {
+    return this.selectedIds.length > 0 && this.selectedIds.every((id: string): boolean => this.canEditSidebarMetadata(id));
+  }
+
   private pinSidebarSession(id: string): void {
-    if (!this.canModifyHistory() || !this.session(id)) return;
+    if (!this.canEditSidebarMetadata(id)) return;
     this.history = toggleConversationPin(this.history, id);
     void this.save();
   }
 
   private pinSidebarSelection(): void {
-    if (!this.canModifyHistory() || this.selectedIds.length === 0) return;
+    if (!this.canPinSidebarSelection()) return;
     this.history = setConversationsPinned(this.history, this.selectedIds, !this.allPinned());
     this.resetSelection();
     void this.save();
@@ -4608,9 +4657,10 @@ struct NativeChat {
   private sessionMenu(session: NativeSidebarSession) {
     Menu() {
       MenuItem({ content: session.pinnedAt ? this.label('取消置顶', "Unpin") : this.label('置顶', "Pin") })
-        .enabled(this.canModifyHistory()).onClick(() => { this.pinSidebarSession(session.id); })
+        .enabled(this.canEditSidebarMetadata(session.id)).onClick(() => { this.pinSidebarSession(session.id); })
       MenuItem({ content: this.label('多选', "Select") }).onClick(() => { this.beginSidebarSelection(session.id); })
-      MenuItem({ content: this.label('重命名', "Rename") }).onClick(() => { this.beginSidebarRename(session); })
+      MenuItem({ content: this.label('重命名', "Rename") }).enabled(this.canEditSidebarMetadata(session.id))
+        .onClick(() => { this.beginSidebarRename(session); })
       MenuItem({ content: this.label('删除', "Delete") }).contentFontColor($r('app.color.native_chat_error'))
         .onClick(() => { this.deleteSessions([session.id], 'single'); })
     }
@@ -4768,7 +4818,7 @@ struct NativeChat {
         Row() {
           Button(this.allPinned() ? this.label('取消置顶', "Unpin") : this.label('置顶', "Pin"), { buttonStyle: ButtonStyleMode.TEXTUAL })
             .fontSize(this.appFontSize(14))
-            .enabled(this.selectedIds.length > 0 && this.canModifyHistory()).layoutWeight(1)
+            .enabled(this.canPinSidebarSelection()).layoutWeight(1)
             .onClick(() => { this.pinSidebarSelection(); })
           Button(this.label('删除', "Delete"), { buttonStyle: ButtonStyleMode.TEXTUAL })
             .fontSize(this.appFontSize(14)).fontColor($r('app.color.native_chat_error'))
@@ -4832,6 +4882,22 @@ struct NativeChat {
   }
 
   @Builder
+  private unreadableChat(id: string) {
+    Column({ space: 8 }) {
+      if (this.retryingConversationIds.includes(id)) {
+        LoadingProgress().width(28).height(28).color($r('app.color.native_chat_blue'))
+          .accessibilityText(this.label('正在读取对话', 'Loading chat'))
+      } else {
+        Text(this.label('对话加载失败，请重试', 'Unable to load this chat. Please try again.'))
+          .fontColor($r('app.color.native_chat_secondary'))
+        Button(this.label('重试', 'Retry')).id('nuwa-retry-chat').fontSize(this.appFontSize(14))
+          .enabled(this.canModifyHistory() && !this.deletingSessions).onClick(() => { void this.retryConversation(id); })
+      }
+    }
+    .layoutWeight(1).width('100%').justifyContent(FlexAlign.Center)
+  }
+
+  @Builder
   private chatPage() {
     Column() {
       if (this.wide() && (this.history.activeId !== null || this.settings.desktopSidebarCollapsed)) {
@@ -4863,6 +4929,8 @@ struct NativeChat {
           }
         }
         .layoutWeight(1).width('100%').justifyContent(FlexAlign.Center)
+      } else if (this.session()?.unreadable) {
+        this.unreadableChat(this.history.activeId ?? '')
       } else if (this.history.activeId === null) {
         if (this.centeredComposer()) {
           Column({ space: this.viewportHeight <= 500 ? 18 : 26 }) {
@@ -4908,7 +4976,7 @@ struct NativeChat {
         Text(this.status).fontSize(this.appFontSize(13)).fontColor($r('app.color.native_chat_error'))
           .width('100%').padding({ left: 16, right: 16, bottom: 4 })
       }
-      if (!this.centeredComposer()) {
+      if (!this.centeredComposer() && !this.session()?.unreadable) {
         this.composerContainer()
       }
     }

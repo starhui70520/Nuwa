@@ -45,6 +45,8 @@ export interface NativeConversation {
   messages: NativeConversationMessage[];
   // Imported fragments and original image bytes are retained for portable exports.
   archiveJson?: string;
+  // Runtime row backed by an intact index entry whose snapshot could not be read.
+  unreadable?: boolean;
 }
 
 export interface NativeConversationState {
@@ -96,6 +98,7 @@ function copyConversation(session: NativeConversation): NativeConversation {
     rootMessageId: session.rootMessageId,
     messages: session.messages,
     archiveJson: session.archiveJson,
+    unreadable: session.unreadable,
   };
 }
 

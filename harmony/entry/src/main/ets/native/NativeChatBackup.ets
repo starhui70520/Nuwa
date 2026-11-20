@@ -30,6 +30,7 @@ const MANIFEST = 'manifest.json';
 const SESSION_INDEX = 'chat_session_index.json';
 const USER = 'user.json';
 const VERSION = 3;
+export const NATIVE_BACKUP_UNREADABLE_CONVERSATION = 'NATIVE_BACKUP_UNREADABLE_CONVERSATION';
 const MAX_INLINE_IMAGE_BYTES = 16 * 1024 * 1024;
 const MAX_PREVIEW_BYTES = 1024 * 1024;
 const MAX_EMBEDDED_ARCHIVE_BYTES = 16 * 1024 * 1024;
@@ -1074,6 +1075,9 @@ function outgoingFile(item: NativeAttachment, sessionId: string, originalFiles: 
 
 function archiveSession(session: NativeConversation, images: Map<string, BackupImageSource>,
   locale: NativeLocale = 'zh-CN', previous: ArchiveOrigin | undefined = original(session)): ArchiveSession {
+  if (session.unreadable) {
+    throw new Error(NATIVE_BACKUP_UNREADABLE_CONVERSATION);
+  }
   if (!validId(session.id) || previous?.source) {
     return invalidArchive();
   }
@@ -1309,7 +1313,16 @@ function copyMerged(session: NativeConversation, id: string, title: string, pinn
     rootMessageId: session.rootMessageId,
     messages: session.messages,
     archiveJson: session.archiveJson,
+    unreadable: session.unreadable,
   };
+}
+
+function unusedConversationId(sessions: NativeConversation[]): string {
+  const ids = new Set<string>();
+  for (const session of sessions) ids.add(session.id);
+  let id = util.generateRandomUUID(true);
+  while (ids.has(id)) id = util.generateRandomUUID(true);
+  return id;
 }
 
 function retainedImageKey(image: ArchiveImage): string {
@@ -1361,6 +1374,13 @@ export function mergeChatBackup(history: NativeConversationState, imported: Nati
       continue;
     }
     const existing = sessions[index];
+    if (existing.unreadable) {
+      // Keep the exact unreadable placeholder and its metadata. Never compare an empty
+      // fallback snapshot against the incoming paths; preserve the imported branch separately.
+      total++;
+      sessions.push(copyMerged(incoming, unusedConversationId(sessions), withPrefix(incoming.title, 'D分支·')));
+      continue;
+    }
     const localPaths = messagePaths(existing);
     const addedPaths = messagePaths(incoming);
     if (!hasNewPath(addedPaths, localPaths)) {
@@ -1372,7 +1392,7 @@ export function mergeChatBackup(history: NativeConversationState, imported: Nati
       continue;
     }
     sessions[index] = copyMerged(existing, existing.id, withPrefix(existing.title, 'N分支·'), existing.pinnedAt);
-    sessions.push(copyMerged(incoming, util.generateRandomUUID(true), withPrefix(incoming.title, 'D分支·')));
+    sessions.push(copyMerged(incoming, unusedConversationId(sessions), withPrefix(incoming.title, 'D分支·')));
   }
   return { history: { sessions: sessions, activeId: history.activeId }, importedCount: total };
 }

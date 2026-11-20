@@ -60,6 +60,7 @@ interface SessionIndex {
 interface SessionWrite {
   metadata: SessionMetadata;
   snapshot?: string;
+  unreadable?: boolean;
 }
 
 interface HistoryWrite {
@@ -138,6 +139,7 @@ function validReplyFailure(failure: NativeReplyFailure): boolean {
 function validateConversation(session: NativeConversation): boolean {
   if (!session || typeof session.id !== 'string' || !session.id || typeof session.title !== 'string' ||
     !isTimestamp(session.createdAt) || !isTimestamp(session.updatedAt) ||
+    session.unreadable !== undefined ||
     (session.archiveJson !== undefined && typeof session.archiveJson !== 'string') ||
     (session.pinnedAt !== undefined && !isTimestamp(session.pinnedAt)) || !Array.isArray(session.messages)) {
     return false;
@@ -190,19 +192,22 @@ function readLegacyDocument(document: LegacyConversationDocument): NativeConvers
   return { sessions: document.sessions, activeId: document.activeId };
 }
 
-function recoverInterrupted(state: NativeConversationState): NativeConversationState {
-  for (const session of state.sessions) {
-    for (const message of session.messages) {
-      if (message.role === 'assistant' && (message.status === 'pending' || message.status === 'streaming')) {
-        message.status = 'stopped';
-        if (message.toolTimeline) {
-          // A pending link is hidden after stopping, but still rules out continuing after reload.
-          if (message.toolTimeline.steps.some(step => step.type === 'read_link')) message.canPrefill = false;
-          settleInterruptedNativeToolTimeline(message.toolTimeline);
-        }
+function recoverInterruptedConversation(session: NativeConversation): NativeConversation {
+  for (const message of session.messages) {
+    if (message.role === 'assistant' && (message.status === 'pending' || message.status === 'streaming')) {
+      message.status = 'stopped';
+      if (message.toolTimeline) {
+        // A pending link is hidden after stopping, but still rules out continuing after reload.
+        if (message.toolTimeline.steps.some(step => step.type === 'read_link')) message.canPrefill = false;
+        settleInterruptedNativeToolTimeline(message.toolTimeline);
       }
     }
   }
+  return session;
+}
+
+function recoverInterrupted(state: NativeConversationState): NativeConversationState {
+  for (const session of state.sessions) recoverInterruptedConversation(session);
   return state;
 }
 
@@ -213,9 +218,13 @@ function sessionMetadata(session: NativeConversation): SessionMetadata {
   };
 }
 
-function sameMetadata(left: SessionMetadata, right: SessionMetadata): boolean {
+function sameSessionSummary(left: SessionMetadata, right: SessionMetadata): boolean {
   return left.id === right.id && left.title === right.title && left.createdAt === right.createdAt &&
-    left.updatedAt === right.updatedAt && left.pinnedAt === right.pinnedAt && left.rootMessageId === right.rootMessageId &&
+    left.updatedAt === right.updatedAt && left.pinnedAt === right.pinnedAt;
+}
+
+function sameMetadata(left: SessionMetadata, right: SessionMetadata): boolean {
+  return sameSessionSummary(left, right) && left.rootMessageId === right.rootMessageId &&
     left.messageCount === right.messageCount;
 }
 
@@ -256,6 +265,12 @@ function captureHistory(state: NativeConversationState, dirtySessionIds?: string
     }
     ids.add(session.id);
     const metadata = sessionMetadata(session);
+    if (session.unreadable) {
+      if (metadata.rootMessageId !== null || metadata.messageCount !== 0 || session.archiveJson !== undefined) {
+        throw new Error('Unreadable native conversation cannot be modified');
+      }
+      return { metadata, unreadable: true };
+    }
     if (dirty && !dirty.has(session.id)) {
       return { metadata };
     }
@@ -356,20 +371,32 @@ async function readIndex(directory: string): Promise<SessionIndex | undefined> {
   return index;
 }
 
+async function readIndexedConversation(directory: string, entry: SessionIndexEntry): Promise<NativeConversation> {
+  const value = await fileIo.readText(directory + '/' + entry.file);
+  if (sessionDigest(value) !== entry.digest) {
+    throw new Error('Native conversation checksum does not match');
+  }
+  const session = JSON.parse(value) as NativeConversation;
+  if (!validateConversation(session) || !sameMetadata(entry.metadata, sessionMetadata(session))) {
+    throw new Error('Invalid native conversation snapshot');
+  }
+  return recoverInterruptedConversation(session);
+}
+
 async function loadIndexedHistory(directory: string, index: SessionIndex): Promise<NativeConversationState> {
   const sessions: NativeConversation[] = [];
   for (const entry of index.sessions) {
-    const value = await fileIo.readText(directory + '/' + entry.file);
-    if (sessionDigest(value) !== entry.digest) {
-      throw new Error('Native conversation checksum does not match');
+    try {
+      sessions.push(await readIndexedConversation(directory, entry));
+    } catch {
+      const metadata = entry.metadata;
+      sessions.push({
+        id: metadata.id, title: metadata.title, createdAt: metadata.createdAt, updatedAt: metadata.updatedAt,
+        pinnedAt: metadata.pinnedAt, rootMessageId: null, messages: [], unreadable: true,
+      });
     }
-    const session = JSON.parse(value) as NativeConversation;
-    if (!validateConversation(session) || !sameMetadata(entry.metadata, sessionMetadata(session))) {
-      throw new Error('Invalid native conversation snapshot');
-    }
-    sessions.push(session);
   }
-  return recoverInterrupted({ sessions, activeId: index.activeId });
+  return { sessions, activeId: index.activeId };
 }
 
 function resolveBaseEntries(previous: SessionIndex | undefined, write: HistoryWrite): Map<string, SessionIndexEntry> {
@@ -377,15 +404,17 @@ function resolveBaseEntries(previous: SessionIndex | undefined, write: HistoryWr
   for (const entry of previous?.sessions ?? []) {
     existing.set(entry.metadata.id, entry);
   }
-  if (!write.incremental) {
-    return existing;
-  }
-  if (!previous || existing.size !== write.sessions.length) {
+  if (write.incremental && (!previous || existing.size !== write.sessions.length)) {
     throw new Error('Incremental native history requires the complete committed session list');
   }
   for (const session of write.sessions) {
     const entry = existing.get(session.metadata.id);
-    if (!entry || (session.snapshot === undefined && !sameMetadata(entry.metadata, session.metadata))) {
+    if (session.unreadable) {
+      if (!entry || !sameSessionSummary(entry.metadata, session.metadata)) {
+        throw new Error('Unreadable native conversation does not match a committed entry');
+      }
+    } else if (write.incremental &&
+      (!entry || (session.snapshot === undefined && !sameMetadata(entry.metadata, session.metadata)))) {
       throw new Error('Incremental native history omits a changed session');
     }
   }
@@ -535,23 +564,38 @@ export class NativeChatStorage {
           index = await commitHistory(context.filesDir, directory, undefined, captureHistory(legacy));
         }
       }
+      const unreadable = state.sessions.some((session: NativeConversation): boolean => session.unreadable === true);
       if (index) {
         committedIndexes.set(directory, index);
-        await fileIo.unlink(path).catch(() => {});
-        await pruneSessionSnapshots(directory, index);
+        if (!unreadable) {
+          await fileIo.unlink(path).catch(() => {});
+          await pruneSessionSnapshots(directory, index);
+        }
       } else {
         committedIndexes.delete(directory);
       }
       const retained = retainedImageIds(path, state);
       committedImages.set(path, retained);
-      const protectedImages = new Set<string>(retained);
-      for (const scheduled of pendingImageWrites.get(path) ?? []) {
-        for (const id of scheduled) {
-          protectedImages.add(id);
+      if (!unreadable) {
+        const protectedImages = new Set<string>(retained);
+        for (const scheduled of pendingImageWrites.get(path) ?? []) {
+          for (const id of scheduled) {
+            protectedImages.add(id);
+          }
         }
+        await pruneBackupImages(context, protectedImages).catch(() => {});
       }
-      await pruneBackupImages(context, protectedImages).catch(() => {});
       return state;
+    });
+  }
+
+  loadConversation(context: common.UIAbilityContext, id: string): Promise<NativeConversation> {
+    const directory = `${context.filesDir}/${HISTORY_DIRECTORY}`;
+    return queueStorageOperation<NativeConversation>(async (): Promise<NativeConversation> => {
+      const index = await readIndex(directory);
+      const entry = index?.sessions.find((row: SessionIndexEntry): boolean => row.metadata.id === id);
+      if (!entry) throw new Error('Native conversation is missing from the index');
+      return readIndexedConversation(directory, entry);
     });
   }
 
@@ -562,6 +606,7 @@ export class NativeChatStorage {
     const path = `${context.filesDir}/${TRANSCRIPT_FILE}`;
     const directory = `${context.filesDir}/${HISTORY_DIRECTORY}`;
     const write = captureHistory(state, dirtySessionIds);
+    const unreadable = write.sessions.some((session: SessionWrite): boolean => session.unreadable === true);
     const retained = retainedImageIds(path, state);
     const pending = pendingImageWrites.get(path) ?? new Set<Set<string>>();
     pending.add(retained);
@@ -581,14 +626,14 @@ export class NativeChatStorage {
           await fileIo.unlink(path).catch(() => {});
         }
         const prior = committedImages.get(path);
-        if (write.incremental && prior) {
-          // A partial write can carry older versions of sessions left on disk.
+        if ((write.incremental || unreadable) && prior) {
+          // Preserve known sidecars while older snapshots or unreadable conversations are retained.
           for (const id of prior) {
             retained.add(id);
           }
         }
         committedImages.set(path, retained);
-        if (prior) {
+        if (prior && !unreadable) {
           for (const id of prior) {
             if (!retained.has(id) && !Array.from(pending).some((scheduled: Set<string>): boolean => scheduled.has(id))) {
               await removeBackupImage(context, id).catch(() => {});

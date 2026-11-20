@@ -258,7 +258,8 @@ function shareTitle(value: string | null | undefined, firstText: string): string
   return Array.from(firstText.replace(/\s+/g, ' ')).slice(0, 28).join('') || '分享导入的对话';
 }
 
-function buildSession(payload: SharePayload, raw: ShareRow[], now: number): NativeConversation {
+function buildSession(payload: SharePayload, raw: ShareRow[], now: number,
+  reservedIds: Set<string>): NativeConversation {
   if (raw.length > MAX_MESSAGES) {
     return tooLarge();
   }
@@ -316,7 +317,8 @@ function buildSession(payload: SharePayload, raw: ShareRow[], now: number): Nati
   while (last.children.length > 0) {
     last = last.children[last.children.length - 1];
   }
-  const id = util.generateRandomUUID(true);
+  let id = util.generateRandomUUID(true);
+  while (reservedIds.has(id)) id = util.generateRandomUUID(true);
   const title = shareTitle(payload.title, prompt);
   const createdAt = root.message.createdAt;
   const updatedAt = Math.max(now, inputOrder[inputOrder.length - 1].message.createdAt);
@@ -336,7 +338,7 @@ function buildSession(payload: SharePayload, raw: ShareRow[], now: number): Nati
   };
 }
 
-export async function importNativeShareLink(input: string): Promise<NativeConversation> {
+export async function importNativeShareLink(input: string, reservedIds: Set<string> = new Set<string>()): Promise<NativeConversation> {
   const payload = await fetchShare(parseShareId(input));
   if (payload?.code !== 0 || payload.data?.biz_code !== 0) {
     const message = payload?.data?.biz_msg || payload?.msg;
@@ -347,5 +349,5 @@ export async function importNativeShareLink(input: string): Promise<NativeConver
   if (!data || !Array.isArray(data.messages) || data.messages.length === 0) {
     throw new Error('该分享链接中没有可导入的对话内容');
   }
-  return buildSession(data, data.messages, Date.now());
+  return buildSession(data, data.messages, Date.now(), reservedIds);
 }
