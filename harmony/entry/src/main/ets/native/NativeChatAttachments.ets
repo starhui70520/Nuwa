@@ -98,6 +98,8 @@ const EXIF_ORIENTATIONS = [
 const EXIF_ROTATIONS = [0, 0, 0, 180, 0, 270, 90, 90, 270];
 const MAX_PREVIEW_SIDE = 8192;
 const MAX_PREVIEW_PIXELS = 16 * 1024 * 1024;
+const NATIVE_PREVIEW_MIMES = ['image/bmp', 'image/tiff', 'image/avif'];
+const ARCHIVE_PREVIEW_MIMES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp', ...NATIVE_PREVIEW_MIMES];
 const BINARY_MIME = 'application/octet-stream';
 const FILE_TYPES: Set<string> = new Set<string>([
   'wxml wxss wxs axml acss sjs swan ttml ttss qml qss pdf png jpg jpeg svg svgz bmp gif webp ico xbm dib',
@@ -264,6 +266,35 @@ export function attachmentRasterMime(data: Uint8Array): string {
       return safeWebP(data, view) ? mime : '';
     default:
       return '';
+  }
+}
+
+export function isArchiveRasterPreviewMime(mime: string): boolean {
+  return ARCHIVE_PREVIEW_MIMES.includes(mime);
+}
+
+export async function fileAttachmentRasterMime(path: string, header: Uint8Array): Promise<string> {
+  const raster = attachmentRasterMime(header);
+  if (raster) return raster;
+
+  const mime = attachmentUploadImageMime(header);
+  if (!NATIVE_PREVIEW_MIMES.includes(mime)) return '';
+  let source: image.ImageSource | undefined;
+  try {
+    // Ask the device decoder for dimensions before showing less common archive formats.
+    source = image.createImageSource(path);
+    const size = (await source.getImageInfo()).size;
+    if (!safeDimensions(size.width, size.height)) return '';
+    if (mime === 'image/avif') {
+      // Some devices can read AVIF metadata but lack the decoder needed for pixel output.
+      const sample = await source.createPixelMap({ desiredSize: { width: 1, height: 1 } });
+      await sample.release().catch(() => {});
+    }
+    return mime;
+  } catch {
+    return '';
+  } finally {
+    await source?.release().catch(() => {});
   }
 }
 

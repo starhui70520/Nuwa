@@ -3,8 +3,8 @@ import { url, util } from '@kit.ArkTS';
 import { fileIo, fileUri, picker } from '@kit.CoreFileKit';
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import {
-  attachmentMime, attachmentPurpose, attachmentRasterMime, attachmentUploadImageMime, NativeAttachment,
-  NativeChatAttachments,
+  attachmentMime, attachmentPurpose, attachmentRasterMime, attachmentUploadImageMime, fileAttachmentRasterMime,
+  isArchiveRasterPreviewMime, NativeAttachment, NativeChatAttachments,
 } from './NativeChatAttachments';
 import { NativeChatCitation, NativeChatSource, nativeSearchResults, safeNativeSourceUrl } from './NativeChatSources';
 import { NativeConversation, NativeConversationMessage, NativeConversationState, visibleMessages } from './NativeConversation';
@@ -717,9 +717,8 @@ export function importedAttachmentPreview(session: NativeConversation, item: Nat
     return '';
   }
   try {
-    // File-backed images have already passed the raster and dimension checks during import.
     if (context && image.blobId && image.size !== undefined && image.size > 0 &&
-      ['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(image.mimeType ?? '')) {
+      isArchiveRasterPreviewMime(image.mimeType ?? '')) {
       return fileUri.getUriFromPath(backupImagePath(context, image.blobId));
     }
     if (image.bytes && image.bytes.length <= Math.ceil(MAX_PREVIEW_BYTES / 3) * 4) {
@@ -740,6 +739,23 @@ export function importedAttachmentOriginalUri(context: common.UIAbilityContext, 
   const image = retainedImage(session, item);
   try {
     return image?.blobId ? fileUri.getUriFromPath(backupImagePath(context, image.blobId)) : '';
+  } catch {
+    return '';
+  }
+}
+
+async function fileBackedPreviewMime(path: string): Promise<string> {
+  return withBackupInput<string>(path, async (file: NativeBackupZipInput): Promise<string> =>
+    fileAttachmentRasterMime(path, await file.read(0, Math.min(file.size, 64 * 1024))));
+}
+
+export async function resolveImportedAttachmentPreview(context: common.UIAbilityContext, session: NativeConversation,
+  item: NativeAttachment): Promise<string> {
+  const retained = retainedImage(session, item);
+  if (!retained?.blobId || !retained.size) return '';
+  try {
+    const path = backupImagePath(context, retained.blobId);
+    return await fileBackedPreviewMime(path) ? fileUri.getUriFromPath(path) : '';
   } catch {
     return '';
   }
@@ -976,9 +992,7 @@ async function readChatBackup(input: NativeBackupZipInput, context?: common.UIAb
       if (context) {
         const id = await stageBackupImage(context, entry);
         staged.push(id);
-        const mimeType = await withBackupInput<string>(backupImagePath(context, id),
-          async (file: NativeBackupZipInput): Promise<string> =>
-            attachmentRasterMime(await file.read(0, Math.min(file.size, 64 * 1024))));
+        const mimeType = await fileBackedPreviewMime(backupImagePath(context, id));
         loadedImages.set(imageId, { path: path, blobId: id, size: entry.size, crc: entry.crc, mimeType: mimeType });
       } else {
         inlineBytes += entry.size;

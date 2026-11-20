@@ -35,7 +35,7 @@ import {
 } from '../native/NativeAttachmentDrop';
 import {
   commitChatBackup, hydrateImportedAttachment, importedAttachmentOriginalUri, importedAttachmentPreview,
-  NativeChatBackup, nativeArchivedReplyTemplate, NATIVE_BACKUP_UNREADABLE_CONVERSATION,
+  NativeChatBackup, nativeArchivedReplyTemplate, NATIVE_BACKUP_UNREADABLE_CONVERSATION, resolveImportedAttachmentPreview,
 } from '../native/NativeChatBackup';
 import { isBackupSpaceError } from '../native/NativeBackupFiles';
 import {
@@ -3134,6 +3134,14 @@ struct NativeChat {
     }
     const context = this.host();
     const session = this.session();
+    if (session && item.isImage && !item.local) {
+      const archivedPreview = await resolveImportedAttachmentPreview(context, session, item);
+      if (this.history.activeId !== session.id || this.imagePreview || this.chatLinkUrl) return;
+      if (archivedPreview) {
+        this.imagePreview = archivedPreview;
+        return;
+      }
+    }
     const uri = this.attachments.previewUri(context, item) ||
       (session ? importedAttachmentOriginalUri(context, session, item) : '');
     if (!uri) {
@@ -3186,13 +3194,19 @@ struct NativeChat {
         status: this.reply()?.uploadingIds.includes(item.id) ? 'uploading' :
           this.messageUploadFailure(prompt, item) ? 'failed' : 'ready',
         detail: this.messageUploadFailure(prompt, item)?.detail ?? '',
-        retryable: this.canRetryMessageUpload(prompt, item), openable: item.local,
+        retryable: this.canRetryMessageUpload(prompt, item), openable: this.hasAttachmentOriginal(item),
         onAction: () => {
           if (this.messageUploadFailure(prompt, item)) this.retryMessageUpload(prompt, item);
           else void this.openAttachment(item);
         },
       })
     }
+  }
+
+  private hasAttachmentOriginal(item: NativeAttachment): boolean {
+    if (item.local) return true;
+    const session = this.session();
+    return !!session && !!importedAttachmentOriginalUri(this.host(), session, item);
   }
 
   @Builder
