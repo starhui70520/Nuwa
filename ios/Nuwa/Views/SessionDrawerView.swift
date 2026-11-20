@@ -288,7 +288,7 @@ struct SessionDrawerView: View {
                     Button {
                         onOpenSettings()
                     } label: {
-                        HStack(spacing: 12) {
+                        HStack(spacing: 10) {
                             Image("NuwaLogo")
                                 .resizable()
                                 .scaledToFill()
@@ -299,11 +299,13 @@ struct SessionDrawerView: View {
                                 .font(NuwaFont.sized(15.5, weight: .medium, scale: fontScale))
                                 .foregroundStyle(Color.nuwaLabelPrimary)
                                 .lineLimit(1)
+                                .truncationMode(.tail)
                         }
                         .frame(minHeight: 50, alignment: .leading)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(NuwaTactileButtonStyle(pressedScale: 0.98))
+                    .layoutPriority(1)
 
                     if let balance = settings.deepSeekBalanceText {
                         Button {
@@ -322,25 +324,29 @@ struct SessionDrawerView: View {
                                 .contentShape(Capsule())
                         }
                         .buttonStyle(NuwaTactileButtonStyle(pressedScale: 0.95))
+                        .fixedSize()
+                        .layoutPriority(2)
                         .accessibilityLabel(L10n.t("topUp", locale: loc))
                     }
 
                     Button {
                         onOpenSettings()
                     } label: {
-                        HStack {
+                        HStack(spacing: 0) {
                             Spacer(minLength: 4)
                             Image(systemName: "ellipsis")
                                 .font(.system(size: 16, weight: .medium))
                                 .foregroundStyle(Color.nuwaLabelTertiary)
+                                .fixedSize()
                         }
                         .frame(maxWidth: .infinity, minHeight: 50)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(NuwaTactileButtonStyle(pressedScale: 0.98))
+                    .layoutPriority(-1)
                     .accessibilityLabel(L10n.t("settings", locale: loc))
                 }
-                .padding(.horizontal, 22)
+                .padding(.horizontal, 16)
                 .padding(.top, 6)
                 .padding(.bottom, 10)
             }
