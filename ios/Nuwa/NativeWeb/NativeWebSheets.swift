@@ -5,14 +5,13 @@ import UIKit
 struct DeepSeekAuthSheet: UIViewControllerRepresentable {
     let onResult: (_ token: String?, _ accountLabel: String?, _ error: String?) -> Void
 
-    func makeUIViewController(context: Context) -> UINavigationController {
+    func makeUIViewController(context: Context) -> PlatformAuthViewController {
         let authVC = PlatformAuthViewController()
         authVC.onResult = onResult
-        let nav = UINavigationController(rootViewController: authVC)
-        return nav
+        return authVC
     }
 
-    func updateUIViewController(_ uiViewController: UINavigationController, context: Context) {}
+    func updateUIViewController(_ uiViewController: PlatformAuthViewController, context: Context) {}
 }
 
 struct MigrationLaunchOptions: Identifiable, Equatable {
@@ -29,14 +28,13 @@ struct DeepSeekMigrationSheet: UIViewControllerRepresentable {
     var forceReExport: Bool = false
     let onResult: (_ filePath: String?, _ fileName: String?) -> Void
 
-    func makeUIViewController(context: Context) -> UINavigationController {
+    func makeUIViewController(context: Context) -> MigrationWebViewController {
         let migVC = MigrationWebViewController()
         migVC.clearSessionOnStart = clearSession
         migVC.forceReExport = forceReExport
         migVC.onResult = onResult
-        let nav = UINavigationController(rootViewController: migVC)
-        return nav
+        return migVC
     }
 
-    func updateUIViewController(_ uiViewController: UINavigationController, context: Context) {}
+    func updateUIViewController(_ uiViewController: MigrationWebViewController, context: Context) {}
 }

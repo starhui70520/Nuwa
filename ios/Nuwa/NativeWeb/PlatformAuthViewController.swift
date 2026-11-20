@@ -64,6 +64,8 @@ final class PlatformAuthViewController: UIViewController, WKNavigationDelegate {
         return created
     }
 
+    override var preferredStatusBarStyle: UIStatusBarStyle { .lightContent }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
@@ -73,20 +75,26 @@ final class PlatformAuthViewController: UIViewController, WKNavigationDelegate {
         banner.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(banner)
 
+        let bannerContent = UIView()
+        bannerContent.translatesAutoresizingMaskIntoConstraints = false
+        banner.addSubview(bannerContent)
+
         statusLabel = UILabel()
         statusLabel.text = "正在连接 DeepSeek 开放平台..."
         statusLabel.textColor = .white
         statusLabel.font = .systemFont(ofSize: 13)
+        statusLabel.lineBreakMode = .byTruncatingTail
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
-        banner.addSubview(statusLabel)
+        bannerContent.addSubview(statusLabel)
 
         let closeButton = UIButton(type: .system)
         closeButton.setTitle("关闭", for: .normal)
         closeButton.setTitleColor(.white, for: .normal)
-        closeButton.titleLabel?.font = .systemFont(ofSize: 13)
+        closeButton.titleLabel?.font = .systemFont(ofSize: 13, weight: .medium)
         closeButton.translatesAutoresizingMaskIntoConstraints = false
         closeButton.addTarget(self, action: #selector(closeTapped), for: .touchUpInside)
-        banner.addSubview(closeButton)
+        closeButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        bannerContent.addSubview(closeButton)
 
         let config = WKWebViewConfiguration()
         let wv = WKWebView(frame: .zero, configuration: config)
@@ -101,15 +109,19 @@ final class PlatformAuthViewController: UIViewController, WKNavigationDelegate {
         webView = wv
 
         NSLayoutConstraint.activate([
-            banner.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            banner.topAnchor.constraint(equalTo: view.topAnchor),
             banner.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             banner.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            statusLabel.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 14),
-            statusLabel.centerYAnchor.constraint(equalTo: banner.centerYAnchor),
-            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: closeButton.leadingAnchor, constant: -8),
-            closeButton.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -10),
-            closeButton.centerYAnchor.constraint(equalTo: banner.centerYAnchor),
-            banner.heightAnchor.constraint(equalToConstant: 44),
+            bannerContent.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 4),
+            bannerContent.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
+            bannerContent.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
+            bannerContent.bottomAnchor.constraint(equalTo: banner.bottomAnchor, constant: -2),
+            bannerContent.heightAnchor.constraint(equalToConstant: 44),
+            statusLabel.leadingAnchor.constraint(equalTo: bannerContent.leadingAnchor, constant: 16),
+            statusLabel.centerYAnchor.constraint(equalTo: bannerContent.centerYAnchor),
+            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: closeButton.leadingAnchor, constant: -10),
+            closeButton.trailingAnchor.constraint(equalTo: bannerContent.trailingAnchor, constant: -16),
+            closeButton.centerYAnchor.constraint(equalTo: bannerContent.centerYAnchor),
             wv.topAnchor.constraint(equalTo: banner.bottomAnchor),
             wv.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             wv.trailingAnchor.constraint(equalTo: view.trailingAnchor),

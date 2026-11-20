@@ -29,6 +29,8 @@ final class MigrationWebViewController: UIViewController, WKNavigationDelegate, 
     private var downloadSuggestedName = "deepseek_data.zip"
     private let maxDownloadRetries = 3
 
+    override var preferredStatusBarStyle: UIStatusBarStyle { .lightContent }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
@@ -38,13 +40,17 @@ final class MigrationWebViewController: UIViewController, WKNavigationDelegate, 
         banner.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(banner)
 
+        let bannerContent = UIView()
+        bannerContent.translatesAutoresizingMaskIntoConstraints = false
+        banner.addSubview(bannerContent)
+
         guideLabel = UILabel()
         guideLabel.text = "请先登录 DeepSeek 账号，登录成功后将自动辅助导出"
         guideLabel.textColor = .white
         guideLabel.font = .systemFont(ofSize: 12)
         guideLabel.lineBreakMode = .byTruncatingTail
         guideLabel.translatesAutoresizingMaskIntoConstraints = false
-        banner.addSubview(guideLabel)
+        bannerContent.addSubview(guideLabel)
 
         let switchButton = UIButton(type: .system)
         switchButton.setTitle("换号", for: .normal)
@@ -52,7 +58,7 @@ final class MigrationWebViewController: UIViewController, WKNavigationDelegate, 
         switchButton.titleLabel?.font = .systemFont(ofSize: 12.5, weight: .medium)
         switchButton.translatesAutoresizingMaskIntoConstraints = false
         switchButton.addTarget(self, action: #selector(switchAccountTapped), for: .touchUpInside)
-        banner.addSubview(switchButton)
+        bannerContent.addSubview(switchButton)
 
         let autoButton = UIButton(type: .system)
         autoButton.setTitle("自动导出", for: .normal)
@@ -60,7 +66,7 @@ final class MigrationWebViewController: UIViewController, WKNavigationDelegate, 
         autoButton.titleLabel?.font = .systemFont(ofSize: 12.5, weight: .medium)
         autoButton.translatesAutoresizingMaskIntoConstraints = false
         autoButton.addTarget(self, action: #selector(autoExportTapped), for: .touchUpInside)
-        banner.addSubview(autoButton)
+        bannerContent.addSubview(autoButton)
 
         let closeButton = UIButton(type: .system)
         closeButton.setTitle("关闭", for: .normal)
@@ -68,7 +74,7 @@ final class MigrationWebViewController: UIViewController, WKNavigationDelegate, 
         closeButton.titleLabel?.font = .systemFont(ofSize: 12.5, weight: .medium)
         closeButton.translatesAutoresizingMaskIntoConstraints = false
         closeButton.addTarget(self, action: #selector(closeTapped), for: .touchUpInside)
-        banner.addSubview(closeButton)
+        bannerContent.addSubview(closeButton)
 
         let config = WKWebViewConfiguration()
         config.userContentController.add(self, name: "iOSMigrationBridge")
@@ -95,19 +101,23 @@ final class MigrationWebViewController: UIViewController, WKNavigationDelegate, 
         closeButton.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         NSLayoutConstraint.activate([
-            banner.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            banner.topAnchor.constraint(equalTo: view.topAnchor),
             banner.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             banner.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            banner.heightAnchor.constraint(equalToConstant: 44),
-            guideLabel.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 10),
-            guideLabel.centerYAnchor.constraint(equalTo: banner.centerYAnchor),
-            guideLabel.trailingAnchor.constraint(lessThanOrEqualTo: switchButton.leadingAnchor, constant: -6),
-            switchButton.trailingAnchor.constraint(equalTo: autoButton.leadingAnchor, constant: -8),
-            switchButton.centerYAnchor.constraint(equalTo: banner.centerYAnchor),
-            autoButton.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -8),
-            autoButton.centerYAnchor.constraint(equalTo: banner.centerYAnchor),
-            closeButton.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -10),
-            closeButton.centerYAnchor.constraint(equalTo: banner.centerYAnchor),
+            bannerContent.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 4),
+            bannerContent.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
+            bannerContent.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
+            bannerContent.bottomAnchor.constraint(equalTo: banner.bottomAnchor, constant: -2),
+            bannerContent.heightAnchor.constraint(equalToConstant: 44),
+            guideLabel.leadingAnchor.constraint(equalTo: bannerContent.leadingAnchor, constant: 16),
+            guideLabel.centerYAnchor.constraint(equalTo: bannerContent.centerYAnchor),
+            guideLabel.trailingAnchor.constraint(lessThanOrEqualTo: switchButton.leadingAnchor, constant: -8),
+            switchButton.trailingAnchor.constraint(equalTo: autoButton.leadingAnchor, constant: -10),
+            switchButton.centerYAnchor.constraint(equalTo: bannerContent.centerYAnchor),
+            autoButton.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -10),
+            autoButton.centerYAnchor.constraint(equalTo: bannerContent.centerYAnchor),
+            closeButton.trailingAnchor.constraint(equalTo: bannerContent.trailingAnchor, constant: -16),
+            closeButton.centerYAnchor.constraint(equalTo: bannerContent.centerYAnchor),
             wv.topAnchor.constraint(equalTo: banner.bottomAnchor),
             wv.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             wv.trailingAnchor.constraint(equalTo: view.trailingAnchor),
