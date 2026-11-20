@@ -2,9 +2,6 @@ import PhotosUI
 import SwiftUI
 import UIKit
 
-/// Exact 1:1 recreation of chat-demo/src/components/chatInput/ChatInput.tsx
-/// Single floating iOS 26 Liquid Glass container (ZERO nested glass-on-glass!).
-/// DeepThink & Search toggles use crisp Nuwa blue pills + light haptic + tactile scale feedback.
 struct ChatComposerView: View {
     @Binding var text: String
     let attachments: [DraftAttachment]
@@ -29,14 +26,17 @@ struct ChatComposerView: View {
 
     @FocusState private var isFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
     @State private var showPhotoPicker = false
+    @State private var bounceTrigger = 0
+    @State private var lastBounce: ContinuousClock.Instant?
 
     private static let lightImpact = UIImpactFeedbackGenerator(style: .light)
 
     var body: some View {
         VStack(spacing: 8) {
-            VStack(spacing: 10) {
+            VStack(spacing: 12) {
                 // Draft attachments strip (cached thumbnails + status/retry/remove)
                 if !attachments.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
@@ -61,8 +61,10 @@ struct ChatComposerView: View {
                         .font(.system(size: 16))
                         .foregroundStyle(Color.nuwaLabelPrimary)
                         .submitLabel(.return)
-                        .padding(.horizontal, 4)
-                        .padding(.top, 2)
+                        .frame(minHeight: 38, alignment: .topLeading)
+                        .padding(.horizontal, 6)
+                        .padding(.top, 4)
+                        .simultaneousGesture(TapGesture().onEnded { bounce() })
                 }
 
                 // Bottom action row — lightweight crisp native controls inside ONE Liquid Glass card
@@ -110,23 +112,22 @@ struct ChatComposerView: View {
                     }
                 }
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 12)
             .padding(.vertical, 12)
-            .nuwaGlassCard(cornerRadius: 24, interactive: false)
-            .overlay {
-                let shape = RoundedRectangle(cornerRadius: 24)
-                shape
-                    .strokeBorder(Color.nuwaBrandText.opacity(isFocused ? 0.42 : 0), lineWidth: 1)
-                    .shadow(color: Color.nuwaBrandText.opacity(isFocused ? 0.48 : 0), radius: 5)
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
+            .nuwaGlassCard(cornerRadius: 28, tint: colorScheme == .dark ? .white.opacity(0.08) : nil)
+            .keyframeAnimator(initialValue: 1.0, trigger: bounceTrigger) { card, scale in
+                card.scaleEffect(reduceMotion ? 1 : scale, anchor: .bottom)
+            } keyframes: { _ in
+                CubicKeyframe(0.97, duration: 0.08)
+                SpringKeyframe(1.0, duration: 0.43, spring: .bouncy)
             }
-            .scaleEffect(isFocused && !reduceMotion ? 1.015 : 1, anchor: .bottom)
-            .animation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.65), value: isFocused)
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, 22)
         .padding(.top, 6)
         .padding(.bottom, 10)
+        .onChange(of: isFocused) { _, focused in
+            if focused { bounce() }
+        }
         .photosPicker(
             isPresented: $showPhotoPicker,
             selection: $selectedPhotoItems,
@@ -139,6 +140,13 @@ struct ChatComposerView: View {
             selectedPhotoItems = []
             onPickPhotos(batch)
         }
+    }
+
+    private func bounce() {
+        let now = ContinuousClock.now
+        guard !reduceMotion, lastBounce.map({ $0.duration(to: now) >= .milliseconds(150) }) ?? true else { return }
+        lastBounce = now
+        bounceTrigger += 1
     }
 
     @ViewBuilder
@@ -234,12 +242,14 @@ struct ChatComposerView: View {
                 Text(title)
                     .font(.system(size: 13, weight: .medium))
                     .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
             .foregroundStyle(selected ? Color.nuwaBrandText : Color.nuwaLabelPrimary)
-            .padding(.horizontal, 11)
+            .padding(.horizontal, 9)
             .padding(.vertical, 6.5)
             .nuwaPillSurface(selected: selected)
-            .contentShape(Capsule())
+            .frame(minHeight: 34)
+            .contentShape(Rectangle())
         }
         .buttonStyle(NuwaTactileButtonStyle(pressedScale: 0.95))
     }
@@ -257,12 +267,10 @@ struct ChatComposerView: View {
                 Label("选取文件 (PDF / Word / 代码等)", systemImage: "doc")
             }
         } label: {
-            Image(systemName: "plus")
-                .font(.system(size: 16, weight: .medium))
-                .foregroundStyle(Color.nuwaLabelSecondary)
-                .frame(width: 32, height: 32)
-                .background(Color.nuwaControlFill, in: Circle())
-                .overlay(Circle().strokeBorder(Color.nuwaControlBorder, lineWidth: 0.75))
+            Image(systemName: "plus.circle")
+                .font(.system(size: 22))
+                .foregroundStyle(Color.nuwaLabelPrimary)
+                .frame(width: 34, height: 34)
                 .contentShape(Circle())
         }
         .accessibilityLabel("上传文件")
@@ -274,16 +282,13 @@ struct ChatComposerView: View {
                 if isTranscribing {
                     ProgressView().controlSize(.mini)
                 } else {
-                    Image(systemName: isRecording ? "checkmark" : "mic")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(isRecording ? .white : Color.nuwaLabelSecondary)
+                    Image(systemName: isRecording ? "checkmark" : "waveform.circle")
+                        .font(.system(size: isRecording ? 15 : 22, weight: isRecording ? .semibold : .regular))
+                        .foregroundStyle(isRecording ? .white : Color.nuwaLabelPrimary)
                 }
             }
-            .frame(width: 32, height: 32)
-            .background(isRecording ? Color.nuwaBrand : Color.nuwaControlFill, in: Circle())
-            .overlay(
-                Circle().strokeBorder(isRecording ? Color.clear : Color.nuwaControlBorder, lineWidth: 0.75)
-            )
+            .frame(width: 34, height: 34)
+            .background(isRecording ? Color.nuwaBrand : Color.clear, in: Circle())
             .contentShape(Circle())
         }
         .buttonStyle(NuwaTactileButtonStyle(pressedScale: 0.92))
@@ -300,7 +305,8 @@ struct ChatComposerView: View {
                 .foregroundStyle(.white)
                 .frame(width: 32, height: 32)
                 .background(canSend ? Color.nuwaBrand : Color.nuwaBrand.opacity(0.35), in: Circle())
-                .contentShape(Circle())
+                .frame(width: 34, height: 34)
+                .contentShape(Rectangle())
         }
         .buttonStyle(NuwaTactileButtonStyle(pressedScale: 0.92))
         .disabled(!canSend)
@@ -314,7 +320,8 @@ struct ChatComposerView: View {
                 .foregroundStyle(.white)
                 .frame(width: 32, height: 32)
                 .background(Color.nuwaBrand, in: Circle())
-                .contentShape(Circle())
+                .frame(width: 34, height: 34)
+                .contentShape(Rectangle())
         }
         .buttonStyle(NuwaTactileButtonStyle(pressedScale: 0.92))
         .accessibilityLabel("停止生成")

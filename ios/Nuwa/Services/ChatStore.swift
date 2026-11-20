@@ -792,8 +792,8 @@ final class ChatStore: ObservableObject {
                                    activeSessionId == sessionId, UIApplication.shared.applicationState == .active {
                                     let now = hapticClock.now
                                     if lastReplyHaptic.map({ $0.duration(to: now) >= .milliseconds(300) }) ?? true {
-                                        if replyHaptics == nil { replyHaptics = UIImpactFeedbackGenerator(style: .soft) }
-                                        replyHaptics?.impactOccurred(intensity: 0.45)
+                                        if replyHaptics == nil { replyHaptics = UIImpactFeedbackGenerator(style: .medium) }
+                                        replyHaptics?.impactOccurred()
                                         lastReplyHaptic = now
                                     }
                                 }

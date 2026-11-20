@@ -155,6 +155,11 @@ struct SettingsView: View {
                 }
                 .nuwaNoScrollEdgeEffect()
             }
+            .accessibilityHidden(showMigrationChooser)
+
+            if showMigrationChooser {
+                migrationChooser
+            }
         }
         .task {
             apiKeyDraft = settings.apiKey
@@ -180,20 +185,6 @@ struct SettingsView: View {
                 }
             }
             .ignoresSafeArea()
-        }
-        .confirmationDialog("选择迁移方式", isPresented: $showMigrationChooser, titleVisibility: .visible) {
-            Button("重新导出并更新（当前账号）") {
-                launchMigration(clearSession: false, forceReExport: true)
-            }
-            Button("直接下载上次导出（当前账号）") {
-                launchMigration(clearSession: false, forceReExport: false)
-            }
-            Button("切换其他账号（清除登录态）") {
-                launchMigration(clearSession: true, forceReExport: false)
-            }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("检测到本地已有会话记录，请选择继续当前账号导出或切换账号。")
         }
         .fileExporter(
             isPresented: $isExporting,
@@ -999,7 +990,83 @@ struct SettingsView: View {
         }
     }
 
+    private var migrationChooser: some View {
+        let english = settings.locale == .enUS
+        let content = VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text(english ? "Choose Migration Method" : "选择迁移方式")
+                    .font(.headline)
+                    .accessibilityAddTraits(.isHeader)
+                Spacer()
+                Button {
+                    showMigrationChooser = false
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 14, weight: .semibold))
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(NuwaTactileButtonStyle())
+                .accessibilityLabel(L10n.t("cancel", locale: settings.locale))
+            }
+
+            Text(english
+                ? "You already have local conversations. Continue with the current account or switch accounts."
+                : "检测到本地已有会话记录，请选择继续当前账号导出或切换账号。")
+                .font(.subheadline)
+                .foregroundStyle(Color.nuwaLabelSecondary)
+                .padding(.bottom, 4)
+
+            migrationChoice(english ? "Re-export & Update (Recommended)" : "重新导出并更新（推荐）", primary: true) {
+                launchMigration(clearSession: false, forceReExport: true)
+            }
+            migrationChoice(english ? "Download Previous Export" : "直接下载上次导出（当前账号）") {
+                launchMigration(clearSession: false, forceReExport: false)
+            }
+            migrationChoice(english ? "Switch Account" : "切换其他账号") {
+                launchMigration(clearSession: true, forceReExport: false)
+            }
+        }
+        .foregroundStyle(Color.nuwaLabelPrimary)
+        .padding(20)
+
+        return ZStack {
+            Color.black.opacity(0.36)
+                .ignoresSafeArea()
+                .onTapGesture { showMigrationChooser = false }
+                .accessibilityHidden(true)
+
+            ViewThatFits(in: .vertical) {
+                content.fixedSize(horizontal: false, vertical: true)
+                ScrollView { content }
+            }
+            .frame(maxWidth: 380)
+            .background(cardBg, in: RoundedRectangle(cornerRadius: 24))
+            .padding(20)
+            .accessibilityAddTraits(.isModal)
+            .accessibilityAction(.escape) { showMigrationChooser = false }
+        }
+    }
+
+    private func migrationChoice(_ title: String, primary: Bool = false, action: @escaping () -> Void) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 14)
+        return Button(action: action) {
+            Text(title)
+                .font(.subheadline.weight(primary ? .semibold : .medium))
+                .foregroundStyle(primary ? .white : Color.nuwaLabelPrimary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 12)
+                .frame(maxWidth: .infinity, minHeight: 46)
+                .background(primary ? Color.nuwaBrand : Color.clear, in: shape)
+                .overlay(shape.strokeBorder(primary ? .clear : Color.nuwaControlBorder))
+                .contentShape(shape)
+        }
+        .buttonStyle(NuwaTactileButtonStyle())
+    }
+
     private func launchMigration(clearSession: Bool, forceReExport: Bool) {
+        showMigrationChooser = false
         settings.hasUsedOneClickMigration = true
         migrationOptions = MigrationLaunchOptions(clearSession: clearSession, forceReExport: forceReExport)
     }

@@ -297,7 +297,7 @@ struct MarkdownMessageView: View, Equatable {
                     Text(attributed)
                         .font(.system(size: fontSize))
                         .foregroundStyle(Color.nuwaLabelPrimary)
-                        .lineSpacing(4)
+                        .lineSpacing(6)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
 
@@ -310,7 +310,7 @@ struct MarkdownMessageView: View, Equatable {
                         Text(attributed)
                             .font(.system(size: fontSize))
                             .foregroundStyle(Color.nuwaLabelPrimary)
-                            .lineSpacing(4)
+                        .lineSpacing(6)
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -487,7 +487,9 @@ struct ReasoningDisclosureView: View {
     let reasoning: String
     let seconds: Double?
     let isStreaming: Bool
+    let fontSize: Double
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var expanded = false
 
     private var headerTitle: String {
@@ -506,37 +508,34 @@ struct ReasoningDisclosureView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Button {
-                withAnimation(.easeInOut(duration: 0.2)) {
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) {
                     expanded.toggle()
                 }
             } label: {
                 HStack(spacing: 6) {
-                    Image(systemName: "atom")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(Color.nuwaBrandText)
                     Text(headerTitle)
-                        .font(.caption.weight(.medium))
+                        .font(.system(size: max(12, fontSize - 1)))
                         .foregroundStyle(Color.nuwaLabelSecondary)
                     Image(systemName: expanded ? "chevron.up" : "chevron.down")
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(Color.nuwaLabelTertiary)
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .nuwaPillSurface()
+                .frame(minHeight: 32)
+                .contentShape(Rectangle())
             }
             .buttonStyle(NuwaTactileButtonStyle())
 
             if expanded {
                 Text(reasoning)
-                    .font(.footnote)
+                    .font(.system(size: max(12, fontSize - 1)))
                     .foregroundStyle(Color.nuwaLabelSecondary)
-                    .lineSpacing(3)
+                    .lineSpacing(5)
                     .textSelection(.enabled)
-                    .padding(12)
+                    .padding(.leading, 16)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color(.secondarySystemBackground).opacity(0.65))
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .overlay(alignment: .leading) {
+                        Rectangle().fill(Color.nuwaControlBorder).frame(width: 1)
+                    }
             }
         }
     }

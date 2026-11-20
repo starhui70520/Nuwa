@@ -282,7 +282,7 @@ struct ChatView: View {
                     onPickFiles: { showAttachmentFilePicker = true },
                     onToast: { chatStore.showToast($0) }
                 )
-                .frame(maxWidth: 760)
+                .frame(maxWidth: 680)
                 .frame(maxWidth: .infinity)
             }
             .allowsHitTesting(!drawerModal)
@@ -418,7 +418,10 @@ struct ChatView: View {
                                 .padding(.vertical, 10)
                                 .background(
                                     Color.nuwaBubbleFill,
-                                    in: RoundedRectangle(cornerRadius: 22, style: .continuous)
+                                    in: UnevenRoundedRectangle(
+                                        topLeadingRadius: 22, bottomLeadingRadius: 22,
+                                        bottomTrailingRadius: 6, topTrailingRadius: 22
+                                    )
                                 )
                         }
                     }
@@ -476,7 +479,7 @@ struct ChatView: View {
             let displayText = message.fullTextContent
 
             VStack(alignment: .leading, spacing: 10) {
-                if !refused && (isActivelySearching || !searchResults.isEmpty) {
+                if isActivelySearching && !refused {
                     SearchSummaryPillView(
                         results: searchResults,
                         isSearching: isActivelySearching
@@ -493,7 +496,8 @@ struct ChatView: View {
                     ReasoningDisclosureView(
                         reasoning: displayThink,
                         seconds: message.thinkingSeconds,
-                        isStreaming: message.isStreaming && displayText.isEmpty
+                        isStreaming: message.isStreaming && displayText.isEmpty,
+                        fontSize: settings.chatFontSize
                     )
                 }
 
@@ -547,7 +551,17 @@ struct ChatView: View {
                 }
 
                 if !message.isStreaming {
-                    // Lightweight flat native icon buttons (matching original Nuwa IconButton — zero scroll jank!)
+                    if !refused && !searchResults.isEmpty {
+                        SearchSummaryPillView(results: searchResults, isSearching: false) {
+                            searchPanelResults = searchResults
+                        }
+                        Text(settings.locale == .enUS
+                            ? "AI-generated content. Verify important information."
+                            : "本回答由 AI 生成，内容仅供参考，请仔细甄别")
+                            .font(.footnote.italic())
+                            .foregroundStyle(Color.nuwaLabelTertiary)
+                    }
+
                     HStack(spacing: 6) {
                         if !displayText.isEmpty {
                             Button {
@@ -555,8 +569,8 @@ struct ChatView: View {
                                 chatStore.showToast(L10n.t("copied", locale: settings.locale))
                             } label: {
                                 Image(systemName: "doc.on.doc")
-                                    .font(.system(size: 13))
-                                    .foregroundStyle(Color.nuwaLabelSecondary)
+                                    .font(.system(size: 16))
+                                    .foregroundStyle(Color.nuwaLabelTertiary)
                                     .frame(width: 30, height: 30)
                                     .contentShape(Rectangle())
                             }
@@ -570,20 +584,6 @@ struct ChatView: View {
                                     settings: settings
                                 )
                             }
-                        }
-
-                        if !refused {
-                            Button {
-                                speech.stopSpeaking()
-                                chatStore.regenerateReply(messageId: message.id, settings: settings)
-                            } label: {
-                                Image(systemName: "arrow.clockwise")
-                                    .font(.system(size: 13))
-                                    .foregroundStyle(Color.nuwaLabelSecondary)
-                                    .frame(width: 30, height: 30)
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonStyle(NuwaTactileButtonStyle())
                         }
 
                         if isLast && message.canContinueReply {
@@ -603,6 +603,22 @@ struct ChatView: View {
 
                         BranchSwitcherView(versionInfo: versionInfo) { targetId in
                             chatStore.selectVersion(messageId: targetId)
+                        }
+
+                        Spacer(minLength: 0)
+
+                        if !refused {
+                            Button {
+                                speech.stopSpeaking()
+                                chatStore.regenerateReply(messageId: message.id, settings: settings)
+                            } label: {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.system(size: 16))
+                                    .foregroundStyle(Color.nuwaLabelTertiary)
+                                    .frame(width: 30, height: 30)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(NuwaTactileButtonStyle())
                         }
                     }
                 }
@@ -707,7 +723,7 @@ private struct ChatDrawerLayout<Sidebar: View, Surface: View>: View {
             layers.gesture(
                 ChatDrawerPan(
                     enabled: !wide && gestureEnabled,
-                    canBegin: canBeginDrag,
+                    canBegin: { canBeginDrag(at: $0, moving: $1) },
                     onChange: updateDrag,
                     onEnd: finishDrag,
                     onCancel: cancelDrag
@@ -740,7 +756,7 @@ private struct ChatDrawerLayout<Sidebar: View, Surface: View>: View {
 
             surface
                 .frame(width: surfaceWidth, height: size.height)
-                .background(Color.nuwaBgBase.ignoresSafeArea(.container, edges: .vertical))
+                .background(Color.nuwaChatBackground.ignoresSafeArea(.container, edges: .vertical))
                 .geometryGroup()
                 .position(x: offset + surfaceWidth / 2, y: size.height / 2)
                 .animation(wide || dragOffset != nil ? nil : spring, value: compactOpen)
@@ -752,10 +768,11 @@ private struct ChatDrawerLayout<Sidebar: View, Surface: View>: View {
         }
     }
 
-    private func canBeginDrag(at start: CGPoint, moving direction: CGPoint) -> Bool {
+    private func canBeginDrag(at start: CGPoint, moving direction: CGPoint, edgeOnly: Bool = false) -> Bool {
         guard !wide, gestureEnabled, drawerWidth > 0,
               abs(direction.x) > abs(direction.y) * 1.35 else { return false }
-        return compactOpen ? direction.x < 0 : direction.x > 0 && (0..<32).contains(start.x)
+        if compactOpen { return direction.x < 0 }
+        return direction.x > 0 && (edgeOnly ? (0..<32).contains(start.x) : start.x >= 12)
     }
 
     private func updateDrag(_ translation: CGFloat) {
@@ -793,7 +810,7 @@ private struct ChatDrawerLayout<Sidebar: View, Surface: View>: View {
             .onChanged { value in
                 guard !legacyRejectedDrag else { return }
                 let direction = CGPoint(x: value.translation.width, y: value.translation.height)
-                if dragOffset == nil && !canBeginDrag(at: value.startLocation, moving: direction) {
+                if dragOffset == nil && !canBeginDrag(at: value.startLocation, moving: direction, edgeOnly: true) {
                     legacyRejectedDrag = true
                     return
                 }
@@ -860,6 +877,25 @@ private struct ChatDrawerPan: UIGestureRecognizerRepresentable {
             return canBegin(CGPoint(x: location.x - translation.x, y: location.y - translation.y), translation)
         }
 
+        func gestureRecognizer(_ gesture: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            var view = touch.view
+            while let current = view {
+                if current is UITextField || (current as? UITextView)?.isEditable == true {
+                    return false
+                }
+                if let scroll = current as? UIScrollView, scroll.isScrollEnabled {
+                    let horizontalInsets = scroll.adjustedContentInset.left + scroll.adjustedContentInset.right
+                    if scroll.alwaysBounceHorizontal ||
+                        scroll.contentSize.width + horizontalInsets > scroll.bounds.width + 1 {
+                        return false
+                    }
+                }
+                if current === gesture.view { break }
+                view = current.superview
+            }
+            return true
+        }
+
         func gestureRecognizer(
             _ gesture: UIGestureRecognizer,
             shouldRecognizeSimultaneouslyWith otherGesture: UIGestureRecognizer
@@ -917,7 +953,7 @@ private struct ChatTimeline<Rows: View>: View {
                     }
             }
             .scrollTargetLayout()
-            .padding(.horizontal, 16)
+            .padding(.horizontal, 24)
             .padding(.top, 12)
         }
         .nuwaNoScrollEdgeEffect()
@@ -1037,13 +1073,15 @@ private struct ChatHeaderView: View {
     var body: some View {
         HStack(spacing: 10) {
             Button(action: onOpenDrawer) {
-                Image(systemName: "sidebar.leading")
-                    .font(.system(size: 17, weight: .medium))
-                    .foregroundStyle(Color.nuwaLabelPrimary)
-                    .frame(width: 44, height: 44)
-                    .background(Color.nuwaControlFill, in: Circle())
-                    .overlay(Circle().strokeBorder(Color.nuwaControlBorder, lineWidth: 0.75))
-                    .contentShape(Rectangle())
+                VStack(alignment: .leading, spacing: 6) {
+                    Capsule().frame(width: 17, height: 1.6)
+                    Capsule().frame(width: 10, height: 1.6)
+                }
+                .foregroundStyle(Color.nuwaLabelPrimary)
+                .frame(width: 44, height: 44)
+                .background(Color.nuwaControlFill, in: Circle())
+                .overlay(Circle().strokeBorder(Color.nuwaControlBorder, lineWidth: 0.75))
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel(settings.locale == .enUS
@@ -1053,10 +1091,10 @@ private struct ChatHeaderView: View {
             if hasMessages {
                 let displayTitle = sessionTitle.isEmpty ? L10n.t("untitledChat", locale: settings.locale) : sessionTitle
                 Text(displayTitle)
-                    .font(.system(size: 14, weight: .medium))
+                    .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(Color.nuwaLabelPrimary)
                     .lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .center)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
                     .onTapGesture(count: 2, perform: onScrollToTop)
                     .accessibilityAction(named: Text(settings.locale == .enUS ? "Scroll to top" : "回到顶部"), onScrollToTop)
@@ -1079,7 +1117,7 @@ private struct ChatHeaderView: View {
                     Image(systemName: (speech.isSpeaking || !settings.ttsMuted) ? "speaker.wave.2" : "speaker.slash")
                         .font(.system(size: 16, weight: .medium))
                         .foregroundStyle(Color.nuwaLabelPrimary)
-                        .frame(width: 38, height: 34)
+                        .frame(width: 34, height: 34)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -1089,7 +1127,7 @@ private struct ChatHeaderView: View {
                     Image(systemName: "plus.bubble")
                         .font(.system(size: 16, weight: .medium))
                         .foregroundStyle(Color.nuwaLabelPrimary)
-                        .frame(width: 38, height: 34)
+                        .frame(width: 34, height: 34)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -1213,8 +1251,8 @@ private struct MessageReadAloudButton: View {
             speech.toggleSpeak(messageId: messageId, text: text, settings: settings)
         } label: {
             Image(systemName: active ? "speaker.slash.fill" : "speaker.wave.2")
-                .font(.system(size: 13))
-                .foregroundStyle(active ? Color.nuwaBrandText : Color.nuwaLabelSecondary)
+                .font(.system(size: 16))
+                .foregroundStyle(active ? Color.nuwaBrandText : Color.nuwaLabelTertiary)
                 .frame(width: 30, height: 30)
                 .contentShape(Rectangle())
         }

@@ -21,6 +21,10 @@ extension Color {
             : UIColor(red: 255 / 255, green: 255 / 255, blue: 255 / 255, alpha: 1)  // --dsw-static-neutral-bluish-00
     })
 
+    static let nuwaChatBackground = Color(UIColor { trait in
+        trait.userInterfaceStyle == .dark ? UIColor(white: 17 / 255, alpha: 1) : .white
+    })
+
     static let nuwaSidebarFill = Color(UIColor { trait in
         trait.userInterfaceStyle == .dark
             ? UIColor(red: 27 / 255, green: 27 / 255, blue: 28 / 255, alpha: 1)     // --dsw-static-neutral-bluish-900
