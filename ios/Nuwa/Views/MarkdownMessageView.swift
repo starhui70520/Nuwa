@@ -1,7 +1,7 @@
 import SwiftUI
 import UIKit
 
-// MARK: - Cached Rich Markdown Parser (Zero Regex Re-compilation, Zero Scroll Jank)
+// MARK: - Cached Rich Markdown Parser (Bulletproof Code Blocks, Inline Code Bubbles, Zero Scroll Jank)
 
 private enum MarkdownBlock: Identifiable {
     case heading(id: Int, level: Int, attributed: AttributedString)
@@ -38,6 +38,11 @@ private final class CachedInlineMarkdown: NSObject {
     init(_ value: AttributedString) { self.value = value }
 }
 
+private final class CachedCodeHighlight: NSObject {
+    let value: AttributedString
+    init(_ value: AttributedString) { self.value = value }
+}
+
 private enum MarkdownParseCache {
     static let citationRegex: NSRegularExpression? = try? NSRegularExpression(pattern: "\\[citation:(\\d+)\\]")
     static let inlineOptions = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
@@ -68,12 +73,43 @@ private enum MarkdownParseCache {
         return parsed
     }
 
-    private static func inlineAttributed(_ raw: String) -> AttributedString {
+    static func inlineAttributed(_ raw: String) -> AttributedString {
         let key = raw as NSString
         if let cached = inlineCache.object(forKey: key) { return cached.value }
-        let value = (try? AttributedString(markdown: raw, options: inlineOptions)) ?? AttributedString(raw)
-        inlineCache.setObject(CachedInlineMarkdown(value), forKey: key, cost: key.length * 4)
-        return value
+        let parsed = (try? AttributedString(markdown: raw, options: inlineOptions)) ?? AttributedString(raw)
+        let styled = styleInlineCodeRuns(parsed)
+        inlineCache.setObject(CachedInlineMarkdown(styled), forKey: key, cost: key.length * 4)
+        return styled
+    }
+
+    /// Styles inline `code` runs as distinct rounded-feeling highlight pills (matching theme.css inline-code bubble).
+    private static func styleInlineCodeRuns(_ source: AttributedString) -> AttributedString {
+        var hasCode = false
+        for run in source.runs {
+            if run.inlinePresentationIntent?.contains(.code) == true {
+                hasCode = true
+                break
+            }
+        }
+        guard hasCode else { return source }
+
+        var result = AttributedString()
+        for run in source.runs {
+            var segment = AttributedString(source[run.range])
+            if run.inlinePresentationIntent?.contains(.code) == true {
+                var pad = AttributedString("\u{2009}")
+                pad.inlinePresentationIntent = .code
+                pad.backgroundColor = Color.nuwaInlineCodeFill
+                segment.backgroundColor = Color.nuwaInlineCodeFill
+                segment.foregroundColor = Color.nuwaLabelPrimary
+                result.append(pad)
+                result.append(segment)
+                result.append(pad)
+            } else {
+                result.append(segment)
+            }
+        }
+        return result
     }
 
     private static func cleanCitationTags(_ input: String) -> String {
@@ -84,9 +120,55 @@ private enum MarkdownParseCache {
         return regex.stringByReplacingMatches(in: input, range: range, withTemplate: " [$1]")
     }
 
+    private struct FenceInfo {
+        let char: Character
+        let count: Int
+        let language: String
+        let singleLineCode: String?
+    }
+
+    /// Detects opening code fences: ```lang, ````lang, ~~~lang, as well as single-line ```lang code ```.
+    private static func parseOpeningFence(_ trimmed: String) -> FenceInfo? {
+        guard let first = trimmed.first, first == "`" || first == "~" else { return nil }
+        let fencePrefix = trimmed.prefix { $0 == first }
+        guard fencePrefix.count >= 3 else { return nil }
+        let rest = String(trimmed.dropFirst(fencePrefix.count))
+        let closingFence = String(repeating: first, count: fencePrefix.count)
+
+        // Single-line fenced block e.g. ```swift print("hi") ```
+        if rest.hasSuffix(closingFence), rest.count > closingFence.count {
+            let inner = String(rest.dropLast(closingFence.count)).trimmingCharacters(in: .whitespaces)
+            if !inner.isEmpty {
+                let parts = inner.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+                if parts.count == 2 && parts[0].allSatisfy({ $0.isLetter || $0.isNumber || $0 == "+" || $0 == "#" || $0 == "-" || $0 == "_" }) {
+                    return FenceInfo(char: first, count: fencePrefix.count, language: String(parts[0]), singleLineCode: String(parts[1]))
+                }
+                return FenceInfo(char: first, count: fencePrefix.count, language: "", singleLineCode: inner)
+            }
+        }
+
+        // Standard multi-line opening fence: info string cannot contain backticks for backtick fences
+        if first == "`" && rest.contains("`") {
+            return nil
+        }
+        let info = rest.trimmingCharacters(in: .whitespaces)
+        let lang = info.split(maxSplits: 1, whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? ""
+        return FenceInfo(char: first, count: fencePrefix.count, language: lang, singleLineCode: nil)
+    }
+
+    private static func isClosingFence(_ trimmed: String, char: Character, minCount: Int) -> Bool {
+        guard trimmed.first == char else { return false }
+        let run = trimmed.prefix { $0 == char }
+        guard run.count >= minCount else { return false }
+        return trimmed.dropFirst(run.count).trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
     private static func parseBlocks(_ input: String) -> [MarkdownBlock] {
         var result: [MarkdownBlock] = []
-        let lines = input.components(separatedBy: "\n")
+        let normalized = input
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let lines = normalized.components(separatedBy: "\n")
         var idx = 0
         var nextId = 0
         var paraBuf: [String] = []
@@ -100,28 +182,65 @@ private enum MarkdownParseCache {
             paraBuf.removeAll(keepingCapacity: true)
         }
 
+        func consumeCodeBlock(fence: FenceInfo, startLine: Int) -> Int {
+            if let single = fence.singleLineCode {
+                result.append(.code(id: nextId, language: fence.language, code: single))
+                nextId += 1
+                return startLine + 1
+            }
+            let closingToken = String(repeating: fence.char, count: fence.count)
+            var codeLines: [String] = []
+            var cursor = startLine + 1
+            while cursor < lines.count {
+                let rawLine = lines[cursor]
+                let candidate = rawLine.trimmingCharacters(in: .whitespaces)
+                if isClosingFence(candidate, char: fence.char, minCount: fence.count) {
+                    cursor += 1
+                    break
+                }
+                if candidate.hasSuffix(closingToken), candidate.count > closingToken.count {
+                    let trimmedRight = rawLine.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression)
+                    if trimmedRight.hasSuffix(closingToken) {
+                        codeLines.append(String(trimmedRight.dropLast(closingToken.count)))
+                        cursor += 1
+                        break
+                    }
+                }
+                codeLines.append(rawLine)
+                cursor += 1
+            }
+            result.append(.code(id: nextId, language: fence.language, code: codeLines.joined(separator: "\n")))
+            nextId += 1
+            return cursor
+        }
+
         while idx < lines.count {
             let line = lines[idx]
             let trimmed = line.trimmingCharacters(in: .whitespaces)
 
-            if trimmed.hasPrefix("```") {
+            // 1. Standard fenced code block (``` or ~~~, 3+ chars, including single-line fences)
+            if let fence = parseOpeningFence(trimmed) {
                 flushParagraph()
-                let lang = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
-                var codeLines: [String] = []
-                idx += 1
-                while idx < lines.count {
-                    if lines[idx].trimmingCharacters(in: .whitespaces).hasPrefix("```") {
-                        idx += 1
-                        break
-                    }
-                    codeLines.append(lines[idx])
-                    idx += 1
-                }
-                result.append(.code(id: nextId, language: lang, code: codeLines.joined(separator: "\n")))
-                nextId += 1
+                idx = consumeCodeBlock(fence: fence, startLine: idx)
                 continue
             }
 
+            // 2. Mid-line opening fence without preceding newline (e.g. "示例代码：```python")
+            if let fenceRange = trimmed.range(of: "```"),
+               fenceRange.lowerBound > trimmed.startIndex {
+                let before = String(trimmed[..<fenceRange.lowerBound]).trimmingCharacters(in: .whitespaces)
+                let after = String(trimmed[fenceRange.lowerBound...])
+                if let fence = parseOpeningFence(after) {
+                    if !before.isEmpty && before != "-" && before != "*" && before != "•" && before != ">" {
+                        paraBuf.append(before)
+                    }
+                    flushParagraph()
+                    idx = consumeCodeBlock(fence: fence, startLine: idx)
+                    continue
+                }
+            }
+
+            // 3. Display math block $$...$$ or \[...\]
             if trimmed == "$$" || trimmed == "\\[" {
                 flushParagraph()
                 let closer = trimmed == "$$" ? "$$" : "\\]"
@@ -148,6 +267,7 @@ private enum MarkdownParseCache {
                 continue
             }
 
+            // 4. Markdown table
             if trimmed.contains("|") && idx + 1 < lines.count && isTableSeparator(lines[idx + 1]) {
                 flushParagraph()
                 let headers = splitTableRow(trimmed)
@@ -258,6 +378,62 @@ private enum MarkdownParseCache {
     }
 }
 
+// MARK: - Lightweight Cached Syntax Highlighter for Code Bubbles
+
+private enum CodeSyntaxHighlighter {
+    private static let cache: NSCache<NSString, CachedCodeHighlight> = {
+        let c = NSCache<NSString, CachedCodeHighlight>()
+        c.countLimit = 128
+        return c
+    }()
+
+    private static let tokenRegex: NSRegularExpression? = try? NSRegularExpression(
+        pattern: "(//[^\\n]*|#[^\\n]*|/\\*[\\s\\S]*?\\*/)|(\"(?:\\\\.|[^\"\\\\\\n])*\"|'(?:\\\\.|[^'\\\\\\n])*'|`(?:\\\\.|[^`\\\\])*`)|\\b(func|var|let|const|class|struct|enum|protocol|extension|import|return|if|else|for|while|switch|case|default|break|continue|guard|defer|async|await|try|catch|throw|throws|public|private|internal|fileprivate|final|static|override|init|self|super|true|false|nil|null|None|True|False|def|from|as|with|yield|lambda|in|not|and|or|function|export|interface|type|new|this|typeof|void|int|float|double|bool|string|char|auto|package|go|chan|select|match|fn|pub|mut|impl|use|mod|SELECT|FROM|WHERE|JOIN|INSERT|UPDATE|DELETE|CREATE|TABLE)\\b|\\b(\\d+(?:\\.\\d+)?)\\b",
+        options: []
+    )
+
+    static func highlight(_ code: String, language: String, dark: Bool) -> AttributedString {
+        guard code.count <= 16_000, let regex = tokenRegex else {
+            return AttributedString(code)
+        }
+        let cacheKey = "\(dark ? "D" : "L"):\(language):\(code)" as NSString
+        if let hit = cache.object(forKey: cacheKey) {
+            return hit.value
+        }
+
+        let nsCode = code as NSString
+        var attr = AttributedString(code)
+        let commentColor = dark ? Color(red: 128/255, green: 140/255, blue: 154/255) : Color(red: 106/255, green: 115/255, blue: 125/255)
+        let stringColor = dark ? Color(red: 152/255, green: 195/255, blue: 121/255) : Color(red: 10/255, green: 122/255, blue: 58/255)
+        let keywordColor = dark ? Color(red: 198/255, green: 120/255, blue: 221/255) : Color(red: 147/255, green: 51/255, blue: 234/255)
+        let numberColor = dark ? Color(red: 209/255, green: 154/255, blue: 102/255) : Color(red: 194/255, green: 65/255, blue: 12/255)
+
+        let fullRange = NSRange(location: 0, length: nsCode.length)
+        let matches = regex.matches(in: code, range: fullRange)
+        for match in matches {
+            let color: Color
+            if match.range(at: 1).location != NSNotFound {
+                color = commentColor
+            } else if match.range(at: 2).location != NSNotFound {
+                color = stringColor
+            } else if match.range(at: 3).location != NSNotFound {
+                color = keywordColor
+            } else if match.range(at: 4).location != NSNotFound {
+                color = numberColor
+            } else {
+                continue
+            }
+            if let swiftRange = Range(match.range, in: code),
+               let lower = AttributedString.Index(swiftRange.lowerBound, within: attr),
+               let upper = AttributedString.Index(swiftRange.upperBound, within: attr) {
+                attr[lower..<upper].foregroundColor = color
+            }
+        }
+        cache.setObject(CachedCodeHighlight(attr), forKey: cacheKey)
+        return attr
+    }
+}
+
 struct MarkdownMessageView: View, Equatable {
     let text: String
     let citations: [TextCitation]
@@ -310,7 +486,7 @@ struct MarkdownMessageView: View, Equatable {
                         Text(attributed)
                             .font(.system(size: fontSize))
                             .foregroundStyle(Color.nuwaLabelPrimary)
-                        .lineSpacing(6)
+                            .lineSpacing(6)
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -330,7 +506,7 @@ struct MarkdownMessageView: View, Equatable {
                     .padding(.vertical, 4)
 
                 case .code(_, let language, let code):
-                    CodeBlockView(language: language, code: code, onCopy: onCopyCode)
+                    CodeBlockView(language: language, code: code, isStreaming: isStreaming, onCopy: onCopyCode)
 
                 case .math(_, let formula):
                     ScrollView(.horizontal, showsIndicators: false) {
@@ -342,7 +518,11 @@ struct MarkdownMessageView: View, Equatable {
                             .padding(.vertical, 10)
                     }
                     .frame(maxWidth: .infinity, alignment: .center)
-                    .background(Color(.secondarySystemBackground).opacity(0.75), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .background(Color.nuwaCodeBlockFill, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(Color.nuwaControlBorder, lineWidth: 0.75)
+                    )
 
                 case .table(_, let headers, let rows):
                     MarkdownTableView(headers: headers, rows: rows, fontSize: max(13, fontSize - 1))
@@ -384,6 +564,7 @@ struct MarkdownMessageView: View, Equatable {
                 .padding(.top, 2)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -397,7 +578,7 @@ private struct MarkdownTableView: View {
             Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
                 GridRow {
                     ForEach(Array(headers.enumerated()), id: \.offset) { _, h in
-                        Text(h)
+                        Text(MarkdownParseCache.inlineAttributed(h))
                             .font(.system(size: fontSize, weight: .semibold))
                             .foregroundStyle(Color.nuwaLabelPrimary)
                             .padding(.horizontal, 10)
@@ -412,7 +593,7 @@ private struct MarkdownTableView: View {
                     GridRow {
                         ForEach(0..<max(headers.count, row.count), id: \.self) { cIdx in
                             let val = cIdx < row.count ? row[cIdx] : ""
-                            Text(val)
+                            Text(MarkdownParseCache.inlineAttributed(val))
                                 .font(.system(size: fontSize))
                                 .foregroundStyle(Color.nuwaLabelPrimary)
                                 .padding(.horizontal, 10)
@@ -435,15 +616,21 @@ private struct MarkdownTableView: View {
 private struct CodeBlockView: View {
     let language: String
     let code: String
+    let isStreaming: Bool
     let onCopy: (String) -> Void
 
+    @Environment(\.colorScheme) private var colorScheme
     @State private var copied = false
 
     var body: some View {
+        let highlighted = isStreaming
+            ? AttributedString(code)
+            : CodeSyntaxHighlighter.highlight(code, language: language, dark: colorScheme == .dark)
+
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text(language.isEmpty ? "code" : language.lowercased())
-                    .font(.caption.monospaced().weight(.medium))
+                    .font(.system(size: 12, weight: .medium, design: .monospaced))
                     .foregroundStyle(Color.nuwaLabelSecondary)
                 Spacer()
                 Button {
@@ -454,30 +641,47 @@ private struct CodeBlockView: View {
                         copied = false
                     }
                 } label: {
-                    Label(copied ? "已复制" : "复制", systemImage: copied ? "checkmark" : "doc.on.doc")
-                        .font(.caption)
-                        .foregroundStyle(copied ? .green : Color.nuwaLabelSecondary)
+                    HStack(spacing: 4) {
+                        Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                            .font(.system(size: 11, weight: .medium))
+                        Text(copied ? "已复制" : "复制")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .foregroundStyle(copied ? .green : Color.nuwaLabelSecondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(NuwaTactileButtonStyle())
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .background(Color.primary.opacity(0.05))
+            .frame(maxWidth: .infinity)
+            .background(Color.nuwaCodeBannerFill)
+
+            Divider()
+                .opacity(0.5)
 
             ScrollView(.horizontal, showsIndicators: false) {
-                Text(code)
+                Text(highlighted)
                     .font(.system(size: 13, design: .monospaced))
                     .foregroundStyle(Color.nuwaLabelPrimary)
+                    .lineSpacing(3.5)
                     .textSelection(.enabled)
+                    .fixedSize(horizontal: true, vertical: true)
                     .padding(12)
+                    .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(Color(.secondarySystemBackground).opacity(0.85))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.nuwaCodeBlockFill)
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.75)
+                .strokeBorder(Color.nuwaControlBorder, lineWidth: 0.9)
         )
+        .padding(.vertical, 2)
     }
 }
 

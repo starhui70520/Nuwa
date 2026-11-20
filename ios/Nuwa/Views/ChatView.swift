@@ -29,6 +29,11 @@ struct ChatView: View {
 
     @State private var scrollToTopToken = 0
     @State private var isAtBottom = true
+    @State private var disclosureOverrides: [UUID: Bool] = [:]
+    @State private var disclosureAnchorID: UUID?
+    @State private var disclosureAnchorToken = 0
+    @State private var headerHeight: CGFloat = 58
+    @State private var composerHeight: CGFloat = 114
 
     private let topUpURL = URL(string: "https://platform.deepseek.com/top_up")!
 
@@ -127,6 +132,8 @@ struct ChatView: View {
             speech.stopSpeaking()
             editingMessageId = nil
             isAtBottom = true
+            disclosureOverrides.removeAll()
+            disclosureAnchorID = nil
         }
         .sheet(isPresented: $showSettings) {
             SettingsView(settings: settings, chatStore: chatStore)
@@ -209,68 +216,37 @@ struct ChatView: View {
         let session = chatStore.activeSession
         let timeline = chatStore.activeTimeline
         let hasMessages = timeline?.messages.isEmpty == false
-        return VStack(spacing: 0) {
-            if chatStore.importingHistory {
-                HStack(spacing: 8) {
+        let allowComposerPress = !drawerModal && !settings.showMigrationPrompt && previewImage == nil && !showSettings
+
+        return ZStack {
+            Group {
+                if chatStore.historyLoadFailed {
+                    ContentUnavailableView(
+                        settings.locale == .enUS ? "Couldn’t load conversations" : "无法读取对话记录",
+                        systemImage: "exclamationmark.triangle",
+                        description: Text(settings.locale == .enUS
+                            ? "Your data hasn’t been changed. Reopen Nuwa to try again."
+                            : "数据未被修改，请重新打开 Nuwa 后重试。")
+                    )
+                    .padding(.top, headerHeight)
+                    .padding(.bottom, composerHeight)
+                } else if !chatStore.historyLoaded {
                     ProgressView()
-                        .tint(.white)
-                        .controlSize(.small)
-                    Text("正在导入并合并历史对话，请稍候...")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let session, let timeline, hasMessages {
+                    messageList(timeline)
+                        .id(session.id)
+                } else {
+                    welcomeView
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 8)
-                .background(Color.nuwaBrand)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .allowsHitTesting(!drawerModal)
+            .accessibilityHidden(drawerModal)
 
-            ChatHeaderView(
-                speech: speech,
-                settings: settings,
-                hasMessages: hasMessages,
-                sessionTitle: session?.title ?? "",
-                sidebarShown: sidebarShown,
-                drawerModal: drawerModal,
-                onOpenDrawer: onToggleSidebar,
-                onScrollToTop: { scrollToTopToken += 1 },
-                onCreateNewSession: { chatStore.createNewSession() },
-                onToast: { chatStore.showToast($0) }
-            )
-
+            // Floating bottom composer with smooth progressive edge blur
             VStack(spacing: 0) {
-                ZStack(alignment: .top) {
-                    if chatStore.historyLoadFailed {
-                        ContentUnavailableView(
-                            settings.locale == .enUS ? "Couldn’t load conversations" : "无法读取对话记录",
-                            systemImage: "exclamationmark.triangle",
-                            description: Text(settings.locale == .enUS
-                                ? "Your data hasn’t been changed. Reopen Nuwa to try again."
-                                : "数据未被修改，请重新打开 Nuwa 后重试。")
-                        )
-                    } else if !chatStore.historyLoaded {
-                        ProgressView()
-                            .frame(maxHeight: .infinity)
-                    } else if let session, let timeline, hasMessages {
-                        messageList(timeline)
-                            .id(session.id)
-                    } else {
-                        welcomeView
-                    }
-
-                    if let toast = chatStore.toastMessage {
-                        Text(toast)
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(Color.nuwaLabelPrimary)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 9)
-                            .nuwaGlass(in: Capsule())
-                            .padding(.top, 8)
-                            .transition(.move(edge: .top).combined(with: .opacity))
-                            .zIndex(10)
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-
+                Spacer(minLength: 0)
                 ChatComposerContainer(
                     draftStore: draftStore,
                     settings: settings,
@@ -278,6 +254,7 @@ struct ChatView: View {
                     sessionId: chatStore.activeSessionId,
                     isGenerating: chatStore.isGenerating,
                     isImporting: chatStore.importingHistory || !chatStore.historyLoaded,
+                    allowPressEffect: allowComposerPress,
                     onSend: sendMessage,
                     onStop: {
                         speech.stopSpeaking()
@@ -288,18 +265,99 @@ struct ChatView: View {
                 )
                 .frame(maxWidth: 680)
                 .frame(maxWidth: .infinity)
+                .background(heightReader { height in
+                    if height > 0, abs(composerHeight - height) > 0.5 {
+                        composerHeight = height
+                    }
+                })
+                .background {
+                    if hasMessages {
+                        ProgressiveEdgeBlur(edge: .bottom, baseColor: .nuwaChatBackground)
+                            .padding(.top, -32)
+                            .ignoresSafeArea(.container, edges: .bottom)
+                    }
+                }
             }
             .allowsHitTesting(!drawerModal)
             .accessibilityHidden(drawerModal)
-            .overlay {
-                if drawerModal {
-                    Color.clear
-                        .contentShape(Rectangle())
-                        .ignoresSafeArea(.container, edges: .bottom)
-                        .onTapGesture(perform: onToggleSidebar)
-                        .accessibilityHidden(true)
-                }
+
+            if drawerModal {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .padding(.top, headerHeight)
+                    .ignoresSafeArea(.container, edges: .bottom)
+                    .onTapGesture(perform: onToggleSidebar)
+                    .accessibilityHidden(true)
             }
+
+            // Floating top header + import banner + toast with smooth progressive edge blur
+            VStack(spacing: 0) {
+                VStack(spacing: 0) {
+                    if chatStore.importingHistory {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .tint(.white)
+                                .controlSize(.small)
+                            Text("正在导入并合并历史对话，请稍候...")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(.white)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .background(Color.nuwaBrand)
+                    }
+
+                    ChatHeaderView(
+                        speech: speech,
+                        settings: settings,
+                        hasMessages: hasMessages,
+                        sessionTitle: session?.title ?? "",
+                        sidebarShown: sidebarShown,
+                        drawerModal: drawerModal,
+                        onOpenDrawer: onToggleSidebar,
+                        onScrollToTop: { scrollToTopToken += 1 },
+                        onCreateNewSession: { chatStore.createNewSession() },
+                        onToast: { chatStore.showToast($0) }
+                    )
+                }
+                .background(heightReader { height in
+                    if height > 0, abs(headerHeight - height) > 0.5 {
+                        headerHeight = height
+                    }
+                })
+                .background {
+                    if hasMessages {
+                        ProgressiveEdgeBlur(edge: .top, baseColor: .nuwaChatBackground)
+                            .padding(.bottom, -28)
+                            .ignoresSafeArea(.container, edges: .top)
+                    }
+                }
+
+                if let toast = chatStore.toastMessage {
+                    Text(toast)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Color.nuwaLabelPrimary)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 9)
+                        .nuwaGlass(in: Capsule())
+                        .padding(.top, 8)
+                        .allowsHitTesting(false)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                        .zIndex(10)
+                }
+
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    private func heightReader(_ onChange: @escaping (CGFloat) -> Void) -> some View {
+        GeometryReader { proxy in
+            Color.clear
+                .onAppear { onChange(proxy.size.height) }
+                .onChange(of: proxy.size.height) { _, newHeight in
+                    onChange(newHeight)
+                }
         }
     }
 
@@ -320,6 +378,8 @@ struct ChatView: View {
             Spacer()
         }
         .padding(.horizontal, 24)
+        .padding(.top, headerHeight)
+        .padding(.bottom, composerHeight)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
         .onTapGesture {
@@ -340,9 +400,14 @@ struct ChatView: View {
                 locale: settings.locale,
                 isGenerating: chatStore.isGenerating,
                 editingMessageID: editingMessageId,
-                editDraft: editDraftText
+                editDraft: editDraftText,
+                disclosureOverrides: disclosureOverrides
             ),
+            topInset: headerHeight,
+            bottomInset: composerHeight,
             topCommand: scrollToTopToken,
+            disclosureAnchorID: disclosureAnchorID,
+            disclosureAnchorToken: disclosureAnchorToken,
             animateBoundaryJumps: messages.count <= 240,
             latestLabel: settings.locale == .enUS ? "Scroll to latest" : "跳到最新消息"
         ) { message in
@@ -477,7 +542,19 @@ struct ChatView: View {
             VStack(alignment: .leading, spacing: 10) {
                 if reply.hasDisclosure || !reply.steps.isEmpty {
                     ReplyProcessView(
-                        reply: reply, fontSize: settings.chatFontSize, locale: settings.locale,
+                        reply: reply,
+                        fontSize: settings.chatFontSize,
+                        locale: settings.locale,
+                        expandedOverride: disclosureOverrides[message.id],
+                        onToggleExpanded: { next in
+                            var transaction = Transaction(animation: nil)
+                            transaction.disablesAnimations = true
+                            withTransaction(transaction) {
+                                disclosureAnchorID = message.id
+                                disclosureAnchorToken += 1
+                                disclosureOverrides[message.id] = next
+                            }
+                        },
                         showResults: { searchPanelResults = $0 },
                         onCopyCode: { _ in chatStore.showToast(L10n.t("copied", locale: settings.locale)) }
                     )
@@ -997,6 +1074,7 @@ private struct ChatComposerContainer: View {
     let sessionId: UUID?
     let isGenerating: Bool
     let isImporting: Bool
+    let allowPressEffect: Bool
     let onSend: () -> Void
     let onStop: () -> Void
     let onPickFiles: () -> Void
@@ -1026,6 +1104,7 @@ private struct ChatComposerContainer: View {
             recordingSeconds: speech.recordingSeconds,
             audioLevel: speech.audioLevel,
             hapticFeedbackEnabled: UIDevice.current.userInterfaceIdiom == .phone && settings.hapticFeedbackEnabled,
+            allowPressEffect: allowPressEffect,
             onSend: onSend,
             onStop: onStop,
             onToggleVoice: {

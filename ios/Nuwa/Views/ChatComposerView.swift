@@ -1,6 +1,7 @@
 import PhotosUI
 import SwiftUI
 import UIKit
+import UIKit.UIGestureRecognizerSubclass
 
 struct ChatComposerView: View {
     @Binding var text: String
@@ -15,6 +16,7 @@ struct ChatComposerView: View {
     let recordingSeconds: Int
     let audioLevel: Float
     let hapticFeedbackEnabled: Bool
+    let allowPressEffect: Bool
     let onSend: () -> Void
     let onStop: () -> Void
     let onToggleVoice: () -> Void
@@ -25,7 +27,7 @@ struct ChatComposerView: View {
     let onRemoveAttachment: (String) -> Void
 
     @FocusState private var isFocused: Bool
-    @GestureState private var pressing = false
+    @State private var pressing = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
@@ -112,6 +114,22 @@ struct ChatComposerView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 12)
+            .background {
+                ComposerTouchProbeOverlay(
+                    isEnabled: allowPressEffect && !isFocused && !isRecording,
+                    hasAttachments: !attachments.isEmpty,
+                    onPressChange: { active in
+                        if pressing != active {
+                            pressing = active
+                        }
+                    },
+                    onTapFocus: {
+                        if !isFocused {
+                            isFocused = true
+                        }
+                    }
+                )
+            }
             .nuwaGlassCard(cornerRadius: 28, tint: colorScheme == .dark ? .white.opacity(0.08) : nil)
             .animation(pressing ? .easeOut(duration: 0.075) : .spring(duration: 0.38, bounce: 0.36)) { card in
                 card
@@ -119,16 +137,15 @@ struct ChatComposerView: View {
                     .scaleEffect(pressing && !reduceMotion ? 0.97 : 1)
             }
             .contentShape(RoundedRectangle(cornerRadius: 28))
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 0, coordinateSpace: .global)
-                    .updating($pressing) { value, state, _ in
-                        state = hypot(value.translation.width, value.translation.height) < 16
-                    }
-            )
         }
         .padding(.horizontal, 22)
         .padding(.top, 6)
         .padding(.bottom, 10)
+        .onChange(of: isRecording) { _, recording in
+            if recording && pressing {
+                pressing = false
+            }
+        }
         .photosPicker(
             isPresented: $showPhotoPicker,
             selection: $selectedPhotoItems,
@@ -357,5 +374,233 @@ private struct VoiceSpectrumBar: View {
                 .foregroundStyle(Color.nuwaLabelSecondary)
         }
         .padding(.horizontal, 4)
+    }
+}
+
+/// Observes touches on the unfocused composer text zone via a non-interfering window gesture recognizer
+/// so tapping directly on the UITextView triggers an instant tactile press-down bounce on unfocused -> focused,
+/// while long-pressing or selecting text in a focused composer NEVER triggers the press shrink.
+private struct ComposerTouchProbeOverlay: UIViewRepresentable {
+    let isEnabled: Bool
+    let hasAttachments: Bool
+    let onPressChange: (Bool) -> Void
+    let onTapFocus: () -> Void
+
+    func makeUIView(context: Context) -> ComposerTouchProbeView {
+        let view = ComposerTouchProbeView()
+        view.backgroundColor = .clear
+        view.isUserInteractionEnabled = false
+        view.update(
+            isEnabled: isEnabled,
+            hasAttachments: hasAttachments,
+            onPressChange: onPressChange,
+            onTapFocus: onTapFocus
+        )
+        return view
+    }
+
+    func updateUIView(_ uiView: ComposerTouchProbeView, context: Context) {
+        uiView.update(
+            isEnabled: isEnabled,
+            hasAttachments: hasAttachments,
+            onPressChange: onPressChange,
+            onTapFocus: onTapFocus
+        )
+    }
+
+    static func dismantleUIView(_ uiView: ComposerTouchProbeView, coordinator: ()) {
+        uiView.detachRecognizer()
+    }
+}
+
+private final class ComposerTouchProbeView: UIView {
+    private let recognizer = ComposerPressRecognizer()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        recognizer.targetView = self
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func update(
+        isEnabled: Bool,
+        hasAttachments: Bool,
+        onPressChange: @escaping (Bool) -> Void,
+        onTapFocus: @escaping () -> Void
+    ) {
+        recognizer.targetView = self
+        recognizer.isProbeEnabled = isEnabled
+        recognizer.hasAttachments = hasAttachments
+        recognizer.onPressChange = onPressChange
+        recognizer.onTapFocus = onTapFocus
+    }
+
+    func detachRecognizer() {
+        recognizer.cancelPendingRelease()
+        recognizer.view?.removeGestureRecognizer(recognizer)
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        recognizer.view?.removeGestureRecognizer(recognizer)
+        if let window {
+            window.addGestureRecognizer(recognizer)
+        }
+    }
+}
+
+private final class ComposerPressRecognizer: UIGestureRecognizer, UIGestureRecognizerDelegate {
+    weak var targetView: UIView?
+    var isProbeEnabled = true
+    var hasAttachments = false
+    var onPressChange: ((Bool) -> Void)?
+    var onTapFocus: (() -> Void)?
+
+    private var startWindowPoint: CGPoint = .zero
+    private var pressStartTime: CFTimeInterval = 0
+    private var isPressing = false
+    private var releaseWorkItem: DispatchWorkItem?
+
+    init() {
+        super.init(target: nil, action: nil)
+        cancelsTouchesInView = false
+        delaysTouchesBegan = false
+        delaysTouchesEnded = false
+        delegate = self
+    }
+
+    func cancelPendingRelease() {
+        releaseWorkItem?.cancel()
+        releaseWorkItem = nil
+    }
+
+    override func canPrevent(_ preventedGestureRecognizer: UIGestureRecognizer) -> Bool {
+        false
+    }
+
+    override func canBePrevented(by preventingGestureRecognizer: UIGestureRecognizer) -> Bool {
+        false
+    }
+
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
+        true
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard isProbeEnabled,
+              let targetView,
+              targetView.window != nil,
+              !targetView.isHidden,
+              targetView.alpha > 0.01,
+              touches.count == 1,
+              let touch = touches.first
+        else {
+            state = .failed
+            return
+        }
+
+        let localPoint = touch.location(in: targetView)
+        guard targetView.bounds.contains(localPoint) else {
+            state = .failed
+            return
+        }
+
+        // Exclude bottom action bar (thinking/search/attach/voice/send buttons have their own tactile feedback)
+        if localPoint.y >= targetView.bounds.height - 54 {
+            state = .failed
+            return
+        }
+
+        // Exclude top draft attachment strip when attachments are visible
+        if hasAttachments && localPoint.y < 72 {
+            state = .failed
+            return
+        }
+
+        // Exclude any UIControl or non-text UIScrollView
+        var current = touch.view
+        while let v = current {
+            if v is UIControl {
+                state = .failed
+                return
+            }
+            if v is UIScrollView && !(v is UITextView) {
+                state = .failed
+                return
+            }
+            if v === targetView.window { break }
+            current = v.superview
+        }
+
+        cancelPendingRelease()
+        startWindowPoint = touch.location(in: nil)
+        pressStartTime = CACurrentMediaTime()
+        isPressing = true
+        state = .began
+        onPressChange?(true)
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard isPressing, let touch = touches.first else { return }
+        let current = touch.location(in: nil)
+        if hypot(current.x - startWindowPoint.x, current.y - startWindowPoint.y) > 16 {
+            endPress(immediately: true, focus: false)
+            state = .cancelled
+        }
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard isPressing else {
+            state = .failed
+            return
+        }
+        endPress(immediately: false, focus: true)
+        state = .ended
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard isPressing else {
+            state = .failed
+            return
+        }
+        endPress(immediately: false, focus: false)
+        state = .cancelled
+    }
+
+    override func reset() {
+        super.reset()
+        isPressing = false
+    }
+
+    private func endPress(immediately: Bool, focus: Bool) {
+        isPressing = false
+        cancelPendingRelease()
+
+        if focus {
+            onTapFocus?()
+        }
+
+        if immediately {
+            onPressChange?(false)
+            return
+        }
+
+        let elapsed = CACurrentMediaTime() - pressStartTime
+        let remaining = max(0, 0.068 - elapsed)
+        if remaining <= 0.004 {
+            onPressChange?(false)
+        } else {
+            let item = DispatchWorkItem { [weak self] in
+                self?.onPressChange?(false)
+            }
+            releaseWorkItem = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + remaining, execute: item)
+        }
     }
 }

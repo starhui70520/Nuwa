@@ -4,21 +4,20 @@ struct ReplyProcessView: View {
     let reply: ReplyPresentation
     let fontSize: Double
     let locale: AppLocale
+    let expandedOverride: Bool?
+    let onToggleExpanded: (Bool) -> Void
     let showResults: ([WebSearchResultItem]) -> Void
     let onCopyCode: (String) -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var manuallyExpanded: Bool?
 
-    private var expanded: Bool { manuallyExpanded ?? reply.processing }
+    private var expanded: Bool { expandedOverride ?? reply.processing }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             if reply.hasDisclosure {
                 Button {
-                    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.16)) {
-                        manuallyExpanded = !expanded
-                    }
+                    onToggleExpanded(!expanded)
                 } label: {
                     HStack(spacing: 6) {
                         Image(systemName: "atom")
@@ -27,6 +26,7 @@ struct ReplyProcessView: View {
                         Image(systemName: "chevron.right")
                             .font(.system(size: 11, weight: .semibold))
                             .rotationEffect(.degrees(expanded ? 90 : 0))
+                            .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: expanded)
                     }
                     .font(.system(size: fontSize))
                     .frame(minHeight: 34)
@@ -48,7 +48,6 @@ struct ReplyProcessView: View {
                 }
             }
         }
-        .onChange(of: reply.processing) { _, _ in manuallyExpanded = nil }
     }
 
     private var title: String {

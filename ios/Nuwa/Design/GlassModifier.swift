@@ -90,6 +90,24 @@ extension Color {
             ? UIColor(white: 1.0, alpha: 0.12)
             : UIColor(red: 15 / 255, green: 23 / 255, blue: 42 / 255, alpha: 0.09)
     })
+
+    static let nuwaCodeBlockFill = Color(UIColor { trait in
+        trait.userInterfaceStyle == .dark
+            ? UIColor(red: 28 / 255, green: 29 / 255, blue: 34 / 255, alpha: 1)
+            : UIColor(red: 245 / 255, green: 247 / 255, blue: 250 / 255, alpha: 1)
+    })
+
+    static let nuwaCodeBannerFill = Color(UIColor { trait in
+        trait.userInterfaceStyle == .dark
+            ? UIColor(red: 37 / 255, green: 39 / 255, blue: 46 / 255, alpha: 1)
+            : UIColor(red: 235 / 255, green: 240 / 255, blue: 247 / 255, alpha: 1)
+    })
+
+    static let nuwaInlineCodeFill = Color(UIColor { trait in
+        trait.userInterfaceStyle == .dark
+            ? UIColor(red: 43 / 255, green: 45 / 255, blue: 53 / 255, alpha: 1)
+            : UIColor(red: 234 / 255, green: 239 / 255, blue: 246 / 255, alpha: 1)
+    })
 }
 
 /// Crisp, zero-latency tactile press button style that never conflicts with Liquid Glass or ScrollViews.
@@ -265,4 +283,64 @@ struct NuwaGlassGroup<Content: View>: View {
         content()
         #endif
     }
+}
+
+/// Smooth progressive blur + soft background fade for chat top & bottom edges
+/// so scrolling messages dissolve seamlessly behind the floating header and composer.
+struct ProgressiveEdgeBlur: View {
+    enum EdgePosition {
+        case top
+        case bottom
+    }
+
+    let edge: EdgePosition
+    let baseColor: Color
+
+    var body: some View {
+        ZStack {
+            VisualEffectBlurView(style: .systemUltraThinMaterial)
+                .mask {
+                    LinearGradient(
+                        stops: blurMaskStops,
+                        startPoint: edge == .top ? .top : .bottom,
+                        endPoint: edge == .top ? .bottom : .top
+                    )
+                }
+
+            LinearGradient(
+                stops: tintFadeStops,
+                startPoint: edge == .top ? .top : .bottom,
+                endPoint: edge == .top ? .bottom : .top
+            )
+        }
+        .allowsHitTesting(false)
+    }
+
+    private var blurMaskStops: [Gradient.Stop] {
+        [
+            .init(color: .black, location: 0.0),
+            .init(color: .black.opacity(0.95), location: 0.56),
+            .init(color: .black.opacity(0.48), location: 0.80),
+            .init(color: .clear, location: 1.0),
+        ]
+    }
+
+    private var tintFadeStops: [Gradient.Stop] {
+        [
+            .init(color: baseColor.opacity(0.84), location: 0.0),
+            .init(color: baseColor.opacity(0.56), location: 0.52),
+            .init(color: baseColor.opacity(0.18), location: 0.80),
+            .init(color: baseColor.opacity(0.0), location: 1.0),
+        ]
+    }
+}
+
+private struct VisualEffectBlurView: UIViewRepresentable {
+    let style: UIBlurEffect.Style
+
+    func makeUIView(context: Context) -> UIVisualEffectView {
+        UIVisualEffectView(effect: UIBlurEffect(style: style))
+    }
+
+    func updateUIView(_ uiView: UIVisualEffectView, context: Context) {}
 }
