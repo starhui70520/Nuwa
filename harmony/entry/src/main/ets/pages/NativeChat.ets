@@ -70,7 +70,7 @@ import {
   createSidebarRows, createSidebarSections, filterSidebarGroups, NativeSidebarRow, NativeSidebarSearch,
   NativeSidebarSection, NativeSidebarSession, normalizeSidebarQuery, SIDEBAR_HISTORY_PAGE_SIZE, visibleSidebarRowIndex,
 } from '../native/NativeSidebarHistory';
-import { NativeBalanceRequest, NativeDeepSeekBalance } from '../native/NativeProviderBalance';
+import { NativeBalanceRequest, NativeBalanceStore, NativeDeepSeekBalance } from '../native/NativeProviderBalance';
 import {
   checkNativeUpdate, fetchNativeReleaseHistory, getNativeCurrentVersion, isUpdateSnoozed, NativeReleaseHistoryItem,
   NativeUpdateCheck, NativeUpdatePreferences, NativeUpdateSchedule, UPDATE_POLL_MS, UPDATE_RESUME_MS,
@@ -168,6 +168,8 @@ struct NativeChat {
   @State private account: NativeDeepSeekAccount | null = null;
   @State private balance: NativeDeepSeekBalance | null = null;
   @State private authorizing: boolean = false;
+  private authorizationReturnToAccount: boolean = false;
+  private authorizationSuccessPending: boolean = false;
   @State private storingAccount: boolean = false;
   @State private authorizationUrl: string = '';
   @State private authorizationInBrowser: boolean = false;
@@ -272,9 +274,11 @@ struct NativeChat {
   private authBrowser = new webview.WebviewController();
   private recordingTimer: number = -1;
   private readonly authorizationLoopback = new NativeOAuthLoopbackServer();
+  private readonly balanceStore = new NativeBalanceStore();
   private balanceRequest?: NativeBalanceRequest;
   private balanceFetchedAt: number = 0;
   private balanceBinding: string = '';
+  private balanceLocale: string = '';
   private balanceRateLimitedUntil: number = 0;
   private balanceRefreshTimer: number = -1;
   private balanceRefreshEnabled: boolean = true;
@@ -365,6 +369,7 @@ struct NativeChat {
 
   onPageShow(): void {
     this.visible = true;
+    this.showPendingAuthorizationSuccess();
     this.refreshSidebarHistory();
     this.scheduleSidebarDateRefresh();
     if (this.replies.length) this.replies = Array.from(this.replies);
@@ -376,6 +381,7 @@ struct NativeChat {
     }
     if (this.migrationInProgress) {
       this.migrationInProgress = false;
+      this.restoreAuthorizationSettings();
       void this.storage.loadConversations(this.host()).then((history: NativeConversationState) => {
         this.history = history;
       }).catch(() => { this.toast(this.label('无法读取导入的对话', "Unable to load imported chats")); });
@@ -424,8 +430,9 @@ struct NativeChat {
     this.cancelAllReplies();
     this.stopVoice();
     this.speaker.destroy();
-    this.authorizationLoopback.stop();
-    this.accountController.cancel();
+    this.closeAuthorization();
+    this.authorizationReturnToAccount = false;
+    this.authorizationSuccessPending = false;
     if (this.updateTimer >= 0) {
       clearInterval(this.updateTimer);
       this.updateTimer = -1;
@@ -505,6 +512,7 @@ struct NativeChat {
         if (this.updateNotice) this.presentUpdate(this.updateNotice.update);
         if (this.settings.signedOut) {
           this.account = null;
+          void this.balanceStore.clear(context);
           await saveNativeAccount(null).catch(() => {});
         } else {
           this.account = await loadNativeAccount();
@@ -687,7 +695,7 @@ struct NativeChat {
       (!!this.settings.model.trim() && allowsKeylessNativeApi(this.settings.baseUrl, this.settings.protocol)));
   }
 
-  private resetBalance(): void {
+  private resetBalance(clearCached: boolean = false): void {
     clearTimeout(this.balanceRefreshTimer);
     this.balanceRefreshTimer = -1;
     this.balanceRequest?.cancel();
@@ -695,6 +703,10 @@ struct NativeChat {
     this.balance = null;
     this.balanceFetchedAt = 0;
     this.balanceRateLimitedUntil = 0;
+    if (clearCached) {
+      this.balanceBinding = '';
+      void this.balanceStore.clear(this.host());
+    }
   }
 
   private async refreshBalance(force: boolean = false): Promise<void> {
@@ -702,25 +714,47 @@ struct NativeChat {
     const token = this.accountToken();
     const key = this.settings.signedOut ? '' : this.settings.apiKey.trim();
     const binding = this.settings.attachmentBinding;
+    const locale = this.settings.locale;
     if (binding !== this.balanceBinding) {
+      const previousBinding = this.balanceBinding;
       this.resetBalance();
       this.balanceBinding = binding;
+      this.balanceLocale = locale;
+      if (previousBinding) void this.balanceStore.clear(this.host(), previousBinding);
+    } else if (locale !== this.balanceLocale) {
+      this.balanceRequest?.cancel();
+      this.balanceRequest = undefined;
+      this.balance = null;
+      this.balanceFetchedAt = 0;
+      this.balanceLocale = locale;
     }
+    if (!token && !key) return;
     const now = Date.now();
-    if ((!token && !key) || now < this.balanceRateLimitedUntil) return;
+    if (this.balance && now < this.balanceRateLimitedUntil) return;
     if (!force && (this.balanceRequest || (this.balance && now - this.balanceFetchedAt < 15000))) return;
     this.balanceRequest?.cancel();
     const request = new NativeBalanceRequest();
     this.balanceRequest = request;
-    const locale = this.settings.locale;
-    const balance = await request.fetch(this.settings.baseUrl, key, token, locale);
-    if (this.balanceRequest !== request) return;
-    this.balanceRequest = undefined;
-    if (this.settings.attachmentBinding !== binding || this.settings.signedOut) return;
-    if (request.retryAfterMs) this.balanceRateLimitedUntil = Date.now() + request.retryAfterMs;
-    if (balance && locale === this.settings.locale) {
-      this.balance = balance;
-      this.balanceFetchedAt = Date.now();
+    const context = this.host();
+    const isCurrent = (): boolean => this.balanceRequest === request && this.settings.attachmentBinding === binding &&
+      this.settings.locale === locale && !this.settings.signedOut && !this.signingOut;
+    try {
+      if (!this.balance) {
+        const cached = await this.balanceStore.load(context, binding, locale);
+        if (!isCurrent()) return;
+        if (cached) this.balance = cached;
+      }
+      if (Date.now() < this.balanceRateLimitedUntil) return;
+      const balance = await request.fetch(this.settings.baseUrl, key, token, locale);
+      if (!isCurrent()) return;
+      if (request.retryAfterMs) this.balanceRateLimitedUntil = Date.now() + request.retryAfterMs;
+      if (balance) {
+        this.balance = balance;
+        this.balanceFetchedAt = Date.now();
+        void this.balanceStore.save(context, binding, locale, balance);
+      }
+    } finally {
+      if (this.balanceRequest === request) this.balanceRequest = undefined;
     }
   }
 
@@ -825,10 +859,12 @@ struct NativeChat {
   }
 
   private async startAuthorization(inBrowser: boolean = false): Promise<void> {
-    if (this.authorizing || this.signingOut) {
+    if (this.authorizing || this.signingOut || this.backupBusy || this.settingsVerifying) {
       return;
     }
+    this.authorizationReturnToAccount = this.settingsVisible && this.settingsSection === 'account';
     this.authorizing = true;
+    if (this.authorizationReturnToAccount) this.settingsVisible = false;
     await this.loadAuthorization(inBrowser);
   }
 
@@ -876,13 +912,29 @@ struct NativeChat {
   }
 
   private cancelAuthorization(): void {
-    if (this.storingAccount) {
-      return;
-    }
+    if (this.storingAccount) return;
+    this.closeAuthorization();
+    this.restoreAuthorizationSettings();
+  }
+
+  private closeAuthorization(): void {
     this.resetAuthorizationAttempt();
     this.authorizationInBrowser = false;
     this.authorizationRetry = false;
     this.authorizing = false;
+  }
+
+  private restoreAuthorizationSettings(): void {
+    if (!this.authorizationReturnToAccount) return;
+    this.authorizationReturnToAccount = false;
+    this.settingsSection = 'account';
+    this.settingsVisible = true;
+  }
+
+  private showPendingAuthorizationSuccess(): void {
+    if (!this.visible || !this.authorizationSuccessPending) return;
+    this.authorizationSuccessPending = false;
+    this.toast(this.label('已登录 DeepSeek API 账号', 'Signed in to DeepSeek API account'));
   }
 
   private resetAuthorizationAttempt(): void {
@@ -934,18 +986,27 @@ struct NativeChat {
       settings.authMode = 'deepseek-account';
       settings.signedOut = false;
       settings.attachmentBinding = util.generateRandomUUID(true);
+      const context = this.host();
       this.storingAccount = true;
       try {
         await saveNativeAccount(account);
-        await this.settingsStore.save(this.host(), settings);
+        try {
+          await this.settingsStore.save(context, settings);
+        } catch (error) {
+          await saveNativeAccount(this.account).catch(() => {});
+          throw error as Error;
+        }
       } finally {
         this.storingAccount = false;
       }
+      if (attempt !== this.authAttempt) return;
       this.account = account;
       this.settings = settings;
       this.onboardingView = 'home';
-      this.cancelAuthorization();
-      this.offerMigrationPrompt();
+      this.closeAuthorization();
+      if (!this.offerMigrationPrompt()) this.restoreAuthorizationSettings();
+      this.authorizationSuccessPending = true;
+      this.showPendingAuthorizationSuccess();
       void this.refreshBalance();
     } catch (error) {
       if (attempt === this.authAttempt) {
@@ -983,10 +1044,11 @@ struct NativeChat {
     try {
       await saveNativeAccount(null);
       this.account = null;
-      this.resetBalance();
+      this.resetBalance(true);
       this.settings.authMode = 'api-key';
       this.settings.attachmentBinding = util.generateRandomUUID(true);
       await this.saveSettings();
+      void this.refreshBalance();
       if (!this.authenticated()) {
         this.settingsVisible = false;
       }
@@ -1011,7 +1073,7 @@ struct NativeChat {
       const locale = settings.locale === 'en-US' ? 'en_US' : 'zh_CN';
       this.settings = settings;
       this.account = null;
-      this.resetBalance();
+      this.resetBalance(true);
       this.stopVoice();
       this.closeMessageEditor();
       this.cancelAllReplies();
@@ -1190,6 +1252,7 @@ struct NativeChat {
     if (open) {
       this.getUIContext().getFocusController().clearFocus();
       this.refreshSidebarHistory();
+      void this.refreshBalance();
     } else if (!this.wide()) {
       this.finishSidebarRename(this.renamingId, this.renameText);
       this.resetSelection();
@@ -2528,12 +2591,22 @@ struct NativeChat {
   }
 
   private toggleSpeaker(): void {
-    const muted = !!this.readingId || !this.settings.ttsMuted;
-    this.readingId = '';
-    this.speaker.stop();
+    const wasReading = !!this.readingId;
+    if (wasReading) {
+      this.readingId = '';
+      this.speaker.stop();
+    }
+    const muted = wasReading || !this.settings.ttsMuted;
     this.settings.ttsMuted = muted;
     void this.saveSettings();
+    if (wasReading) return;
     this.toast(muted ? this.label('已静音朗读', "Read-aloud muted") : this.label('已取消朗读静音', "Read-aloud unmuted"));
+  }
+
+  private speakerAccessibilityLabel(): string {
+    if (this.readingId) return this.label('停止朗读', 'Stop reading');
+    return this.settings.ttsMuted ? this.label('已取消朗读静音', 'Read-aloud unmuted') :
+      this.label('已静音朗读', 'Read-aloud muted');
   }
 
   private compact(): boolean {
@@ -2594,6 +2667,8 @@ struct NativeChat {
       this.resetSidebarWindow();
       this.resetSelection();
       this.getUIContext().getFocusController().clearFocus();
+    } else {
+      void this.refreshBalance();
     }
     void this.saveSettings();
   }
@@ -2657,7 +2732,7 @@ struct NativeChat {
       }
       Row({ space: 2 }) {
         this.iconButton(this.settings.ttsMuted && !this.readingId ? $r('app.media.native_muted') : $r('app.media.native_speaker'),
-        this.label('朗读静音', 'Mute read-aloud'), () => { this.toggleSpeaker(); }, this.compact() ? 26 : 34)
+        this.speakerAccessibilityLabel(), () => { this.toggleSpeaker(); }, this.compact() ? 26 : 34)
         this.iconButton($r('app.media.native_new_chat'), this.label('开启新对话', "New chat"), () => { this.activate(null); }, this.compact() ? 26 : 34)
       }
       .height(this.compact() ? 30 : 42).padding({ left: 6, right: 6 })
@@ -3405,8 +3480,8 @@ struct NativeChat {
   private openSettings(section: string = 'root'): void {
     if (section === 'account') {
       this.prepareCredentialSettings();
-      void this.refreshBalance();
     }
+    void this.refreshBalance();
     this.settingsSection = section;
     this.settingsVisible = true;
   }
@@ -3450,7 +3525,7 @@ struct NativeChat {
       showClose: false,
       title: (): void => { this.settingsHeader(); },
       onWillDismiss: (action: DismissSheetAction): void => {
-        if (this.signingOut || this.deletingSessions) return;
+        if (this.signingOut || this.deletingSessions || this.authorizing) return;
         if (action.reason === DismissReason.PRESS_BACK && this.settingsSection !== 'root') {
           this.returnToSettings();
           return;
@@ -3461,16 +3536,17 @@ struct NativeChat {
     };
   }
 
-  private offerMigrationPrompt(): void {
-    if (!this.settings.migrationPromptHandled) {
-      this.settingsVisible = false;
-      this.migrationPromptVisible = true;
-    }
+  private offerMigrationPrompt(): boolean {
+    if (this.settings.migrationPromptHandled) return false;
+    this.settingsVisible = false;
+    this.migrationPromptVisible = true;
+    return true;
   }
 
-  private dismissMigrationPrompt(): void {
+  private dismissMigrationPrompt(restoreSettings: boolean = true): void {
     this.migrationPromptVisible = false;
     this.settings.migrationPromptHandled = true;
+    if (restoreSettings) this.restoreAuthorizationSettings();
     void this.saveSettings();
   }
 
@@ -3606,6 +3682,7 @@ struct NativeChat {
   private async openHistoryMigration(intent: NativeMigrationIntent = { clearSession: false, forceReExport: false }): Promise<void> {
     if (this.migrationInProgress) return;
     if (this.backupBusy || this.replies.length > 0) {
+      this.restoreAuthorizationSettings();
       this.toast(this.label('请在回复结束后迁移', 'Migration is available after the reply finishes'));
       return;
     }
@@ -3617,6 +3694,7 @@ struct NativeChat {
       if (this.hasPendingHistorySave()) {
         this.migrationInProgress = false;
         this.historySaveError = true;
+        this.restoreAuthorizationSettings();
         return;
       }
       await this.markMigrationUsed();
@@ -3626,6 +3704,7 @@ struct NativeChat {
       });
     } catch {
       this.migrationInProgress = false;
+      this.restoreAuthorizationSettings();
       this.toast(this.label('无法打开历史迁移', "Unable to open chat migration"));
     }
   }
@@ -4084,12 +4163,8 @@ struct NativeChat {
         } else {
           Button(this.label('账号登录', 'Sign In'), { type: ButtonType.Capsule })
             .height(34).fontSize(this.appFontSize(13)).backgroundColor($r('app.color.native_chat_blue'))
-            .enabled(!this.authorizing && !this.settingsVerifying)
-            .onClick(() => {
-              this.finishCredentialSettings();
-              this.settingsVisible = false;
-              void this.startAuthorization();
-            })
+            .enabled(!this.authorizing && !this.settingsVerifying && !this.backupBusy)
+            .onClick(() => { void this.startAuthorization(); })
         }
       }
     }
@@ -4833,7 +4908,7 @@ struct NativeChat {
           NativeMigrationPrompt({
             locale: this.settings.locale, compact: this.compact() || this.viewportHeight < 500,
             fontScale: this.appFontScale(), importing: this.backupBusy,
-            onMigrate: () => { this.dismissMigrationPrompt(); void this.openHistoryMigration(); },
+            onMigrate: () => { this.dismissMigrationPrompt(false); void this.openHistoryMigration(); },
             onImport: () => { void this.importChatHistory(true); },
             onDismiss: () => { this.dismissMigrationPrompt(); },
           })

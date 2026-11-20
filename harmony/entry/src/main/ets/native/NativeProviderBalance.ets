@@ -1,8 +1,13 @@
 import { url } from '@kit.ArkTS';
+import { common } from '@kit.AbilityKit';
+import { preferences } from '@kit.ArkData';
 import { http } from '@kit.NetworkKit';
 
 const DEFAULT_API_ORIGIN: string = 'https://api.deepseek.com';
 const DEFAULT_RETRY_AFTER_MS: number = 15000;
+const BALANCE_PREFERENCES: string = 'nuwa_balance_cache';
+const BALANCE_CACHE_KEY: string = 'latest_v1';
+let balanceCacheWrites: Promise<void> = Promise.resolve();
 
 export interface NativeDeepSeekBalance {
   currency: string;
@@ -23,6 +28,18 @@ interface BalanceCandidate {
   currency: string;
   total: string | number;
   numeric: number;
+}
+
+interface CachedBalance {
+  currency: string;
+  totalBalance: string;
+  isAvailable: boolean;
+}
+
+interface BalanceCache {
+  binding: string;
+  zhCN?: CachedBalance;
+  enUS?: CachedBalance;
 }
 
 function isRecord(value: Object | null): boolean {
@@ -57,6 +74,10 @@ function buildBalance(currency: string, total: string | number, available: boole
   } else {
     amount = numeric.toFixed(2);
   }
+  return displayBalance(currency, amount, available);
+}
+
+function displayBalance(currency: string, amount: string, available: boolean): NativeDeepSeekBalance {
   const upperCurrency = currency.trim().toUpperCase();
   let formatted: string;
   if (upperCurrency === 'CNY' || upperCurrency === 'RMB') {
@@ -69,6 +90,74 @@ function buildBalance(currency: string, total: string | number, available: boole
     formatted = `${upperCurrency} ${amount}`;
   }
   return { currency: upperCurrency, totalBalance: amount, formatted: formatted, isAvailable: available };
+}
+
+function isBalanceBinding(binding: string): boolean {
+  return /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(binding);
+}
+
+function cachedBalance(value: Object | null): CachedBalance | undefined {
+  const entry = asRecord(value);
+  if (!entry || typeof entry.currency !== 'string' || !/^[A-Z]{3}$/.test(entry.currency) ||
+    typeof entry.totalBalance !== 'string' || entry.totalBalance.length > 32 ||
+    !/^-?\d+(?:\.\d{1,4})?$/.test(entry.totalBalance) ||
+    !Number.isFinite(Number(entry.totalBalance)) || typeof entry.isAvailable !== 'boolean') return undefined;
+  return { currency: entry.currency, totalBalance: entry.totalBalance, isAvailable: entry.isAvailable };
+}
+
+async function readBalanceCache(store: preferences.Preferences, binding: string): Promise<BalanceCache | null> {
+  try {
+    const raw = await store.get(BALANCE_CACHE_KEY, '');
+    if (typeof raw !== 'string' || !raw || raw.length > 1024) return null;
+    const cache = asRecord(JSON.parse(raw) as Object);
+    if (!cache || cache.binding !== binding) return null;
+    return { binding, zhCN: cachedBalance(cache.zhCN ?? null), enUS: cachedBalance(cache.enUS ?? null) };
+  } catch {
+    return null;
+  }
+}
+
+function queueBalanceCacheWrite(write: () => Promise<void>): Promise<void> {
+  balanceCacheWrites = balanceCacheWrites.then(write).catch(() => {});
+  return balanceCacheWrites;
+}
+
+/** Cache the last successful result per locale for the current credential binding. */
+export class NativeBalanceStore {
+  async load(context: common.UIAbilityContext, binding: string, locale: string): Promise<NativeDeepSeekBalance | null> {
+    if (!isBalanceBinding(binding)) return null;
+    try {
+      await balanceCacheWrites;
+      const store = await preferences.getPreferences(context, BALANCE_PREFERENCES);
+      const cache = await readBalanceCache(store, binding);
+      const balance = locale === 'zh-CN' ? (cache?.zhCN ?? cache?.enUS) : (cache?.enUS ?? cache?.zhCN);
+      return balance ? displayBalance(balance.currency, balance.totalBalance, balance.isAvailable) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  save(context: common.UIAbilityContext, binding: string, locale: string, balance: NativeDeepSeekBalance): Promise<void> {
+    const entry = cachedBalance(balance);
+    if (!isBalanceBinding(binding) || !entry) return Promise.resolve();
+    return queueBalanceCacheWrite(async (): Promise<void> => {
+      const store = await preferences.getPreferences(context, BALANCE_PREFERENCES);
+      const cache: BalanceCache = await readBalanceCache(store, binding) ?? { binding };
+      if (locale === 'zh-CN') cache.zhCN = entry;
+      else cache.enUS = entry;
+      await store.put(BALANCE_CACHE_KEY, JSON.stringify(cache));
+      await store.flush();
+    });
+  }
+
+  clear(context: common.UIAbilityContext, binding: string = ''): Promise<void> {
+    return queueBalanceCacheWrite(async (): Promise<void> => {
+      const store = await preferences.getPreferences(context, BALANCE_PREFERENCES);
+      if (binding && !(await readBalanceCache(store, binding))) return;
+      await store.delete(BALANCE_CACHE_KEY);
+      await store.flush();
+    });
+  }
 }
 
 function normalizeOrigin(baseUrl: string): NormalizedProviderBase | null {
