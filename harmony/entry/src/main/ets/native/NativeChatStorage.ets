@@ -8,6 +8,7 @@ import { NativeAttachment } from './NativeChatAttachments';
 import { ensureNativeDirectory } from './NativeFileSystem';
 import { NativeFailedUpload, NativeReplyFailure } from './NativeReplyNotice';
 import { validNativeReadLinks } from './NativeReadLinks';
+import { validNativePrefillBlocks } from './NativeReplyPrefill';
 import { isValidNativeToolTimeline, settleInterruptedNativeToolTimeline } from './NativeToolTimeline';
 import { backupImageIds, pruneBackupImages, removeBackupImage } from './NativeBackupFiles';
 import {
@@ -152,6 +153,8 @@ function validateConversation(session: NativeConversation): boolean {
       (message.model !== undefined && typeof message.model !== 'string') ||
       (message.stopReason !== undefined && typeof message.stopReason !== 'string') ||
       (message.canPrefill !== undefined && typeof message.canPrefill !== 'boolean') ||
+      (message.prefillBlocks !== undefined && (message.role !== 'assistant' ||
+        !validNativePrefillBlocks(message.prefillBlocks))) ||
       (message.thinking !== undefined && typeof message.thinking !== 'boolean') ||
       (message.search !== undefined && typeof message.search !== 'boolean') ||
       (message.thinkingSignature !== undefined && typeof message.thinkingSignature !== 'string') ||

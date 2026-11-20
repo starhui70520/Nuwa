@@ -60,6 +60,7 @@ import { hasPendingNativeMigration } from '../native/NativePendingMigration';
 import {
   describeNativeReplyFailure, nativeRefusalText, NativeFailedUpload, NativeReplyNotice,
 } from '../native/NativeReplyNotice';
+import { nativeReplyPrefillBlocks, NativePrefillBlock } from '../native/NativeReplyPrefill';
 import { isOfficialNativeReadLinkRoute, NativeReadLink, NativeReadLinkCollector, useNativeReadLink } from '../native/NativeReadLinks';
 import {
   createNativeLatestReminder, defaultNativeLocale, nativeCityOptions, NativeLocationOption,
@@ -2106,6 +2107,7 @@ struct NativeChat {
       failure: reply.message.failure,
       stopReason: reply.message.stopReason, canPrefill: reply.message.canPrefill,
       thinking: reply.message.thinking, search: reply.message.search, thinkingSignature: reply.message.thinkingSignature,
+      prefillBlocks: reply.message.prefillBlocks,
       latestReminder: reply.message.latestReminder,
       sources: reply.message.sources, citations: reply.message.citations, toolTimeline: reply.message.toolTimeline,
       readLinks: reply.message.readLinks,
@@ -2166,6 +2168,7 @@ struct NativeChat {
   private async requestReply(context: common.UIAbilityContext, config: NativeChatConfig,
     session: NativeConversation, reply: NativeReply): Promise<NativeReplyOutcome | undefined> {
     const rejectedImages = this.historyImageRejections(reply.attachmentBinding);
+    const prefixBlocks = config.prefill?.blocks ?? [];
     let skippedBadImages = 0;
     let fileRetries = 0;
     while (!reply.stopped) {
@@ -2190,17 +2193,23 @@ struct NativeChat {
       let hasTimeline = false;
       const sourceOffset = reply.message.content.length;
       try {
-        return await reply.client.send(config, messages, (content: string, reasoning: string): void => {
+        const outcome = await reply.client.send(config, messages, (content: string, reasoning: string,
+          outcome?: NativeReplyOutcome): void => {
+          if (reply.message.stopReason === 'refusal') return;
           reply.message.content += content;
           reply.message.reasoning += reasoning;
+          if (outcome) this.applyReplyOutcome(reply, outcome, prefixBlocks);
           this.paintLiveReplies();
           if (!this.deletingSessions && Date.now() - this.lastStreamSave > 1500) {
             this.lastStreamSave = Date.now();
             void this.save(context, true);
           }
         }, (event: string, outcome: NativeReplyOutcome): void => {
-          if (!outcome.canPrefill) reply.message.canPrefill = false;
-          if (outcome.thinkingSignature) reply.message.thinkingSignature = outcome.thinkingSignature;
+          this.applyReplyOutcome(reply, outcome, prefixBlocks);
+          if (reply.message.stopReason === 'refusal') {
+            this.paintLiveReplies();
+            return;
+          }
           const readLink = readLinks.apply(event, reply.message.content.length);
           if (readLink) {
             reply.message.readLinks = [...(reply.message.readLinks ?? []), readLink]
@@ -2222,6 +2231,8 @@ struct NativeChat {
             this.paintLiveReplies();
           }
         }, (title: string): void => { this.applyReplyTitle(context, config, reply, title); });
+        this.applyReplyOutcome(reply, outcome, prefixBlocks);
+        return outcome;
       } catch (cause) {
         if (!(cause instanceof NativeModelError)) {
           throw new Error(cause instanceof Error ? cause.message : '');
@@ -2258,12 +2269,32 @@ struct NativeChat {
         }
         throw cause;
       } finally {
-        if (hasTimeline) {
+        if (hasTimeline && reply.message.stopReason !== 'refusal') {
           reply.message.toolTimeline = this.mergeReplyTimeline(prefix, prefixTimeline, timeline.snapshot(false));
         }
       }
     }
     return undefined;
+  }
+
+  private applyReplyOutcome(reply: NativeReply, outcome: NativeReplyOutcome, prefixBlocks: NativePrefillBlock[]): void {
+    const message = reply.message;
+    if (message.stopReason === 'refusal') return;
+    if (outcome.stopReason) message.stopReason = outcome.stopReason;
+    if (message.stopReason === 'refusal') {
+      message.canPrefill = false;
+      message.content = '';
+      message.reasoning = '';
+      message.thinkingSignature = undefined;
+      message.prefillBlocks = undefined;
+      message.citations = undefined;
+      message.toolTimeline = undefined;
+      message.readLinks = undefined;
+      return;
+    }
+    message.canPrefill = outcome.canPrefill;
+    if (outcome.thinkingSignature) message.thinkingSignature = outcome.thinkingSignature;
+    if (outcome.prefillBlocks !== undefined) message.prefillBlocks = [...prefixBlocks, ...outcome.prefillBlocks];
   }
 
   private applyReplyTitle(context: common.UIAbilityContext, config: NativeChatConfig, reply: NativeReply,
@@ -2320,20 +2351,7 @@ struct NativeChat {
         reply.message.latestReminder = createNativeLatestReminder(this.settings.locale, this.settings.location);
         void this.save(context);
       }
-      const outcome = await this.requestReply(context, config, session, reply);
-      if (outcome) {
-        reply.message.stopReason = outcome.stopReason;
-        reply.message.canPrefill = outcome.canPrefill;
-        reply.message.thinkingSignature = outcome.thinkingSignature || reply.message.thinkingSignature;
-        if (outcome.stopReason === 'refusal') {
-          reply.message.content = '';
-          reply.message.reasoning = '';
-          reply.message.thinkingSignature = undefined;
-          reply.message.citations = undefined;
-          reply.message.toolTimeline = undefined;
-          reply.message.readLinks = undefined;
-        }
-      }
+      await this.requestReply(context, config, session, reply);
     } catch (cause) {
       error = !reply.stopped;
       if (error && !reply.message.failure) {
@@ -2403,6 +2421,8 @@ struct NativeChat {
     config.requestTitle = !session.title;
     config.prefill = {
       text: message.content, reasoning: message.reasoning, thinkingSignature: message.thinkingSignature ?? '',
+      blocks: message.prefillBlocks ??
+        nativeReplyPrefillBlocks(message.content, message.reasoning, message.thinkingSignature ?? ''),
     };
     this.resumeReplyInPlace(session, message, config);
   }

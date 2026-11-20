@@ -3,6 +3,7 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { http } from '@kit.NetworkKit';
 import { allowsKeylessNativeApi } from './NativeApiCredential';
 import { NativeReadLink } from './NativeReadLinks';
+import { NativePrefillBlock } from './NativeReplyPrefill';
 
 export interface NativeChatFileRef {
   serverId: string;
@@ -20,6 +21,7 @@ export interface NativeReplyOutcome {
   stopReason: string;
   canPrefill: boolean;
   thinkingSignature: string;
+  prefillBlocks?: NativePrefillBlock[];
   title?: string;
 }
 
@@ -27,7 +29,10 @@ export interface NativeReplyPrefill {
   text: string;
   reasoning: string;
   thinkingSignature: string;
+  blocks?: NativePrefillBlock[];
 }
+
+type ReplyDeltaCallback = (content: string, reasoning: string, outcome?: NativeReplyOutcome) => void;
 
 export interface NativeChatConfig {
   baseUrl: string;
@@ -98,6 +103,11 @@ interface AnthropicStartedBlock {
   input?: AnthropicToolInput;
   content?: Object;
   tool_use_id?: string;
+}
+
+interface OpenAnthropicBlock {
+  kind: string;
+  prefillIndex: number;
 }
 
 interface AnthropicToolInput {
@@ -267,6 +277,40 @@ class ChatStreamError extends Error {
 
 function hasPrefillContent(prefill: NativeReplyPrefill, thinking: boolean): boolean {
   return !!prefill.text.trim() || (thinking && !!prefill.reasoning.trim());
+}
+
+function anthropicPrefillContent(prefill: NativeReplyPrefill, thinking: boolean): AnthropicContentBlock[] {
+  const content: AnthropicContentBlock[] = [];
+  if (prefill.blocks === undefined) {
+    if (!hasPrefillContent(prefill, thinking)) return content;
+    if (thinking && prefill.reasoning.trim()) {
+      content.push({ type: 'thinking', thinking: prefill.reasoning, signature: prefill.thinkingSignature });
+    }
+    if (prefill.text) content.push({ type: 'text', text: prefill.text });
+    return content;
+  }
+
+  let text: AnthropicContentBlock | undefined;
+  for (const block of prefill.blocks) {
+    if (block.type === 'thinking' && !block.text.trim()) continue;
+    if (block.type === 'text') {
+      if (text) {
+        text.text = (text.text ?? '') + block.text;
+      } else {
+        const previous = content[content.length - 1];
+        text = { type: 'text', text: (previous?.type === 'text' ? '\n\n' : '') + block.text };
+        content.push(text);
+      }
+    } else {
+      text = undefined;
+      if (thinking) {
+        content.push({ type: 'thinking', thinking: block.text, signature: block.signature ?? '' });
+      }
+    }
+  }
+  const hasContent = content.some((block: AnthropicContentBlock): boolean =>
+    !!block.text?.trim() || !!block.thinking?.trim());
+  return hasContent ? content.filter((block: AnthropicContentBlock): boolean => block.type !== 'text' || block.text !== '') : [];
 }
 
 export function usesExtendedNativeRequest(config: NativeChatConfig, messages: NativeChatMessage[]): boolean {
@@ -443,16 +487,17 @@ class ChatStream {
   private pendingLine: string = '';
   private eventName: string = '';
   private dataLines: string[] = [];
-  private readonly openBlocks = new Map<number, string>();
+  private readonly openBlocks = new Map<number, OpenAnthropicBlock>();
+  private readonly prefillBlocks: NativePrefillBlock[] = [];
   private done: boolean = false;
   receivedContent: boolean = false;
   private outcome: NativeReplyOutcome = { stopReason: '', canPrefill: true, thinkingSignature: '' };
-  private readonly onDelta: (content: string, reasoning: string) => void;
+  private readonly onDelta: ReplyDeltaCallback;
   private readonly protocol: 'openai' | 'anthropic';
   private readonly onAnthropicEvent?: (data: string, outcome: NativeReplyOutcome) => void;
   private readonly onTitle?: (title: string) => void;
 
-  constructor(onDelta: (content: string, reasoning: string) => void,
+  constructor(onDelta: ReplyDeltaCallback,
     protocol: 'openai' | 'anthropic' = 'openai', onAnthropicEvent?: (data: string, outcome: NativeReplyOutcome) => void,
     onTitle?: (title: string) => void) {
     this.onAnthropicEvent = onAnthropicEvent;
@@ -474,19 +519,21 @@ class ChatStream {
       if (!this.done && !this.outcome.stopReason) {
         throw new ChatStreamError('interrupted', '');
       }
-      return this.outcome;
+    } else {
+      this.finishOpenAI();
     }
-    this.finishOpenAI();
-    return this.outcome;
+    return this.currentOutcome();
   }
 
   currentOutcome(): NativeReplyOutcome {
-    return {
+    const current: NativeReplyOutcome = {
       stopReason: this.outcome.stopReason,
       canPrefill: this.outcome.canPrefill,
       thinkingSignature: this.outcome.thinkingSignature,
+      prefillBlocks: this.outcome.stopReason === 'refusal' ? [] : this.prefillBlocks.slice(),
       title: this.outcome.title,
     };
+    return current;
   }
 
   private emitAnthropicEvent(data: string): void {
@@ -496,6 +543,17 @@ class ChatStream {
   private finishOpenAI(): void {
     this.done = true;
     if (!this.outcome.stopReason) this.outcome.stopReason = 'end_turn';
+  }
+
+  private appendOpenAIPrefill(type: 'text' | 'thinking', text: string): void {
+    if (!text) return;
+    const index = this.prefillBlocks.length - 1;
+    const previous = this.prefillBlocks[index];
+    if (previous?.type === type) {
+      this.prefillBlocks[index] = { type, text: previous.text + text, signature: previous.signature };
+    } else {
+      this.prefillBlocks.push({ type, text, signature: type === 'thinking' ? '' : undefined });
+    }
   }
 
   completed(): boolean {
@@ -583,7 +641,9 @@ class ChatStream {
     const reasoning = typeof reasoningValue === 'string' ? reasoningValue : '';
     if (content || reasoning) {
       this.receivedContent = true;
-      this.onDelta(content, reasoning);
+      this.appendOpenAIPrefill('thinking', reasoning);
+      this.appendOpenAIPrefill('text', content);
+      this.onDelta(content, reasoning, this.currentOutcome());
     }
   }
 
@@ -639,8 +699,7 @@ class ChatStream {
       case 'content_block_start': {
         const block = event.content_block;
         if (block && validAnthropicStart(block)) {
-          this.openBlocks.set(index, block.type ?? '');
-          this.startAnthropicBlock(block, data);
+          this.startAnthropicBlock(index, block, data);
         }
         break;
       }
@@ -653,13 +712,20 @@ class ChatStream {
     }
   }
 
-  private startAnthropicBlock(block: AnthropicStartedBlock, data: string): void {
+  private startAnthropicBlock(index: number, block: AnthropicStartedBlock, data: string): void {
     this.receivedContent = true;
+    const open: OpenAnthropicBlock = { kind: block.type ?? '', prefillIndex: -1 };
     if (block.type === 'thinking') {
       this.outcome.thinkingSignature = typeof block.signature === 'string' ? block.signature : '';
-    } else if (block.type !== 'text') {
+      open.prefillIndex = this.prefillBlocks.length;
+      this.prefillBlocks.push({ type: 'thinking', text: block.thinking ?? '', signature: this.outcome.thinkingSignature });
+    } else if (block.type === 'text') {
+      open.prefillIndex = this.prefillBlocks.length;
+      this.prefillBlocks.push({ type: 'text', text: block.text ?? '' });
+    } else {
       this.outcome.canPrefill = false;
     }
+    this.openBlocks.set(index, open);
     this.emitAnthropicEvent(data);
     if (block.type === 'text') {
       if (block.text) this.onDelta(block.text, '');
@@ -669,9 +735,12 @@ class ChatStream {
   }
 
   private applyAnthropicDelta(index: number, delta: AnthropicEventDelta, data: string): void {
-    const kind = this.openBlocks.get(index);
-    if (kind === 'text') {
+    const open = this.openBlocks.get(index);
+    if (!open) return;
+    if (open.kind === 'text') {
       if (delta.type === 'text_delta' && typeof delta.text === 'string') {
+        const previous = this.prefillBlocks[open.prefillIndex];
+        this.prefillBlocks[open.prefillIndex] = { type: 'text', text: previous.text + delta.text };
         this.emitAnthropicEvent(data);
         if (delta.text) this.onDelta(delta.text, '');
       } else if (delta.type === 'citations_delta' && delta.citation?.type === 'web_search_result_location' &&
@@ -679,15 +748,22 @@ class ChatStream {
         nullableString(delta.citation.title)) {
         this.emitAnthropicEvent(data);
       }
-    } else if (kind === 'thinking') {
+    } else if (open.kind === 'thinking') {
+      const previous = this.prefillBlocks[open.prefillIndex];
       if (delta.type === 'thinking_delta' && typeof delta.thinking === 'string') {
+        this.prefillBlocks[open.prefillIndex] = {
+          type: 'thinking', text: previous.text + delta.thinking, signature: previous.signature,
+        };
         this.emitAnthropicEvent(data);
         if (delta.thinking) this.onDelta('', delta.thinking);
       } else if (delta.type === 'signature_delta' && typeof delta.signature === 'string') {
         this.outcome.thinkingSignature += delta.signature;
+        this.prefillBlocks[open.prefillIndex] = {
+          type: 'thinking', text: previous.text, signature: (previous.signature ?? '') + delta.signature,
+        };
         this.emitAnthropicEvent(data);
       }
-    } else if (kind === 'server_tool_use' && delta.type === 'input_json_delta' && typeof delta.partial_json === 'string') {
+    } else if (open.kind === 'server_tool_use' && delta.type === 'input_json_delta' && typeof delta.partial_json === 'string') {
       this.emitAnthropicEvent(data);
     }
   }
@@ -747,7 +823,7 @@ export class NativeChatClient {
   }
 
   async send(config: NativeChatConfig, messages: NativeChatMessage[],
-    onDelta: (content: string, reasoning: string) => void,
+    onDelta: ReplyDeltaCallback,
     onAnthropicEvent?: (data: string, outcome: NativeReplyOutcome) => void,
     onTitle?: (title: string) => void): Promise<NativeReplyOutcome> {
     this.cancel();
@@ -796,16 +872,8 @@ export class NativeChatClient {
       const extended = usesExtendedNativeRequest(config, messages);
       const anthropicMessages = messages.map<AnthropicChatMessage>(anthropicMessage);
       const prefill = config.prefill;
-      if (prefill && hasPrefillContent(prefill, config.thinking === true)) {
-        const blocks: AnthropicContentBlock[] = [];
-        if (config.thinking && prefill.reasoning.trim()) {
-          blocks.push({ type: 'thinking', thinking: prefill.reasoning, signature: prefill.thinkingSignature });
-        }
-        if (prefill.text) {
-          blocks.push({ type: 'text', text: prefill.text });
-        }
-        anthropicMessages.push({ role: 'assistant', content: blocks });
-      }
+      const blocks = prefill ? anthropicPrefillContent(prefill, config.thinking === true) : [];
+      if (blocks.length) anthropicMessages.push({ role: 'assistant', content: blocks });
       body = {
         model: model,
         system: config.system ?? DEFAULT_DEEPSEEK_SYSTEM,
@@ -860,9 +928,10 @@ export class NativeChatClient {
           resolve(stream.currentOutcome());
         }
       };
-      const stream = new ChatStream((content: string, reasoning: string): void => {
+      const stream = new ChatStream((content: string, reasoning: string, outcome?: NativeReplyOutcome): void => {
         if (this.settleRequest === settle) {
-          onDelta(content, reasoning);
+          if (outcome) onDelta(content, reasoning, outcome);
+          else onDelta(content, reasoning);
         }
       }, protocol, (data: string, outcome: NativeReplyOutcome): void => {
         if (this.settleRequest === settle) onAnthropicEvent?.(data, outcome);

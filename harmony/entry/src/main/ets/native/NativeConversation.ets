@@ -4,6 +4,7 @@ import { NativeAttachment } from './NativeChatAttachments';
 import { NativeReplyFailure } from './NativeReplyNotice';
 import { NativeToolTimelineView } from './NativeToolTimeline';
 import { NativeReadLink } from './NativeReadLinks';
+import { NativePrefillBlock, copyNativePrefillBlocks } from './NativeReplyPrefill';
 
 export interface NativeStoredMessage {
   role: string;
@@ -21,6 +22,7 @@ export interface NativeConversationMessage extends NativeStoredMessage {
   model?: string;
   stopReason?: string;
   canPrefill?: boolean;
+  prefillBlocks?: NativePrefillBlock[];
   thinking?: boolean;
   search?: boolean;
   thinkingSignature?: string;
@@ -111,6 +113,7 @@ function copyMessage(message: NativeConversationMessage): NativeConversationMess
     model: message.model,
     stopReason: message.stopReason,
     canPrefill: message.canPrefill,
+    prefillBlocks: copyNativePrefillBlocks(message.prefillBlocks),
     thinking: message.thinking,
     search: message.search,
     thinkingSignature: message.thinkingSignature,
@@ -230,6 +233,7 @@ export function updateConversationMessage(session: NativeConversation, message: 
   updated.model = message.model;
   updated.stopReason = message.stopReason;
   updated.canPrefill = message.canPrefill;
+  updated.prefillBlocks = copyNativePrefillBlocks(message.prefillBlocks);
   updated.thinking = message.thinking;
   updated.search = message.search;
   updated.thinkingSignature = message.thinkingSignature;
