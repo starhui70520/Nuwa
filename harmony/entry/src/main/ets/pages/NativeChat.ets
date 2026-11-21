@@ -164,7 +164,7 @@ const SIDEBAR_DESKTOP_WIDTH = 261;
 const SIDEBAR_ROW_END_PADDING = 6;
 const SIDEBAR_END_PADDING = 10;
 
-class ComposerCaretCallback extends FrameCallback {
+class AfterRenderCallback extends FrameCallback {
   private readonly restore: () => void;
 
   constructor(restore: () => void) {
@@ -413,7 +413,8 @@ struct NativeChat {
   private anchorTimer: number = -1;
   private readonly drafts: Map<string, NativeDraft> = new Map();
   @State private visible: boolean = false;
-  private scrollTimer: number = -1;
+  private latestScrollGeneration: number = 0;
+  private latestScrollQueued: boolean = false;
   private streamCheckpointTimer: number = -1;
   private rejectedImageBinding: string = '';
   private rejectedHistoryImages: Set<string> = new Set();
@@ -558,10 +559,7 @@ struct NativeChat {
       clearTimeout(this.streamFrame);
       this.streamFrame = -1;
     }
-    if (this.scrollTimer >= 0) {
-      clearTimeout(this.scrollTimer);
-      this.scrollTimer = -1;
-    }
+    this.cancelLatestScroll();
     if (this.anchorTimer >= 0) {
       clearTimeout(this.anchorTimer);
       this.anchorTimer = -1;
@@ -1405,9 +1403,12 @@ struct NativeChat {
     const previousLastId = this.messagePath[this.messagePath.length - 1]?.id;
     if (sessionChanged) {
       if (session) this.conversationCache.touch(session.id);
+      this.cancelLatestScroll();
+      this.branchScrollAnchor.cancel();
       this.messageLimit = CHAT_PAGE_SIZE;
       this.rangeFromTop = false;
       this.firstVisibleRow = 0;
+      this.listViewportHeight = 0;
       this.messageActionsId = '';
       this.hoveredMessageId = '';
       this.followLatest = true;
@@ -1445,6 +1446,7 @@ struct NativeChat {
   }
 
   private restoreListPosition(index: number, top: number): void {
+    this.cancelLatestScroll();
     if (this.anchorTimer >= 0) clearTimeout(this.anchorTimer);
     const sessionId = this.history.activeId;
     this.anchorTimer = setTimeout(() => {
@@ -1510,13 +1512,31 @@ struct NativeChat {
   }
 
   private scrollToLatest(): void {
-    if (this.scrollTimer < 0) {
-      this.scrollTimer = setTimeout(() => {
-        this.scrollTimer = -1;
-        if (this.visible && this.history.activeId !== null) {
-          this.scroller.scrollEdge(Edge.Bottom);
-        }
-      }, 0);
+    const session = this.session();
+    if (!session || session.unloaded || session.unreadable || !this.visible || !this.followLatest ||
+      this.laterCount > 0 || this.latestScrollQueued) return;
+    const generation = this.latestScrollGeneration;
+    const id = session.id;
+    this.latestScrollQueued = true;
+    this.getUIContext().postFrameCallback(new AfterRenderCallback((): void => {
+      if (generation !== this.latestScrollGeneration) return;
+      this.latestScrollQueued = false;
+      if (this.visible && this.history.activeId === id && this.followLatest && this.laterCount === 0) {
+        this.scroller.scrollEdge(Edge.Bottom);
+      }
+    }));
+  }
+
+  private cancelLatestScroll(): void {
+    this.latestScrollGeneration++;
+    this.latestScrollQueued = false;
+  }
+
+  private cancelLatestScrollOnInput(source: ScrollSource): void {
+    if (this.latestScrollQueued && (source === ScrollSource.DRAG || source === ScrollSource.FLING ||
+      source === ScrollSource.OTHER_USER_INPUT || source === ScrollSource.SCROLL_BAR ||
+      source === ScrollSource.SCROLL_BAR_FLING)) {
+      this.cancelLatestScroll();
     }
   }
 
@@ -1941,7 +1961,7 @@ struct NativeChat {
     this.updateDraftText(updated);
     this.composerSelection = { start: cursor, end: cursor };
     const context = this.getUIContext();
-    context.postFrameCallback(new ComposerCaretCallback(() => {
+    context.postFrameCallback(new AfterRenderCallback(() => {
       if (this.history.activeId !== id || this.draft !== updated) return;
       if (restoreFocus && this.visible && !this.drawerOpen && !this.settingsVisible && !this.backupBusy) {
         context.getFocusController().requestFocus('nuwa-composer');
@@ -2950,6 +2970,7 @@ struct NativeChat {
       const context = this.getUIContext();
       const controlsTop = keepPosition ? nativeBranchControlsTop(context, message.id) : undefined;
       this.branchScrollAnchor.cancel();
+      this.cancelLatestScroll();
       this.closeMessageEditor();
       this.followLatest = false;
       this.closeSources();
@@ -5599,6 +5620,58 @@ struct NativeChat {
   }
 
   @Builder
+  private transcriptList(id: string) {
+    List({
+      scroller: this.scroller,
+      initialIndex: Math.max(0, this.messageList.totalCount() - 1 + Number(this.earlierCount > 0)),
+    }) {
+      if (this.earlierCount > 0) {
+        ListItem() { this.messagePager(true) }
+      }
+      LazyForEach(this.messageList, (row: NativeMessageRow) => {
+        ListItem() {
+          if (row.message.role === 'user') {
+            this.userMessage(row.message, row.index)
+          } else {
+            NativeAssistantMessageRow({
+              row,
+              content: (message: () => NativeConversationMessage, index: number): void => {
+                this.assistantMessage(message, index)
+              },
+            })
+          }
+        }
+      }, (row: NativeMessageRow): string => row.key.toString())
+      if (this.laterCount > 0) {
+        ListItem() { this.messagePager(false) }
+      }
+    }
+    .width('100%').constraintSize({ maxWidth: this.viewportWidth >= 1024 ? 792 : 680 })
+    .layoutWeight(1).scrollBar(BarState.Auto)
+    .cachedCount(4).onScrollIndex((start: number) => {
+      if (this.history.activeId === id) this.firstVisibleRow = start;
+    })
+    .onAppear(() => {
+      if (this.history.activeId === id) this.scrollToLatest();
+    })
+    .onWillScroll((_offset: number, _state: ScrollState, source: ScrollSource) => {
+      if (this.history.activeId === id) this.cancelLatestScrollOnInput(source);
+    })
+    .onDidScroll((offset: number, state: ScrollState) => {
+      if (this.history.activeId === id) this.observeMessageScroll(offset, state);
+    })
+    .onAreaChange((_old: Area, area: Area) => {
+      if (this.history.activeId !== id) return;
+      const height = Number(area.height);
+      if (height !== this.listViewportHeight) {
+        this.listViewportHeight = height;
+        if (!this.editId && this.followLatest && this.laterCount === 0) this.scrollToLatest();
+      }
+    })
+    .padding({ left: 20, right: 20, bottom: 16 })
+  }
+
+  @Builder
   private chatPage() {
     Column() {
       if (this.wide() && (this.history.activeId !== null || this.settings.desktopSidebarCollapsed)) {
@@ -5648,40 +5721,9 @@ struct NativeChat {
           this.welcome()
         }
       } else {
-        List({ scroller: this.scroller }) {
-          if (this.earlierCount > 0) {
-            ListItem() { this.messagePager(true) }
-          }
-          LazyForEach(this.messageList, (row: NativeMessageRow) => {
-            ListItem() {
-              if (row.message.role === 'user') {
-                this.userMessage(row.message, row.index)
-              } else {
-                NativeAssistantMessageRow({
-                  row,
-                  content: (message: () => NativeConversationMessage, index: number): void => {
-                    this.assistantMessage(message, index)
-                  },
-                })
-              }
-            }
-          }, (row: NativeMessageRow): string => row.key.toString())
-          if (this.laterCount > 0) {
-            ListItem() { this.messagePager(false) }
-          }
-        }
-        .width('100%').constraintSize({ maxWidth: this.viewportWidth >= 1024 ? 792 : 680 })
-        .layoutWeight(1).scrollBar(BarState.Auto)
-        .cachedCount(4).onScrollIndex((start: number) => { this.firstVisibleRow = start; })
-        .onDidScroll((offset: number, state: ScrollState) => { this.observeMessageScroll(offset, state); })
-        .onAreaChange((_old: Area, area: Area) => {
-          const height = Number(area.height);
-          if (height !== this.listViewportHeight) {
-            this.listViewportHeight = height;
-            if (!this.editId && this.followLatest && this.laterCount === 0) this.scrollToLatest();
-          }
-        })
-        .padding({ left: 20, right: 20, bottom: 16 })
+        ForEach([this.history.activeId ?? ''], (id: string) => {
+          this.transcriptList(id)
+        }, (id: string): string => id)
       }
       if (this.loaded && this.status) {
         Text(this.status).fontSize(this.appFontSize(13)).fontColor($r('app.color.native_chat_error'))
