@@ -156,16 +156,25 @@ const replaceExtension = (name: string, ext: string) => {
   return dot > 0 ? `${name.slice(0, dot)}.${ext}` : `${name}.${ext}`
 }
 
-/** 将 BMP / AVIF / HEIC 等非标准格式图片经 Canvas 转为 JPEG/PNG 后上传；失败时回退原文件。 */
+/** 服务端视觉模型单边最大像素上限 */
+const MAX_IMAGE_DIMENSION = 4096
+
+/**
+ * 上传前规范化图片：
+ * - BMP / AVIF / HEIC 等非标准格式经 Canvas 转为 JPEG；
+ * - 任意宽或高超过 4096px 的长图（如手机长截图）等比缩放至 4096px 以内，避免服务端报 too large to process；
+ * - 标准格式且尺寸合规的图片原样上传，无损保留。
+ */
 const normalizeImageForUpload = async (file: Blob, name: string): Promise<File> => {
   const sniffed = await sniffApiSupportedImageMime(file)
-  if (sniffed && API_SUPPORTED_IMAGE_TYPES.has(sniffed)) {
-    return file instanceof File && file.type === sniffed
+  const formatSupported = Boolean(sniffed && API_SUPPORTED_IMAGE_TYPES.has(sniffed))
+  const fallbackFile = () =>
+    file instanceof File && (!sniffed || file.type === sniffed)
       ? file
-      : new File([file], name, { type: sniffed })
-  }
+      : new File([file], name, { type: sniffed || file.type })
+
   if (typeof document === 'undefined' || typeof URL === 'undefined') {
-    return file instanceof File ? file : new File([file], name, { type: file.type })
+    return fallbackFile()
   }
   const objectUrl = URL.createObjectURL(file)
   try {
@@ -178,16 +187,23 @@ const normalizeImageForUpload = async (file: Blob, name: string): Promise<File> 
     const width = img.naturalWidth || img.width
     const height = img.naturalHeight || img.height
     if (!width || !height) {
-      return file instanceof File ? file : new File([file], name, { type: file.type })
+      return fallbackFile()
     }
+    const needsResize = width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION
+    if (formatSupported && !needsResize) {
+      return fallbackFile()
+    }
+    const scale = needsResize ? MAX_IMAGE_DIMENSION / Math.max(width, height) : 1
+    const targetW = Math.max(1, Math.floor(width * scale))
+    const targetH = Math.max(1, Math.floor(height * scale))
     const canvas = document.createElement('canvas')
-    canvas.width = width
-    canvas.height = height
+    canvas.width = targetW
+    canvas.height = targetH
     const ctx = canvas.getContext('2d')
     if (!ctx) {
-      return file instanceof File ? file : new File([file], name, { type: file.type })
+      return fallbackFile()
     }
-    ctx.drawImage(img, 0, 0)
+    ctx.drawImage(img, 0, 0, targetW, targetH)
     const converted = await new Promise<Blob | null>((resolve) => {
       canvas.toBlob(resolve, 'image/jpeg', 0.92)
     })
@@ -199,7 +215,7 @@ const normalizeImageForUpload = async (file: Blob, name: string): Promise<File> 
   } finally {
     URL.revokeObjectURL(objectUrl)
   }
-  return file instanceof File ? file : new File([file], name, { type: file.type })
+  return fallbackFile()
 }
 
 /** 排队上传，最多同时上传 MAX_CONCURRENT 个；排队期间中止的任务不会发出请求 */

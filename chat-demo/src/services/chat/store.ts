@@ -70,9 +70,9 @@ const is32kInputLimitError = (error: unknown): boolean =>
   error instanceof ApiError &&
   /user input too long.*exceeds max 32768 tokens/i.test(error.message)
 
-/** 被服务端判定为不支持/已损坏的历史图片 file_id；同会话后续轮次直接跳过，避免整段对话死锁。 */
+/** 被服务端判定为不支持/已损坏/超尺寸的历史图片 file_id；同会话后续轮次直接跳过，避免整段对话死锁。 */
 const rejectedHistoryImageIds = new Set<string>()
-const MAX_SKIPPED_BAD_IMAGES = 10
+const MAX_SKIPPED_BAD_IMAGES = 40
 
 const parseUnsupportedImageError = (
   error: unknown
@@ -80,7 +80,10 @@ const parseUnsupportedImageError = (
   if (!(error instanceof ApiError)) {
     return null
   }
-  const match = /messages\.(\d+)\.content\.(\d+):.*unsupported image/i.exec(error.message)
+  const match =
+    /messages\.(\d+)\.content\.(\d+):.*(?:unsupported image|invalid image|image is too large|too large to process)/i.exec(
+      error.message
+    )
   if (!match) {
     return null
   }
