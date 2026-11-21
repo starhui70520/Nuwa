@@ -1,6 +1,7 @@
 import { LengthMetrics } from '@kit.ArkUI';
 import { NativeApiProtocol } from './NativeSettings';
 import { allowsKeylessNativeApi, NativeApiCredential, verifyNativeApiCredential } from './NativeApiCredential';
+import { NATIVE_CARD_CLICK_EFFECT, triggerNativeHaptic } from './NativeImmersiveUI';
 import { NativeLocale } from './NativeLocation';
 
 export type NativeOnboardingView = 'home' | 'deepseek-key' | 'third-party';
@@ -112,7 +113,11 @@ export struct NativeOnboarding {
       .fontColor(primary ? Color.White : $r('app.color.native_chat_primary'))
       .backgroundColor(primary ? $r('app.color.native_chat_blue') : $r('app.color.native_chat_bg'))
       .border({ width: 1, color: primary ? $r('app.color.native_chat_blue') : $r('app.color.native_chat_stroke') })
-      .enabled(enabled()).onClick(click)
+      .clickEffect(NATIVE_CARD_CLICK_EFFECT).hoverEffect(HoverEffect.Highlight)
+      .enabled(enabled()).onClick(() => {
+        triggerNativeHaptic('light');
+        click();
+      })
   }
 
   @Builder

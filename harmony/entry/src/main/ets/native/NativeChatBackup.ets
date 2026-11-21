@@ -1709,6 +1709,11 @@ export class NativeChatBackup {
     });
   }
 
+  async exportSessionToPath(context: common.UIAbilityContext, session: NativeConversation,
+    path: string, locale: NativeLocale = 'zh-CN'): Promise<void> {
+    await this.writeArchive(context, path, [session], locale);
+  }
+
   async exportToPicker(context: common.UIAbilityContext, sessions: NativeConversation[],
     locale: NativeLocale = 'zh-CN'): Promise<boolean> {
     const options = new picker.DocumentSaveOptions();

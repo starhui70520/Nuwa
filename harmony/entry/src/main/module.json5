@@ -11,12 +11,21 @@
     "deliveryWithInstall": true,
     "installationFree": false,
     "pages": "$profile:main_pages",
+    "metadata": [
+      {
+        "name": "ohos.arkui.UIMaterial.state",
+        "value": "enable"
+      }
+    ],
     "requestPermissions": [
       {
         "name": "ohos.permission.INTERNET"
       },
       {
         "name": "ohos.permission.KEEP_BACKGROUND_RUNNING"
+      },
+      {
+        "name": "ohos.permission.VIBRATE"
       },
       {
         "name": "ohos.permission.MICROPHONE",
@@ -36,7 +45,12 @@
         "label": "$string:EntryAbility_label",
         "startWindowIcon": "$media:icon",
         "startWindowBackground": "$color:start_window_background",
+        "launchType": "singleton",
         "exported": true,
+        "continuable": true,
+        "continueType": [
+          "nuwa_chat_continue"
+        ],
         "backgroundModes": ["audioPlayback"],
         "skills": [
           {
@@ -45,6 +59,78 @@
             ],
             "actions": [
               "action.system.home"
+            ]
+          },
+          {
+            "actions": [
+              "ohos.want.action.sendData"
+            ],
+            "uris": [
+              {
+                "type": "text/plain"
+              },
+              {
+                "scheme": "https",
+                "utd": "general.hyperlink",
+                "maxFileSupported": 1
+              },
+              {
+                "scheme": "http",
+                "utd": "general.hyperlink",
+                "maxFileSupported": 1
+              },
+              {
+                "scheme": "file",
+                "utd": "com.rankchord.nuwa.session",
+                "maxFileSupported": 1
+              },
+              {
+                "scheme": "file",
+                "utd": "general.zip-archive",
+                "maxFileSupported": 1
+              },
+              {
+                "scheme": "file",
+                "utd": "general.image",
+                "maxFileSupported": 20
+              },
+              {
+                "scheme": "file",
+                "utd": "general.file",
+                "maxFileSupported": 10
+              }
+            ]
+          },
+          {
+            "actions": [
+              "ohos.want.action.viewData"
+            ],
+            "uris": [
+              {
+                "scheme": "file",
+                "utd": "com.rankchord.nuwa.session",
+                "linkFeature": "FileOpen"
+              },
+              {
+                "scheme": "file",
+                "utd": "general.zip-archive",
+                "linkFeature": "FileOpen"
+              },
+              {
+                "scheme": "file",
+                "utd": "general.image",
+                "linkFeature": "FileOpen"
+              },
+              {
+                "scheme": "file",
+                "utd": "general.plain-text",
+                "linkFeature": "FileOpen"
+              },
+              {
+                "scheme": "file",
+                "utd": "general.file",
+                "linkFeature": "FileOpen"
+              }
             ]
           }
         ]
