@@ -4842,10 +4842,10 @@ struct NativeChat {
     this.credentialField(() => this.label('API 地址 (Base URL)', 'API Base URL'), () => this.settingsBase,
       () => this.label('例如 https://api.deepseek.com 或 https://api.openai.com/v1',
         'e.g. https://api.deepseek.com or https://api.openai.com/v1'),
-      (value: string) => { this.settingsBase = value; this.settingsError = ''; })
+      InputType.URL, (value: string) => { this.settingsBase = value; this.settingsError = ''; })
     this.credentialField(() => this.label('模型名称', 'Model Name'), () => this.settingsModel,
       () => this.label('例如 deepseek-chat、deepseek-reasoner、gpt-4o', 'e.g. deepseek-chat, deepseek-reasoner, gpt-4o'),
-      (value: string) => { this.settingsModel = value; this.settingsError = ''; })
+      InputType.Normal, (value: string) => { this.settingsModel = value; this.settingsError = ''; })
     this.apiKeySettings()
     if (!this.wide() && this.canVerifySettings()) {
       Button(this.settingsVerifying ? this.label('正在验证...', 'Verifying...') : this.label('确定', 'Confirm'))
@@ -4856,11 +4856,13 @@ struct NativeChat {
   }
 
   @Builder
-  private credentialField(title: () => string, value: () => string, placeholder: () => string, change: (text: string) => void) {
+  private credentialField(title: () => string, value: () => string, placeholder: () => string, input: InputType,
+    change: (text: string) => void) {
     Column({ space: 8 }) {
       Text(title()).width('100%').fontSize(this.appFontSize(14)).fontWeight(FontWeight.Medium)
         .fontColor($r('app.color.native_chat_primary'))
-      TextInput({ text: value(), placeholder: placeholder() }).width('100%').height(42).fontSize(this.appFontSize(14))
+      TextInput({ text: value(), placeholder: placeholder() }).type(input).width('100%').height(42)
+        .fontSize(this.appFontSize(14))
         .backgroundColor($r('app.color.native_chat_field')).fontColor($r('app.color.native_chat_primary'))
         .placeholderColor($r('app.color.native_chat_caption')).enabled(!this.settingsVerifying)
         .onChange(change).onBlur(() => { this.commitSettingsModel(); })

@@ -155,7 +155,7 @@ export struct NativeOnboarding {
         .width('100%').padding({ left: 6 })
         this.field(() => this.text('API 地址 (Base URL)', 'API Base URL'), () => this.baseUrl,
           () => this.text('例如 https://api.deepseek.com 或 https://api.openai.com/v1',
-            'e.g. https://api.deepseek.com or https://api.openai.com/v1'), InputType.Normal,
+            'e.g. https://api.deepseek.com or https://api.openai.com/v1'), InputType.URL,
           (value: string) => { this.baseUrl = value; })
         this.field(() => this.text('模型名称', 'Model Name'), () => this.model,
           () => this.text('例如 deepseek-chat、deepseek-reasoner、gpt-4o',
