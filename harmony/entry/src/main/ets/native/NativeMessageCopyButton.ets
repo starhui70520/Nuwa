@@ -1,5 +1,6 @@
 import { pasteboard } from '@kit.BasicServicesKit';
 import { nativeIconTint } from './NativeIconTint';
+import { NATIVE_ICON_CLICK_EFFECT, triggerNativeHaptic } from './NativeImmersiveUI';
 
 const COPY_FEEDBACK_MS = 1000;
 const CODE_COPY_FEEDBACK_MS = 1500;
@@ -49,6 +50,7 @@ export struct NativeMessageCopyButton {
       if (writeId !== this.writeId || (this.codeBlock && text !== this.text)) return;
       if (this.feedbackTimer >= 0) clearTimeout(this.feedbackTimer);
       this.copied = true;
+      triggerNativeHaptic('success');
       this.feedbackTimer = setTimeout((): void => {
         this.feedbackTimer = -1;
         this.copied = false;
@@ -85,6 +87,7 @@ export struct NativeMessageCopyButton {
         this.copyIcon(16, $r('app.color.native_chat_action'))
       }
       .width(28).height(28).padding(0).backgroundColor(Color.Transparent)
+      .clickEffect(NATIVE_ICON_CLICK_EFFECT)
       .accessibilityText(this.copyLabel())
       .onClick(() => { void this.copy(); })
     }

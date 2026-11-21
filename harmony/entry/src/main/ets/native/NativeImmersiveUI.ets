@@ -234,25 +234,53 @@ export class ImmersiveSurfaceModifier implements AttributeModifier<CommonAttribu
   }
 }
 
-export type NativeHapticStyle = 'light' | 'medium' | 'selection';
+export type NativeHapticStyle = 'light' | 'medium' | 'selection' | 'success' | 'warning';
+
+let nativeHapticEnabled: boolean = true;
+
+export function setNativeHapticEnabled(enabled: boolean): void {
+  nativeHapticEnabled = enabled;
+}
+
+export function isNativeHapticEnabled(): boolean {
+  return nativeHapticEnabled;
+}
+
+function resolveHapticCandidates(style: NativeHapticStyle): string[] {
+  switch (style) {
+    case 'medium':
+      return ['haptic.effect.hard', 'haptic.effect.soft'];
+    case 'selection':
+      return ['haptic.effect.sharp', 'haptic.clock.timer', 'haptic.effect.soft'];
+    case 'success':
+      return ['haptic.notice.success', 'haptic.effect.soft'];
+    case 'warning':
+      return ['haptic.notice.warning', 'haptic.effect.hard', 'haptic.effect.soft'];
+    default:
+      return ['haptic.effect.soft'];
+  }
+}
 
 /** Subtle system haptic feedback matching HarmonyOS native touch feel. */
 export function triggerNativeHaptic(style: NativeHapticStyle = 'light'): void {
+  if (!nativeHapticEnabled) {
+    return;
+  }
   try {
-    const effectId = style === 'medium'
-      ? 'haptic.effect.hard'
-      : style === 'selection'
-        ? 'haptic.clock.timer'
-        : 'haptic.effect.soft';
-    if (vibrator.isSupportEffectSync(effectId)) {
-      void vibrator.startVibration(
-        { type: 'preset', effectId: effectId, count: 1 },
-        { id: 0, usage: 'touch' }
-      ).catch(() => {});
-      return;
+    const candidates = resolveHapticCandidates(style);
+    for (let i = 0; i < candidates.length; i++) {
+      const effectId = candidates[i];
+      if (vibrator.isSupportEffectSync(effectId)) {
+        void vibrator.startVibration(
+          { type: 'preset', effectId: effectId, count: 1 },
+          { id: 0, usage: 'touch' }
+        ).catch(() => {});
+        return;
+      }
     }
+    const duration = style === 'warning' ? 18 : style === 'medium' ? 14 : style === 'success' ? 10 : 7;
     void vibrator.startVibration(
-      { type: 'time', duration: style === 'medium' ? 16 : 8 },
+      { type: 'time', duration },
       { id: 0, usage: 'touch' }
     ).catch(() => {});
   } catch {

@@ -21,7 +21,7 @@ import {
   ImmersiveComposerModifier, ImmersiveGlassCapsuleModifier, ImmersiveGlassControlModifier, ImmersiveSurfaceModifier,
   isImmersiveMaterialAvailable, NATIVE_CARD_CLICK_EFFECT, NATIVE_ICON_CLICK_EFFECT, NATIVE_PILL_CLICK_EFFECT,
   nativeActionButtonTransition, nativeDialogTransition, nativeDrawerSpringCurve, nativeFloatingBarTransition,
-  nativeSheetSpringCurve, nativeSideSheetTransition, nativeSpringCurve, triggerNativeHaptic,
+  nativeSheetSpringCurve, nativeSideSheetTransition, nativeSpringCurve, setNativeHapticEnabled, triggerNativeHaptic,
 } from '../native/NativeImmersiveUI';
 import {
   NativeIncomingSharePayload, NativeProximityShareCoordinator, NUWA_INCOMING_SHARE_SEQ_KEY,
@@ -222,7 +222,7 @@ struct NativeChat {
     credentialDraft: null,
     signedOut: false,
     theme: 'system', chatFontSize: 16, attachmentBinding: '', thinking: false, search: false, ttsMuted: true,
-    speechEngine: 'auto', speechVoice: 'stella', migrationPromptHandled: false,
+    speechEngine: 'auto', speechVoice: 'stella', hapticFeedback: true, migrationPromptHandled: false,
     desktopSidebarCollapsed: false,
     locale: defaultNativeLocale(), location: null,
   };
@@ -730,6 +730,7 @@ struct NativeChat {
       this.loaded = true;
       this.trimConversationCache();
       this.applyTheme();
+      setNativeHapticEnabled(this.settings.hapticFeedback);
       this.scrollToLatest();
       this.syncContinuationState();
       void this.consumeContinuation();
@@ -881,6 +882,7 @@ struct NativeChat {
       ttsMuted: this.settings.ttsMuted, authMode: this.settings.authMode,
       signedOut: this.settings.signedOut,
       speechEngine: this.settings.speechEngine, speechVoice: this.settings.speechVoice,
+      hapticFeedback: this.settings.hapticFeedback,
       migrationPromptHandled: this.settings.migrationPromptHandled,
       desktopSidebarCollapsed: this.settings.desktopSidebarCollapsed,
       theme: this.settings.theme, chatFontSize: this.settings.chatFontSize,
@@ -3355,16 +3357,25 @@ struct NativeChat {
       Row() {
         Row() {
           this.iconButton($r('app.media.native_menu'), this.label('展开侧边栏', "Open sidebar"),
-            () => { this.setDrawer(true); }, this.compact() ? 30 : 42)
+            () => {
+              triggerNativeHaptic('light');
+              this.setDrawer(true);
+            }, this.compact() ? 30 : 42)
         }
         .borderRadius(999)
         .attributeModifier(this.headerCapsuleModifier)
         Blank().layoutWeight(1)
         Row({ space: 2 }) {
           this.iconButton(this.settings.ttsMuted && !this.readingId ? $r('app.media.native_muted') : $r('app.media.native_speaker'),
-            this.speakerAccessibilityLabel(), () => { this.toggleSpeaker(); }, this.compact() ? 26 : 36)
+            this.speakerAccessibilityLabel(), () => {
+              triggerNativeHaptic('selection');
+              this.toggleSpeaker();
+            }, this.compact() ? 26 : 36)
           this.iconButton($r('app.media.native_new_chat'), this.label('开启新对话', "New chat"),
-            () => { this.activate(null); }, this.compact() ? 26 : 36)
+            () => {
+              triggerNativeHaptic('light');
+              this.activate(null);
+            }, this.compact() ? 26 : 36)
         }
         .height(this.compact() ? 30 : 42).padding({ left: 4, right: 4 })
         .borderRadius(999)
@@ -4180,8 +4191,10 @@ struct NativeChat {
             $r('app.media.native_chevron_down')).width(14).height(14).colorFilter(nativeIconTint($r('app.color.native_chat_secondary')))
         }
       }
-      .height(34).padding(0).backgroundColor(Color.Transparent)
+      .height(34).padding({ left: 6, right: 6 }).margin({ left: -6 }).borderRadius(10)
+      .backgroundColor(Color.Transparent).clickEffect(NATIVE_PILL_CLICK_EFFECT)
       .onClick(() => {
+        triggerNativeHaptic('selection');
         const id = message().id;
         this.collapsedThoughts = this.collapsedThoughts.includes(id) ?
           this.collapsedThoughts.filter((messageId: string): boolean => messageId !== id) : [...this.collapsedThoughts, id];
@@ -4315,11 +4328,18 @@ struct NativeChat {
             }
           }
           .id(`nuwa-read-aloud-${message.id}`).width(28).height(28).padding(0).backgroundColor(Color.Transparent)
+          .clickEffect(NATIVE_ICON_CLICK_EFFECT)
           .accessibilityText(this.readingId === message.id ? this.label('停止朗读', 'Stop reading') :
             this.label('朗读', 'Read aloud'))
-          .onClick(() => { this.readMessage(message); })
+          .onClick(() => {
+            triggerNativeHaptic('selection');
+            this.readMessage(message);
+          })
         }
-        this.iconButton($r('app.media.native_retry'), this.label('重新生成', 'Regenerate'), () => { this.retry(message); },
+        this.iconButton($r('app.media.native_retry'), this.label('重新生成', 'Regenerate'), () => {
+          triggerNativeHaptic('light');
+          this.retry(message);
+        },
           28, 16, $r('app.color.native_chat_action'), Color.Transparent,
           () => this.canChangeVersion() && message.stopReason !== 'refusal')
       }
@@ -4329,7 +4349,11 @@ struct NativeChat {
         Blank().layoutWeight(1)
         Button(this.label('继续生成', 'Continue'), { type: ButtonType.Capsule, buttonStyle: ButtonStyleMode.TEXTUAL })
           .height(28).fontSize(this.appFontSize(13)).border({ width: 1, color: $r('app.color.native_chat_stroke') })
-          .enabled(this.canChangeVersion()).onClick(() => { this.continueReply(message); })
+          .clickEffect(NATIVE_PILL_CLICK_EFFECT)
+          .enabled(this.canChangeVersion()).onClick(() => {
+            triggerNativeHaptic('light');
+            this.continueReply(message);
+          })
       }
     }
     .width('100%').offset({ x: -6 }).padding({ top: 12, bottom: 10 })
@@ -4348,6 +4372,7 @@ struct NativeChat {
 
   private returnToSettings(): void {
     if (this.signingOut || this.deletingSessions) return;
+    triggerNativeHaptic('light');
     if (this.settingsSection === 'account') this.finishCredentialSettings();
     this.getUIContext().animateTo({ curve: nativeSpringCurve(0.28, 0.88) }, () => {
       this.settingsSection = 'root';
@@ -4356,6 +4381,7 @@ struct NativeChat {
 
   private closeSettings(): void {
     if (this.signingOut || this.deletingSessions) return;
+    triggerNativeHaptic('light');
     if (this.settingsSection === 'account') this.finishCredentialSettings();
     this.settingsVisible = false;
   }
@@ -4567,6 +4593,7 @@ struct NativeChat {
       this.settings.authMode = 'deepseek-account';
     }
     this.applyTheme();
+    setNativeHapticEnabled(this.settings.hapticFeedback);
     this.refreshSidebarHistory();
     void this.refreshBalance();
   }
@@ -5290,7 +5317,10 @@ struct NativeChat {
       }
       .width('100%').constraintSize({ minHeight: 50 }).padding({ left: 16, right: 16, top: 8, bottom: 8 })
     }
-    .width('100%').padding(0).borderRadius(0).backgroundColor(Color.Transparent).enabled(enabled()).onClick(click)
+    .width('100%').padding(0).borderRadius(0).backgroundColor(Color.Transparent).enabled(enabled()).onClick(() => {
+      triggerNativeHaptic('light');
+      click();
+    })
   }
 
   private setLocation(location: NativeUserLocation | null): void {
@@ -5382,6 +5412,7 @@ struct NativeChat {
           .value(this.settings.locale === 'en-US' ? 'English' : '简体中文')
           .accessibilityText(this.label('语言', 'Language'))
           .onSelect((index: number) => {
+            triggerNativeHaptic('selection');
             this.settings.locale = index === 1 ? 'en-US' : 'zh-CN';
             void this.refreshBalance(true);
             void this.saveSettings('locale');
@@ -5400,6 +5431,7 @@ struct NativeChat {
           .value(this.settings.theme === 'dark' ? this.label('深色', "Dark") : this.settings.theme === 'light' ? this.label('浅色', "Light") : this.label('系统', "System"))
           .accessibilityText(this.label('外观', 'Theme'))
           .onSelect((index: number) => {
+            triggerNativeHaptic('selection');
             this.settings.theme = index === 2 ? 'dark' : index === 1 ? 'light' : 'system';
             this.applyTheme();
             void this.saveSettings();
@@ -5419,7 +5451,31 @@ struct NativeChat {
           .value(this.settings.chatFontSize === 16 ? this.label('16px（默认）', "16px (default)") : `${this.settings.chatFontSize}px`)
           .accessibilityText(this.label('字体大小', 'Font size'))
           .onSelect((index: number) => {
+            triggerNativeHaptic('selection');
             this.settings.chatFontSize = NATIVE_CHAT_FONT_SIZES[index] ?? 16;
+            void this.saveSettings();
+          })
+      }
+      .width('100%').constraintSize({ minHeight: 50 }).padding({ left: 16, right: 16, top: 4, bottom: 4 })
+      Divider().color($r('app.color.native_chat_stroke'))
+      Row({ space: 12 }) {
+        SymbolGlyph($r('sys.symbol.rectangle_portrait_wave_2'))
+          .fontSize(20).fontWeight(FontWeight.Regular)
+          .fontColor([$r('app.color.native_chat_primary')])
+          .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+          .width(20).height(20).accessibilityLevel('no')
+        Text(this.label('触感反馈', 'Haptic feedback'))
+          .layoutWeight(1).fontSize(this.appFontSize(15)).fontColor($r('app.color.native_chat_primary'))
+        Toggle({ type: ToggleType.Switch, isOn: this.settings.hapticFeedback })
+          .selectedColor($r('app.color.native_chat_blue'))
+          .accessibilityText(this.label('触感反馈', 'Haptic feedback'))
+          .onChange((isOn: boolean) => {
+            if (this.settings.hapticFeedback === isOn) return;
+            this.settings.hapticFeedback = isOn;
+            setNativeHapticEnabled(isOn);
+            if (isOn) {
+              triggerNativeHaptic('selection');
+            }
             void this.saveSettings();
           })
       }
@@ -5480,7 +5536,10 @@ struct NativeChat {
       .width('100%').constraintSize({ minHeight: 50 }).padding({ left: 16, right: 16, top: 8, bottom: 8 })
     }
     .width('100%').borderRadius(16).padding(0).backgroundColor($r('app.color.native_chat_surface'))
-    .enabled(!this.signingOut).onClick(() => { void this.signOutAll(); })
+    .enabled(!this.signingOut).onClick(() => {
+      triggerNativeHaptic('warning');
+      void this.signOutAll();
+    })
   }
 
   @Builder
@@ -6046,13 +6105,17 @@ struct NativeChat {
         }
         .height('100%').layoutWeight(1).focusable(true)
         .onClick(() => {
+          triggerNativeHaptic('selection');
           if (this.selecting) {
             this.toggleSelected(session.id);
           } else {
             this.activate(session.id);
           }
         })
-        .priorityGesture(LongPressGesture({ duration: 450 }).onAction(() => { this.beginSidebarSelection(session.id); }))
+        .priorityGesture(LongPressGesture({ duration: 450 }).onAction(() => {
+          triggerNativeHaptic('medium');
+          this.beginSidebarSelection(session.id);
+        }))
         if (!this.selecting) {
           this.sidebarMenuTrigger(session, this.sidebarMenuAnchorInset())
         }
@@ -6092,9 +6155,13 @@ struct NativeChat {
         Text(title()).fontSize(this.appFontSize(15)).fontWeight(FontWeight.Medium).fontColor(color)
       }
     }
-    .height(44).layoutWeight(1).padding({ left: 12, right: 12 }).borderRadius(12)
+    .height(40).layoutWeight(1).margin(2).padding({ left: 12, right: 12 }).borderRadius(14)
     .backgroundColor(Color.Transparent).opacity(enabled() ? 1 : 0.38)
-    .enabled(enabled()).accessibilityText(title()).onClick(action)
+    .clickEffect(NATIVE_PILL_CLICK_EFFECT)
+    .enabled(enabled()).accessibilityText(title()).onClick(() => {
+      triggerNativeHaptic('light');
+      action();
+    })
   }
 
   @Builder
@@ -6157,7 +6224,10 @@ struct NativeChat {
         }
         .width('100%').height(40).margin({ bottom: 8 }).backgroundColor($r('app.color.native_chat_selected'))
         .clickEffect(NATIVE_PILL_CLICK_EFFECT)
-        .onClick(() => { this.activate(null); })
+        .onClick(() => {
+          triggerNativeHaptic('light');
+          this.activate(null);
+        })
       }
       Stack({ alignContent: Alignment.Bottom }) {
         Navigation(this.drawerNavStack) {
@@ -6241,43 +6311,49 @@ struct NativeChat {
           .borderRadius(16).attributeModifier(this.glassControlModifier)
         } else {
           Row({ space: 8 }) {
-            Button({ type: ButtonType.Normal }) {
-              Row({ space: 10 }) {
-                Image($r('app.media.native_welcome_logo')).width(32).height(32).borderRadius(16)
-                  .draggable(false).accessibilityLevel('no')
-                Text(this.sidebarProfileName()).fontSize(this.appFontSize(14)).fontWeight(FontWeight.Medium)
-                  .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).fontColor($r('app.color.native_chat_primary'))
-              }
+            Row({ space: 10 }) {
+              Image($r('app.media.native_welcome_logo')).width(32).height(32).borderRadius(16)
+                .draggable(false).accessibilityLevel('no')
+              Text(this.sidebarProfileName()).fontSize(this.appFontSize(14)).fontWeight(FontWeight.Medium)
+                .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).fontColor($r('app.color.native_chat_primary'))
+                .flexShrink(1)
             }
-            .height(48).flexShrink(1).padding(0).backgroundColor(Color.Transparent)
-            .accessibilityDescription(this.label('打开设置', 'Open settings'))
-            .onClick(() => { this.openSidebarSettings(); })
+            .flexShrink(1).alignItems(VerticalAlign.Center)
 
             if (this.balance) {
-              Button({ type: ButtonType.Normal }) {
+              Button({ type: ButtonType.Capsule }) {
                 Text(this.balance.formatted).fontSize(this.appFontSize(12)).fontWeight(FontWeight.Medium)
-                  .maxLines(1).lineHeight(this.appFontSize(18)).padding({ left: 7, right: 7, top: 1, bottom: 1 })
-                  .borderRadius(999).fontColor(this.lowBalance() ? $r('app.color.native_settings_balance_low') :
+                  .maxLines(1).lineHeight(this.appFontSize(18))
+                  .fontColor(this.lowBalance() ? $r('app.color.native_settings_balance_low') :
                     $r('app.color.native_settings_balance'))
-                  .backgroundColor(this.lowBalance() ? $r('app.color.native_settings_balance_low_bg') :
-                    $r('app.color.native_settings_balance_bg'))
               }
-              .height(48).padding(0).backgroundColor(Color.Transparent)
+              .height(24).padding({ left: 8, right: 8 })
+              .backgroundColor(this.lowBalance() ? $r('app.color.native_settings_balance_low_bg') :
+                $r('app.color.native_settings_balance_bg'))
+              .clickEffect(NATIVE_PILL_CLICK_EFFECT)
               .accessibilityText(this.label(`账户余额：${this.balance.formatted}（点击充值）`,
                 `Account balance: ${this.balance.formatted} (tap to top up)`))
-              .onClick(() => { void this.openLink('https://platform.deepseek.com/top_up'); })
+              .onClick(() => {
+                triggerNativeHaptic('light');
+                void this.openLink('https://platform.deepseek.com/top_up');
+              })
             }
 
-            Row() {
-              Text('⋯').fontSize(18).fontColor($r('app.color.native_chat_action'))
-            }
-            .height(48).constraintSize({ minWidth: 16 }).justifyContent(FlexAlign.End).flexGrow(1)
-            .focusable(false).accessibilityLevel('no-hide-descendants')
-            .onClick(() => { this.openSidebarSettings(); })
+            Blank()
+
+            Text('⋯').fontSize(18).fontColor($r('app.color.native_chat_action'))
+              .padding({ left: 4 }).accessibilityLevel('no')
           }
           .height(50).width('100%').padding({ left: 12, right: 12 }).margin({ bottom: 4 })
           .borderRadius(16).attributeModifier(this.glassControlModifier)
           .clickEffect(NATIVE_CARD_CLICK_EFFECT)
+          .focusable(true)
+          .accessibilityText(this.sidebarProfileName())
+          .accessibilityDescription(this.label('打开设置', 'Open settings'))
+          .onClick(() => {
+            triggerNativeHaptic('light');
+            this.openSidebarSettings();
+          })
         }
       }
       .layoutWeight(1).width('100%')

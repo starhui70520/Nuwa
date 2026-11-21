@@ -68,6 +68,7 @@ export async function migrateNativeLegacyPreferences(context: common.UIAbilityCo
     ttsMuted: current.ttsMuted,
     speechEngine: current.speechEngine,
     speechVoice: current.speechVoice,
+    hapticFeedback: current.hapticFeedback,
     migrationPromptHandled: current.migrationPromptHandled,
     desktopSidebarCollapsed: current.desktopSidebarCollapsed,
   };

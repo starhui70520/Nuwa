@@ -37,6 +37,7 @@ export interface NativeSettings {
   ttsMuted: boolean;
   speechEngine: HarmonySpeechEngine;
   speechVoice: HarmonySpeechVoice;
+  hapticFeedback: boolean;
   migrationPromptHandled: boolean;
   desktopSidebarCollapsed: boolean;
 }
@@ -167,6 +168,7 @@ export class NativeSettingsController {
     const ttsMuted = await store.get('ttsMuted', true) as boolean;
     const speechEngine = await store.get('speechEngine', 'auto') as string;
     const speechVoice = await store.get('speechVoice', 'stella') as string;
+    const hapticFeedback = await store.get('hapticFeedback', true) as boolean;
     const migrationPromptHandled = await store.get('migrationPromptHandled', false) as boolean;
     const desktopSidebarCollapsed = await store.get('desktopSidebarCollapsed', false) as boolean;
     const credentialDraft = signedOut ? null : parseCredentialDraft(await store.get('credentialDraft', '') as string);
@@ -191,6 +193,7 @@ export class NativeSettingsController {
       ttsMuted,
       speechEngine: speechEngine === 'native' || speechEngine === 'cloud' ? speechEngine : 'auto',
       speechVoice: speechVoice === 'tide' ? 'tide' : 'stella',
+      hapticFeedback,
       migrationPromptHandled,
       desktopSidebarCollapsed,
     };
@@ -254,6 +257,7 @@ export class NativeSettingsController {
           store.put('ttsMuted', settings.ttsMuted),
           store.put('speechEngine', settings.speechEngine),
           store.put('speechVoice', settings.speechVoice),
+          store.put('hapticFeedback', settings.hapticFeedback),
           store.put('migrationPromptHandled', settings.migrationPromptHandled),
           store.put('desktopSidebarCollapsed', settings.desktopSidebarCollapsed),
         ];
