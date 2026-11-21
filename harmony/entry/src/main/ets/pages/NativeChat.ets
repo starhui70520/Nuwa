@@ -651,7 +651,8 @@ struct NativeChat {
     this.status = '';
     try {
       const context = this.host();
-      this.history = await this.storage.loadConversations(context);
+      // Start a fresh chat on cold launch. Drafts are restored by session when opened.
+      this.history = selectConversation(await this.storage.loadConversations(context), null);
       try {
         this.settings = await this.settingsStore.load(context);
         if (this.updateNotice) this.presentUpdate(this.updateNotice.update);
