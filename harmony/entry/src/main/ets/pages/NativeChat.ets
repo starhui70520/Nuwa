@@ -19,9 +19,9 @@ import {
 import { NUWA_MAIN_WINDOW_ID_KEY } from '../entryability/EntryAbility';
 import {
   ImmersiveComposerModifier, ImmersiveGlassCapsuleModifier, ImmersiveGlassControlModifier, ImmersiveSurfaceModifier,
-  isImmersiveMaterialAvailable, NATIVE_ICON_CLICK_EFFECT, NATIVE_PILL_CLICK_EFFECT, nativeDialogTransition,
-  nativeDrawerSpringCurve, nativeFloatingBarTransition, nativeSheetSpringCurve, nativeSideSheetTransition,
-  nativeSpringCurve, triggerNativeHaptic,
+  isImmersiveMaterialAvailable, NATIVE_CARD_CLICK_EFFECT, NATIVE_ICON_CLICK_EFFECT, NATIVE_PILL_CLICK_EFFECT,
+  nativeActionButtonTransition, nativeDialogTransition, nativeDrawerSpringCurve, nativeFloatingBarTransition,
+  nativeSheetSpringCurve, nativeSideSheetTransition, nativeSpringCurve, triggerNativeHaptic,
 } from '../native/NativeImmersiveUI';
 import {
   NativeIncomingSharePayload, NativeProximityShareCoordinator, NUWA_INCOMING_SHARE_SEQ_KEY,
@@ -413,6 +413,8 @@ struct NativeChat {
   @State private incomingChoice: NativeIncomingSharePayload | null = null;
   @State private composerHeight: number = 112;
   private readonly navPathStack: NavPathStack = new NavPathStack();
+  private readonly drawerNavStack: NavPathStack = new NavPathStack();
+  private readonly settingsNavStack: NavPathStack = new NavPathStack();
   private readonly headerCapsuleModifier = new ImmersiveGlassCapsuleModifier(true);
   private readonly glassControlModifier = new ImmersiveGlassControlModifier();
   private readonly composerElevatedModifier = new ImmersiveComposerModifier(true);
@@ -2003,7 +2005,15 @@ struct NativeChat {
 
   private updateDraftText(value: string): void {
     if (value === this.draft) return;
-    this.draft = value;
+    const wasSendable = this.draft.trim().length > 0 || this.draftFiles.length > 0;
+    const willBeSendable = value.trim().length > 0 || this.draftFiles.length > 0;
+    if (wasSendable !== willBeSendable) {
+      this.getUIContext().animateTo({ curve: nativeSpringCurve(0.26, 0.80) }, () => {
+        this.draft = value;
+      });
+    } else {
+      this.draft = value;
+    }
     this.scheduleDraftSave();
   }
 
@@ -3452,10 +3462,13 @@ struct NativeChat {
     .height(this.compact() ? 26 : 34).padding({ left: this.compact() ? 8 : 11, right: this.compact() ? 8 : 11 })
     .backgroundColor(active() ? $r('app.color.native_chat_selected') : Color.Transparent)
     .border({ width: 1, color: active() ? Color.Transparent : $r('app.color.native_chat_stroke') })
+    .animation({ curve: nativeSpringCurve(0.26, 0.82) })
     .clickEffect(NATIVE_PILL_CLICK_EFFECT)
     .accessibilityText(label()).accessibilitySelected(active()).onClick(() => {
       triggerNativeHaptic('selection');
-      change();
+      this.getUIContext().animateTo({ curve: nativeSpringCurve(0.26, 0.80) }, () => {
+        change();
+      });
     })
     .onHover((hovered: boolean): void => { this.hoverComposerToggle(toggle, hovered); })
     .bindPopup(this.composerTooltip === toggle, {
@@ -3741,12 +3754,14 @@ struct NativeChat {
             }
             .width(this.attachmentPreview(file.item) ? DRAFT_IMAGE_SIZE : NATIVE_DOCUMENT_CARD_WIDTH)
             .height(this.attachmentPreview(file.item) ? DRAFT_IMAGE_SIZE : NATIVE_DOCUMENT_CARD_HEIGHT)
+            .transition(nativeActionButtonTransition())
           }, (file: NativeDraftAttachment): string => `${file.item.id}:${file.state}`)
         }
         .padding({ left: 12, right: 12 })
       }
       .scrollable(ScrollDirection.Horizontal).width('100%').height(64).scrollBar(BarState.Off).align(Alignment.Start)
       .margin({ top: 12 })
+      .transition(nativeFloatingBarTransition())
     }
   }
 
@@ -3791,10 +3806,16 @@ struct NativeChat {
           return this.pasteComposerAttachments(this.composerSelection);
         })
         .onFocus(() => {
-          this.composerFocused = true;
-          this.compactToolsOpen = false;
+          this.getUIContext().animateTo({ curve: nativeSpringCurve(0.28, 0.82) }, () => {
+            this.composerFocused = true;
+            this.compactToolsOpen = false;
+          });
         })
-        .onBlur(() => { this.composerFocused = false; })
+        .onBlur(() => {
+          this.getUIContext().animateTo({ curve: nativeSpringCurve(0.28, 0.86) }, () => {
+            this.composerFocused = false;
+          });
+        })
         .onTextSelectionChange((start: number, end: number) => {
           if (this.composerFocused) this.composerSelection = { start, end };
         })
@@ -3832,9 +3853,16 @@ struct NativeChat {
   @Builder
   private composerAction() {
     if (this.reply()) {
-      this.iconButton($r('app.media.native_stop'), this.label('停止生成', 'Stop generating'),
-        () => { this.stopReadAloud(); this.stopReply(); }, this.compact() ? 28 : 34, 16,
-        Color.White, $r('app.color.native_chat_blue'))
+      Row() {
+        this.iconButton($r('app.media.native_stop'), this.label('停止生成', 'Stop generating'),
+          () => {
+            triggerNativeHaptic('medium');
+            this.stopReadAloud();
+            this.stopReply();
+          }, this.compact() ? 28 : 34, 16,
+          Color.White, $r('app.color.native_chat_blue'))
+      }
+      .transition(nativeActionButtonTransition())
     } else if (this.canSendDraft()) {
       this.composerSendButton()
     } else {
@@ -3844,11 +3872,16 @@ struct NativeChat {
 
   @Builder
   private composerSendButton() {
-    this.iconButton($r('app.media.native_send'), this.label('发送', 'Send'), () => {
-      triggerNativeHaptic('light');
-      this.sendDraft();
-    },
-      this.compact() ? 28 : 34, 16, Color.White, $r('app.color.native_chat_blue'), () => this.loaded && this.canSendDraft())
+    Row() {
+      this.iconButton($r('app.media.native_send'), this.label('发送', 'Send'), () => {
+        triggerNativeHaptic('light');
+        this.getUIContext().animateTo({ curve: nativeSpringCurve(0.28, 0.82) }, () => {
+          this.sendDraft();
+        });
+      },
+        this.compact() ? 28 : 34, 16, Color.White, $r('app.color.native_chat_blue'), () => this.loaded && this.canSendDraft())
+    }
+    .transition(nativeActionButtonTransition())
   }
 
   @Builder
@@ -3927,6 +3960,16 @@ struct NativeChat {
     }
     .width('100%').borderRadius(this.compact() ? 18 : 24)
     .attributeModifier(this.composerElevatedModifier)
+    .border({
+      width: this.composerFocused ? 1.15 : 0.85,
+      color: this.composerFocused ? $r('app.color.native_glass_focus_rim') : $r('app.color.native_glass_rim'),
+    })
+    .shadow(this.composerFocused
+      ? { radius: 24, offsetY: 6, color: '#263964FE' }
+      : { radius: 20, offsetY: 6, color: $r('app.color.native_glass_composer_shadow') })
+    .scale(this.composerFocused ? { x: 1.008, y: 1.008 } : { x: 1.0, y: 1.0 })
+    .translate({ y: this.composerFocused ? -2 : 0 })
+    .animation({ curve: nativeSpringCurve(0.28, 0.84) })
   }
 
   @Builder
@@ -4369,7 +4412,6 @@ struct NativeChat {
       backgroundColor: isImmersiveMaterialAvailable() ? Color.Transparent : $r('app.color.native_chat_sidebar'),
       dragBar: false,
       showClose: false,
-      title: (): void => { this.settingsHeader(); },
       onDisappear: (): void => {
         this.settingsTouchDownAt = 0;
         this.settingsDragStartedAt = 0;
@@ -5612,39 +5654,60 @@ struct NativeChat {
     .backgroundColor($r('app.color.native_chat_surface'))
   }
 
+  private settingsHeaderHeight(): number {
+    return this.wide() ? 60 : this.compact() ? 54 : 66;
+  }
+
   @Builder
   private settingsHeader() {
     Column() {
       if (!this.wide()) {
-        Row().width(38).height(4).borderRadius(2).margin({ top: 8 }).backgroundColor('#5980808A')
+        Row().width(38).height(4).borderRadius(2).margin({ top: 8, bottom: 2 }).backgroundColor('#5980808A')
       }
-      Row() {
-        if (this.settingsSection === 'root') {
-          Blank().width(this.compact() ? 30 : 36)
-        } else {
+      Stack({ alignContent: Alignment.Center }) {
+        Row() {
+          if (this.settingsSection === 'root') {
+            Blank().width(this.compact() ? 30 : 38)
+          } else {
+            Row() {
+              this.iconButton($r('app.media.native_chevron_left'), this.label('返回', "Back"),
+                () => { this.returnToSettings(); }, this.compact() ? 30 : 38, 18,
+                $r('app.color.native_chat_primary'), Color.Transparent)
+            }
+            .borderRadius(999).attributeModifier(this.headerCapsuleModifier)
+          }
+          Blank().layoutWeight(1)
           Row() {
-            this.iconButton($r('app.media.native_chevron_left'), this.label('返回', "Back"),
-              () => { this.returnToSettings(); }, this.compact() ? 30 : 36, 18,
+            this.iconButton($r('app.media.native_close'), this.label('关闭', "Close"),
+              () => { this.closeSettings(); }, this.compact() ? 30 : 38, 16,
               $r('app.color.native_chat_primary'), Color.Transparent)
           }
-          .borderRadius(999).attributeModifier(this.glassControlModifier)
+          .borderRadius(999).attributeModifier(this.headerCapsuleModifier)
         }
-        Text(this.settingsTitle()).layoutWeight(1).textAlign(TextAlign.Center)
-          .fontSize(this.appFontSize(this.compact() ? 15 : 17)).lineHeight(this.compact() ? 20 : 24).fontWeight(600)
-          .fontColor($r('app.color.native_chat_primary'))
+        .width('100%')
         Row() {
-          this.iconButton($r('app.media.native_close'), this.label('关闭', "Close"),
-            () => { this.closeSettings(); }, this.compact() ? 30 : 36, 16,
-            $r('app.color.native_chat_primary'), Color.Transparent)
+          Text(this.settingsTitle()).textAlign(TextAlign.Center)
+            .fontSize(this.appFontSize(this.compact() ? 14 : 16)).lineHeight(this.compact() ? 18 : 22).fontWeight(600)
+            .fontColor($r('app.color.native_chat_primary'))
+            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+            .constraintSize({ maxWidth: this.compact() ? 140 : 200 })
         }
-        .borderRadius(999).attributeModifier(this.glassControlModifier)
+        .height(this.compact() ? 30 : 38).padding({ left: 16, right: 16 }).borderRadius(999)
+        .attributeModifier(this.headerCapsuleModifier)
       }
       .width('100%').padding({
         left: this.compact() ? 10 : 16, right: this.compact() ? 10 : 16,
-        top: this.wide() ? 16 : 8, bottom: this.compact() ? 6 : 10,
+        top: this.wide() ? 12 : 4, bottom: this.compact() ? 4 : 8,
       })
     }
     .width('100%').enabled(!this.signingOut)
+    .linearGradient({
+      direction: GradientDirection.Bottom,
+      colors: [
+        [$r('app.color.native_chat_sidebar'), 0.0],
+        [$r('app.color.native_chat_sidebar_clear'), 0.42],
+      ],
+    })
     .onTouch((event: TouchEvent) => { this.trackSettingsTouch(event, true); })
     .parallelGesture(
       PanGesture({ direction: PanDirection.Down, distance: 3 })
@@ -5657,50 +5720,65 @@ struct NativeChat {
 
   @Builder
   private settingsPage() {
-    Scroll(this.settingsScroll) {
-      Column({ space: 10 }) {
-        if (this.settingsSection === 'account') {
-          this.accountSettings()
-        } else if (this.settingsSection === 'data') {
-          NativeDataSettings({
-            busy: this.backupBusy, sessionCount: this.history.sessions.length, locale: this.settings.locale,
-            fontScale: this.appFontScale(),
-            historyImportProgress: this.historyImportProgress, historyImportResult: this.historyImportResult,
-            historyImportFailed: this.historyImportFailed,
-            onMigration: () => { this.chooseHistoryMigration(); },
-            onShareImport: () => { this.openShareImport(); },
-            onImport: () => { void this.importChatHistory(); },
-            onExport: () => { void this.exportChatHistory(); },
-            onDeleteAll: () => { this.deleteSessions([], 'all'); },
-          })
-        } else if (this.settingsSection === 'notes') {
-          this.releaseNotesPage()
-        } else if (this.settingsSection === 'feedback') {
-          NativeFeedbackReport({
-            locale: this.settings.locale, appVersion: this.appVersion, apiProtocol: this.settings.protocol,
-            fontScale: this.appFontScale(),
-            authMode: this.settings.authMode, viewportWidth: this.viewportWidth, viewportHeight: this.viewportHeight,
-          })
-        } else {
-          this.settingsRoot()
+    Navigation(this.settingsNavStack) {
+      Scroll(this.settingsScroll) {
+        Column({ space: 10 }) {
+          Blank().height(this.settingsHeaderHeight())
+          if (this.settingsSection === 'account') {
+            this.accountSettings()
+          } else if (this.settingsSection === 'data') {
+            NativeDataSettings({
+              busy: this.backupBusy, sessionCount: this.history.sessions.length, locale: this.settings.locale,
+              fontScale: this.appFontScale(),
+              historyImportProgress: this.historyImportProgress, historyImportResult: this.historyImportResult,
+              historyImportFailed: this.historyImportFailed,
+              onMigration: () => { this.chooseHistoryMigration(); },
+              onShareImport: () => { this.openShareImport(); },
+              onImport: () => { void this.importChatHistory(); },
+              onExport: () => { void this.exportChatHistory(); },
+              onDeleteAll: () => { this.deleteSessions([], 'all'); },
+            })
+          } else if (this.settingsSection === 'notes') {
+            this.releaseNotesPage()
+          } else if (this.settingsSection === 'feedback') {
+            NativeFeedbackReport({
+              locale: this.settings.locale, appVersion: this.appVersion, apiProtocol: this.settings.protocol,
+              fontScale: this.appFontScale(),
+              authMode: this.settings.authMode, viewportWidth: this.viewportWidth, viewportHeight: this.viewportHeight,
+            })
+          } else {
+            this.settingsRoot()
+          }
         }
+        .width('100%').padding({
+          left: this.compact() ? 10 : 16, right: this.compact() ? 10 : 16,
+          top: 4, bottom: this.compact() ? 20 : 36,
+        }).alignItems(HorizontalAlign.Start)
       }
-      .width('100%').padding({
-        left: this.compact() ? 10 : 16, right: this.compact() ? 10 : 16,
-        top: 4, bottom: this.compact() ? 20 : 36,
-      }).alignItems(HorizontalAlign.Start)
+      .width('100%').height('100%').scrollBar(BarState.Off)
+      .nestedScroll({ scrollForward: NestedScrollMode.SELF_ONLY, scrollBackward: NestedScrollMode.SELF_ONLY })
+      .enabled(!this.signingOut)
+      .onTouch((event: TouchEvent) => { this.trackSettingsTouch(event, false); })
+      .parallelGesture(
+        PanGesture({ direction: PanDirection.Down, distance: 5 })
+          .onActionStart((event: GestureEvent) => { this.startSettingsDrag(event, false); })
+          .onActionUpdate((event: GestureEvent) => { this.updateSettingsDrag(event); })
+          .onActionEnd((event: GestureEvent) => { this.finishSettingsDrag(event); })
+          .onActionCancel(() => { this.finishSettingsDrag(); })
+      )
     }
-    .width('100%').height('100%').scrollBar(BarState.Off)
-    .nestedScroll({ scrollForward: NestedScrollMode.SELF_ONLY, scrollBackward: NestedScrollMode.SELF_ONLY })
-    .enabled(!this.signingOut)
-    .onTouch((event: TouchEvent) => { this.trackSettingsTouch(event, false); })
-    .parallelGesture(
-      PanGesture({ direction: PanDirection.Down, distance: 5 })
-        .onActionStart((event: GestureEvent) => { this.startSettingsDrag(event, false); })
-        .onActionUpdate((event: GestureEvent) => { this.updateSettingsDrag(event); })
-        .onActionEnd((event: GestureEvent) => { this.finishSettingsDrag(event); })
-        .onActionCancel(() => { this.finishSettingsDrag(); })
-    )
+    .mode(NavigationMode.Stack)
+    .titleMode(NavigationTitleMode.Mini)
+    .hideBackButton(true)
+    .hideToolBar(true)
+    .title({
+      builder: (): void => { this.settingsHeader(); },
+      height: this.settingsHeaderHeight(),
+    }, {
+      backgroundColor: Color.Transparent,
+      barStyle: BarStyle.STACK,
+    })
+    .width('100%').height('100%').backgroundColor(Color.Transparent)
   }
 
   @Builder
@@ -5990,8 +6068,8 @@ struct NativeChat {
   private sidebarGroupHeader(key: string, label: string) {
     Text(this.historyGroupLabel(key, label)).fontSize(this.appFontSize(12))
       .lineHeight(18).fontWeight(FontWeight.Medium).width('100%')
-      .fontColor($r('app.color.native_chat_action')).backgroundColor($r('app.color.native_chat_sidebar'))
-      .padding({ top: 2, right: 10, bottom: 2, left: 10 })
+      .fontColor($r('app.color.native_chat_action')).backgroundColor(Color.Transparent)
+      .padding({ top: 6, right: 10, bottom: 2, left: 10 })
   }
 
   private openSidebarSettings(): void {
@@ -6020,6 +6098,44 @@ struct NativeChat {
   }
 
   @Builder
+  private drawerSearchHeader() {
+    Column() {
+      if (this.selecting) {
+        Row({ space: 12 }) {
+          Text(this.label(`已选择 ${this.selectedIds.length} 个对话`, `${this.selectedIds.length} selected`))
+            .fontSize(this.appFontSize(17)).lineHeight(this.appFontSize(24))
+            .fontWeight(600).layoutWeight(1).fontColor($r('app.color.native_chat_primary'))
+          Row() {
+            this.iconButton($r('app.media.native_close'), this.label('关闭', 'Close'),
+              () => { this.resetSelection(); }, 36, 16, $r('app.color.native_chat_primary'), Color.Transparent)
+          }
+          .width(36).height(36).borderRadius(999).attributeModifier(this.headerCapsuleModifier)
+        }
+        .width('100%').height(44).padding({ left: 6, right: 2 })
+      } else {
+        Row({ space: 8 }) {
+          Image($r('app.media.native_search')).height(16).width(16).colorFilter(nativeIconTint($r('app.color.native_chat_secondary')))
+          TextInput({ text: this.searchText, placeholder: this.label('搜索对话内容...', "Search chats…") })
+            .fontSize(this.appFontSize(15)).height(42).layoutWeight(1)
+            .fontColor($r('app.color.native_chat_primary')).placeholderColor($r('app.color.native_chat_secondary'))
+            .backgroundColor(Color.Transparent).padding(0).cancelButton({ style: CancelButtonStyle.INPUT })
+            .onChange((value: string) => { this.changeSidebarQuery(value); })
+        }
+        .width('100%').height(44).borderRadius(999).padding({ left: 16, right: 12 })
+        .attributeModifier(this.headerCapsuleModifier)
+      }
+    }
+    .width('100%').padding({ top: 4, bottom: 6 })
+    .linearGradient({
+      direction: GradientDirection.Bottom,
+      colors: [
+        [$r('app.color.native_chat_sidebar'), 0.0],
+        [$r('app.color.native_chat_sidebar_clear'), 0.35],
+      ],
+    })
+  }
+
+  @Builder
   private drawer(desktop: boolean = false) {
     Column() {
       if (desktop && !this.selecting) {
@@ -6040,135 +6156,134 @@ struct NativeChat {
           }
         }
         .width('100%').height(40).margin({ bottom: 8 }).backgroundColor($r('app.color.native_chat_selected'))
+        .clickEffect(NATIVE_PILL_CLICK_EFFECT)
         .onClick(() => { this.activate(null); })
       }
-      if (this.selecting) {
-        Row({ space: 12 }) {
-          Text(this.label(`已选择 ${this.selectedIds.length} 个对话`, `${this.selectedIds.length} selected`))
-            .fontSize(this.appFontSize(17)).lineHeight(this.appFontSize(24))
-            .fontWeight(600).layoutWeight(1).fontColor($r('app.color.native_chat_primary'))
-          Row() {
-            this.iconButton($r('app.media.native_close'), this.label('关闭', 'Close'),
-              () => { this.resetSelection(); }, 36, 16, $r('app.color.native_chat_primary'),
-              $r('app.color.native_chat_surface'))
-          }
-          .width(36).height(36).borderRadius(18).border({ width: 1, color: $r('app.color.native_chat_stroke') })
-          .shadow({ radius: 4, color: '#0D000000', offsetY: 1 })
-        }
-        .width('100%').constraintSize({ minHeight: 44 }).padding({ left: 6, right: 2, top: 4, bottom: 6 })
-      } else {
-        Row({ space: 8 }) {
-          Image($r('app.media.native_search')).height(16).width(16).colorFilter(nativeIconTint($r('app.color.native_chat_secondary')))
-          TextInput({ text: this.searchText, placeholder: this.label('搜索对话内容...', "Search chats…") }).fontSize(this.appFontSize(15)).height(44).layoutWeight(1)
-            .backgroundColor(Color.Transparent).padding(0).cancelButton({ style: CancelButtonStyle.INPUT })
-            .onChange((value: string) => { this.changeSidebarQuery(value); })
-        }
-        .width('100%').borderRadius(14).padding({ left: 14, right: 12 }).backgroundColor($r('app.color.native_chat_field'))
-      }
-      List({ space: 2, scroller: this.sidebarScroller }) {
-        if (this.history.sessions.length === 0) {
-          ListItem() {
-            Column({ space: 8 }) {
-              Text(this.label('暂无对话', "No chats yet")).fontSize(this.appFontSize(15)).fontWeight(FontWeight.Medium).fontColor($r('app.color.native_chat_primary'))
-              Text(this.label('你与 Nuwa 的对话\n将展示在这里', 'Your chats with Nuwa will appear here'))
-                .textAlign(TextAlign.Center).fontSize(this.appFontSize(13))
-                .fontColor($r('app.color.native_chat_secondary'))
-              Button(this.label('开启新对话', "New chat"), { buttonStyle: ButtonStyleMode.TEXTUAL })
-                .fontSize(this.appFontSize(14)).onClick(() => { this.activate(null); })
-            }
-            .width('100%').padding({ top: 28 })
-          }
-        } else if (!this.sidebarRows.length) {
-          ListItem() {
-            Text(this.label('未找到匹配的对话', "No matching chats")).fontSize(this.appFontSize(14)).fontColor($r('app.color.native_chat_secondary')).padding(14)
-          }
-        }
-        ForEach(this.sidebarSections, (section: NativeSidebarSection) => {
-          ListItemGroup({ header: this.sidebarGroupHeader(section.key, section.label), space: 2 }) {
-            ForEach(this.sidebarSectionRows(section.key), (row: NativeSidebarRow) => {
+      Stack({ alignContent: Alignment.Bottom }) {
+        Navigation(this.drawerNavStack) {
+          List({ space: 2, scroller: this.sidebarScroller }) {
+            if (this.history.sessions.length === 0) {
               ListItem() {
-                if (row.session) {
-                  this.drawerItem(row.session)
+                Column({ space: 8 }) {
+                  Text(this.label('暂无对话', "No chats yet")).fontSize(this.appFontSize(15)).fontWeight(FontWeight.Medium).fontColor($r('app.color.native_chat_primary'))
+                  Text(this.label('你与 Nuwa 的对话\n将展示在这里', 'Your chats with Nuwa will appear here'))
+                    .textAlign(TextAlign.Center).fontSize(this.appFontSize(13))
+                    .fontColor($r('app.color.native_chat_secondary'))
+                  Button(this.label('开启新对话', "New chat"), { buttonStyle: ButtonStyleMode.TEXTUAL })
+                    .fontSize(this.appFontSize(14)).onClick(() => { this.activate(null); })
                 }
+                .width('100%').padding({ top: 28 })
               }
-            }, (row: NativeSidebarRow): string => row.key)
-          }
-        }, (section: NativeSidebarSection): string => section.key)
-      }
-      .layoutWeight(1).width('100%').padding({ top: 8 }).scrollBar(BarState.Off)
-      .sticky(StickyStyle.Header)
-      .onAreaChange((_old: Area, area: Area) => {
-        if (!desktop && !this.sidebarDrawerReady && Number(area.height) > 0) {
-          this.sidebarDrawerReady = true;
-          this.restoreSidebarDrawerPosition();
-        }
-      })
-      .onDisAppear(() => {
-        if (!desktop) {
-          this.sidebarDrawerReady = false;
-          this.sidebarDrawerFirst = undefined;
-        }
-      })
-      .onScroll((offset: number) => {
-        if (!desktop && offset !== 0) this.rememberSidebarDrawerPosition();
-      })
-      .onScrollVisibleContentChange((first: VisibleListContentInfo, last: VisibleListContentInfo) => {
-        if (!desktop) this.sidebarDrawerFirst = first;
-        this.maybeLoadSidebarPage(visibleSidebarRowIndex(this.sidebarSections, last.index, last.itemIndexInGroup));
-      })
-      if (this.selecting) {
-        Row() {
-          this.sidebarSelectionAction($r('app.media.native_pin'),
-            () => this.allPinned() ? this.label('取消置顶', 'Unpin') : this.label('置顶', 'Pin'),
-            $r('app.color.native_chat_primary'), () => this.canPinSidebarSelection(),
-            () => { void this.pinSidebarSelection(); })
-          Divider().vertical(true).height(18).strokeWidth(1).color($r('app.color.native_chat_stroke'))
-          this.sidebarSelectionAction($r('app.media.native_trash'), () => this.label('删除', 'Delete'),
-            $r('app.color.native_chat_error'), () => this.selectedIds.length > 0,
-            () => { this.deleteSessions(this.selectedIds, 'batch'); })
-        }
-        .height(44).width('100%').margin({ top: 10, bottom: 4 })
-      } else {
-        Row({ space: 8 }) {
-          Button({ type: ButtonType.Normal }) {
-            Row({ space: 10 }) {
-              Image($r('app.media.native_welcome_logo')).width(32).height(32).borderRadius(16)
-                .draggable(false).accessibilityLevel('no')
-              Text(this.sidebarProfileName()).fontSize(this.appFontSize(14)).fontWeight(FontWeight.Medium)
-                .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).fontColor($r('app.color.native_chat_primary'))
+            } else if (!this.sidebarRows.length) {
+              ListItem() {
+                Text(this.label('未找到匹配的对话', "No matching chats")).fontSize(this.appFontSize(14)).fontColor($r('app.color.native_chat_secondary')).padding(14)
+              }
             }
+            ForEach(this.sidebarSections, (section: NativeSidebarSection) => {
+              ListItemGroup({ header: this.sidebarGroupHeader(section.key, section.label), space: 2 }) {
+                ForEach(this.sidebarSectionRows(section.key), (row: NativeSidebarRow) => {
+                  ListItem() {
+                    if (row.session) {
+                      this.drawerItem(row.session)
+                    }
+                  }
+                }, (row: NativeSidebarRow): string => row.key)
+              }
+            }, (section: NativeSidebarSection): string => section.key)
           }
-          .height(48).flexShrink(1).padding(0).backgroundColor(Color.Transparent)
-          .accessibilityDescription(this.label('打开设置', 'Open settings'))
-          .onClick(() => { this.openSidebarSettings(); })
-
-          if (this.balance) {
-            Button({ type: ButtonType.Normal }) {
-              Text(this.balance.formatted).fontSize(this.appFontSize(12)).fontWeight(FontWeight.Medium)
-                .maxLines(1).lineHeight(this.appFontSize(18)).padding({ left: 7, right: 7, top: 1, bottom: 1 })
-                .borderRadius(999).fontColor(this.lowBalance() ? $r('app.color.native_settings_balance_low') :
-                  $r('app.color.native_settings_balance'))
-                .backgroundColor(this.lowBalance() ? $r('app.color.native_settings_balance_low_bg') :
-                  $r('app.color.native_settings_balance_bg'))
+          .width('100%').height('100%').scrollBar(BarState.Off)
+          .contentStartOffset(56).contentEndOffset(66)
+          .onAreaChange((_old: Area, area: Area) => {
+            if (!desktop && !this.sidebarDrawerReady && Number(area.height) > 0) {
+              this.sidebarDrawerReady = true;
+              this.restoreSidebarDrawerPosition();
             }
-            .height(48).padding(0).backgroundColor(Color.Transparent)
-            .accessibilityText(this.label(`账户余额：${this.balance.formatted}（点击充值）`,
-              `Account balance: ${this.balance.formatted} (tap to top up)`))
-            .onClick(() => { void this.openLink('https://platform.deepseek.com/top_up'); })
-          }
+          })
+          .onDisAppear(() => {
+            if (!desktop) {
+              this.sidebarDrawerReady = false;
+              this.sidebarDrawerFirst = undefined;
+            }
+          })
+          .onScroll((offset: number) => {
+            if (!desktop && offset !== 0) this.rememberSidebarDrawerPosition();
+          })
+          .onScrollVisibleContentChange((first: VisibleListContentInfo, last: VisibleListContentInfo) => {
+            if (!desktop) this.sidebarDrawerFirst = first;
+            this.maybeLoadSidebarPage(visibleSidebarRowIndex(this.sidebarSections, last.index, last.itemIndexInGroup));
+          })
+        }
+        .mode(NavigationMode.Stack)
+        .titleMode(NavigationTitleMode.Mini)
+        .hideBackButton(true)
+        .hideToolBar(true)
+        .title({
+          builder: (): void => { this.drawerSearchHeader(); },
+          height: 54,
+        }, {
+          backgroundColor: Color.Transparent,
+          barStyle: BarStyle.STACK,
+        })
+        .width('100%').height('100%').backgroundColor(Color.Transparent)
 
+        if (this.selecting) {
           Row() {
-            Text('⋯').fontSize(18).fontColor($r('app.color.native_chat_action'))
+            this.sidebarSelectionAction($r('app.media.native_pin'),
+              () => this.allPinned() ? this.label('取消置顶', 'Unpin') : this.label('置顶', 'Pin'),
+              $r('app.color.native_chat_primary'), () => this.canPinSidebarSelection(),
+              () => { void this.pinSidebarSelection(); })
+            Divider().vertical(true).height(18).strokeWidth(1).color($r('app.color.native_chat_stroke'))
+            this.sidebarSelectionAction($r('app.media.native_trash'), () => this.label('删除', 'Delete'),
+              $r('app.color.native_chat_error'), () => this.selectedIds.length > 0,
+              () => { this.deleteSessions(this.selectedIds, 'batch'); })
           }
-          .height(48).constraintSize({ minWidth: 16 }).justifyContent(FlexAlign.End).flexGrow(1)
-          .focusable(false).accessibilityLevel('no-hide-descendants')
-          .onClick(() => { this.openSidebarSettings(); })
+          .height(44).width('100%').margin({ bottom: 4 })
+          .borderRadius(16).attributeModifier(this.glassControlModifier)
+        } else {
+          Row({ space: 8 }) {
+            Button({ type: ButtonType.Normal }) {
+              Row({ space: 10 }) {
+                Image($r('app.media.native_welcome_logo')).width(32).height(32).borderRadius(16)
+                  .draggable(false).accessibilityLevel('no')
+                Text(this.sidebarProfileName()).fontSize(this.appFontSize(14)).fontWeight(FontWeight.Medium)
+                  .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).fontColor($r('app.color.native_chat_primary'))
+              }
+            }
+            .height(48).flexShrink(1).padding(0).backgroundColor(Color.Transparent)
+            .accessibilityDescription(this.label('打开设置', 'Open settings'))
+            .onClick(() => { this.openSidebarSettings(); })
+
+            if (this.balance) {
+              Button({ type: ButtonType.Normal }) {
+                Text(this.balance.formatted).fontSize(this.appFontSize(12)).fontWeight(FontWeight.Medium)
+                  .maxLines(1).lineHeight(this.appFontSize(18)).padding({ left: 7, right: 7, top: 1, bottom: 1 })
+                  .borderRadius(999).fontColor(this.lowBalance() ? $r('app.color.native_settings_balance_low') :
+                    $r('app.color.native_settings_balance'))
+                  .backgroundColor(this.lowBalance() ? $r('app.color.native_settings_balance_low_bg') :
+                    $r('app.color.native_settings_balance_bg'))
+              }
+              .height(48).padding(0).backgroundColor(Color.Transparent)
+              .accessibilityText(this.label(`账户余额：${this.balance.formatted}（点击充值）`,
+                `Account balance: ${this.balance.formatted} (tap to top up)`))
+              .onClick(() => { void this.openLink('https://platform.deepseek.com/top_up'); })
+            }
+
+            Row() {
+              Text('⋯').fontSize(18).fontColor($r('app.color.native_chat_action'))
+            }
+            .height(48).constraintSize({ minWidth: 16 }).justifyContent(FlexAlign.End).flexGrow(1)
+            .focusable(false).accessibilityLevel('no-hide-descendants')
+            .onClick(() => { this.openSidebarSettings(); })
+          }
+          .height(50).width('100%').padding({ left: 12, right: 12 }).margin({ bottom: 4 })
+          .borderRadius(16).attributeModifier(this.glassControlModifier)
+          .clickEffect(NATIVE_CARD_CLICK_EFFECT)
         }
-        .height(48).width('100%').padding({ left: 10, right: 10 }).margin({ top: 10, bottom: 4 })
       }
+      .layoutWeight(1).width('100%')
     }
     .width(desktop ? SIDEBAR_DESKTOP_WIDTH : this.drawerWidth()).height('100%')
-    .padding({ left: 16, right: SIDEBAR_END_PADDING, top: 14, bottom: 8 })
+    .padding({ left: 16, right: SIDEBAR_END_PADDING, top: 10, bottom: 8 })
   }
 
   @Builder

@@ -41,6 +41,10 @@
       "value": "#1B1B1C"
     },
     {
+      "name": "native_chat_sidebar_clear",
+      "value": "#001B1B1C"
+    },
+    {
       "name": "native_chat_surface",
       "value": "#2C2C2E"
     },
@@ -147,6 +151,10 @@
     {
       "name": "native_glass_rim",
       "value": "#38FFFFFF"
+    },
+    {
+      "name": "native_glass_focus_rim",
+      "value": "#8C679EFE"
     },
     {
       "name": "native_glass_sheen",

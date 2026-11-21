@@ -95,6 +95,13 @@ export function nativeSideSheetTransition(): TransitionEffect {
     .animation({ curve: nativeSpringCurve(0.32, 0.90) });
 }
 
+/** Spring pop-in / morph transition for dynamic composer action buttons (Send / Stop / Voice) and chips. */
+export function nativeActionButtonTransition(): TransitionEffect {
+  return TransitionEffect.OPACITY
+    .combine(TransitionEffect.scale({ x: 0.62, y: 0.62 }))
+    .animation({ curve: nativeSpringCurve(0.26, 0.78) });
+}
+
 /** Native HarmonyOS light-weight tactile click feedback options. */
 export const NATIVE_ICON_CLICK_EFFECT: ClickEffect = {
   level: ClickEffectLevel.LIGHT,
@@ -183,10 +190,8 @@ export class ImmersiveComposerModifier implements AttributeModifier<CommonAttrib
           [$r('app.color.native_glass_sheen'), 0.0],
           ['#00FFFFFF', 0.35],
         ],
-      })
-      .border({ width: 0.85, color: $r('app.color.native_glass_rim') })
-      .shadow({ radius: 20, offsetY: 6, color: $r('app.color.native_glass_composer_shadow') });
-    applyHdsGlassLight(instance, false);
+      });
+    applyHdsGlassLight(instance, true);
   }
 }
 
