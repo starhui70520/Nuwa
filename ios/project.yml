@@ -10,12 +10,12 @@ settings:
   base:
     SWIFT_VERSION: "5.9"
     TARGETED_DEVICE_FAMILY: "1,2"
-    ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-    ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
     MARKETING_VERSION: "0.1.31"
     CURRENT_PROJECT_VERSION: "1"
-    PRODUCT_NAME: Nuwa
-    INFOPLIST_KEY_CFBundleDisplayName: Nuwa
+    NUWA_APP_BUNDLE_ID: com.rankchord.nuwa
+    NUWA_APP_PROFILE: ""
+    NUWA_SHARE_BUNDLE_ID: com.rankchord.nuwa.share
+    NUWA_SHARE_PROFILE: ""
 
 targets:
   Nuwa:
@@ -23,15 +23,30 @@ targets:
     platform: iOS
     sources:
       - path: Nuwa
+        excludes:
+          - "*.entitlements"
+      - path: Shared
+    entitlements:
+      path: Nuwa/Nuwa.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.rankchord.nuwa
     info:
       path: Nuwa/Info.plist
       properties:
+        CFBundleDevelopmentRegion: zh_CN
         CFBundleDisplayName: Nuwa
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         ITSAppUsesNonExemptEncryption: false
         LSRequiresIPhoneOS: true
         LSSupportsOpeningDocumentsInPlace: true
+        NSUserActivityTypes:
+          - INSendMessageIntent
+        CFBundleURLTypes:
+          - CFBundleURLName: com.rankchord.nuwa
+            CFBundleURLSchemes:
+              - nuwa
         CFBundleDocumentTypes:
           - CFBundleTypeName: Nuwa Chat Session
             CFBundleTypeRole: Editor
@@ -73,11 +88,63 @@ targets:
           - UIInterfaceOrientationPortraitUpsideDown
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
+    dependencies:
+      - target: NuwaShareExtension
+        embed: true
+        codeSign: true
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.rankchord.nuwa
+        PRODUCT_NAME: Nuwa
+        INFOPLIST_KEY_CFBundleDisplayName: Nuwa
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        PRODUCT_BUNDLE_IDENTIFIER: $(NUWA_APP_BUNDLE_ID)
+        PROVISIONING_PROFILE_SPECIFIER: $(NUWA_APP_PROFILE)
         CODE_SIGN_STYLE: Automatic
         GENERATE_INFOPLIST_FILE: NO
         SWIFT_EMIT_LOC_STRINGS: YES
     scheme:
       testTargets: []
+
+  NuwaShareExtension:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: NuwaShareExtension
+        excludes:
+          - "*.entitlements"
+      - path: Shared
+    entitlements:
+      path: NuwaShareExtension/NuwaShareExtension.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.rankchord.nuwa
+    info:
+      path: NuwaShareExtension/Info.plist
+      properties:
+        CFBundleDevelopmentRegion: zh_CN
+        CFBundleDisplayName: Nuwa
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.share-services
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ShareViewController
+          NSExtensionAttributes:
+            IntentsSupported:
+              - INSendMessageIntent
+            NSExtensionActivationRule:
+              NSExtensionActivationSupportsFileWithMaxCount: 10
+              NSExtensionActivationSupportsImageWithMaxCount: 10
+              NSExtensionActivationSupportsText: true
+              NSExtensionActivationSupportsWebURLWithMaxCount: 1
+    settings:
+      base:
+        PRODUCT_NAME: NuwaShareExtension
+        PRODUCT_MODULE_NAME: NuwaShareExtension
+        PRODUCT_BUNDLE_IDENTIFIER: $(NUWA_SHARE_BUNDLE_ID)
+        PROVISIONING_PROFILE_SPECIFIER: $(NUWA_SHARE_PROFILE)
+        CODE_SIGN_STYLE: Automatic
+        GENERATE_INFOPLIST_FILE: NO
+        SKIP_INSTALL: YES
+        APPLICATION_EXTENSION_API_ONLY: NO
+        SWIFT_EMIT_LOC_STRINGS: YES

@@ -61,11 +61,12 @@ jobs:
           IOS_DIST_CERT_P12_BASE64: ${{ secrets.IOS_DIST_CERT_P12_BASE64 }}
           IOS_DIST_CERT_PASSWORD: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
           IOS_APPSTORE_PROFILE_BASE64: ${{ secrets.IOS_APPSTORE_PROFILE_BASE64 }}
+          IOS_SHARE_EXTENSION_PROFILE_BASE64: ${{ secrets.IOS_SHARE_EXTENSION_PROFILE_BASE64 }}
           APPSTORE_API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
           APPSTORE_API_ISSUER_ID: ${{ secrets.APPSTORE_API_ISSUER_ID }}
           APPSTORE_API_KEY_P8_BASE64: ${{ secrets.APPSTORE_API_KEY_P8_BASE64 }}
         run: |
-          if [ -n "$IOS_DIST_CERT_P12_BASE64" ] && [ -n "$IOS_APPSTORE_PROFILE_BASE64" ]; then
+          if [ -n "$IOS_DIST_CERT_P12_BASE64" ] && [ -n "$IOS_APPSTORE_PROFILE_BASE64" ] && [ -n "$IOS_SHARE_EXTENSION_PROFILE_BASE64" ]; then
             echo "can_sign=true" >> "$GITHUB_OUTPUT"
           else
             echo "can_sign=false" >> "$GITHUB_OUTPUT"
@@ -128,15 +129,19 @@ jobs:
           IOS_DIST_CERT_P12_BASE64: ${{ secrets.IOS_DIST_CERT_P12_BASE64 }}
           IOS_DIST_CERT_PASSWORD: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
           IOS_APPSTORE_PROFILE_BASE64: ${{ secrets.IOS_APPSTORE_PROFILE_BASE64 }}
+          IOS_SHARE_EXTENSION_PROFILE_BASE64: ${{ secrets.IOS_SHARE_EXTENSION_PROFILE_BASE64 }}
         run: |
           KEYCHAIN_PATH="${RUNNER_TEMP}/app-signing.keychain-db"
           KEYCHAIN_PASS="ci-temp-keychain-pass"
           CERT_PATH="${RUNNER_TEMP}/dist.p12"
           PROFILE_PATH="${RUNNER_TEMP}/appstore.mobileprovision"
           PROFILE_PLIST="${RUNNER_TEMP}/profile.plist"
+          SHARE_PROFILE_PATH="${RUNNER_TEMP}/share_appstore.mobileprovision"
+          SHARE_PROFILE_PLIST="${RUNNER_TEMP}/share_profile.plist"
 
           echo "$IOS_DIST_CERT_P12_BASE64" | base64 --decode > "$CERT_PATH"
           echo "$IOS_APPSTORE_PROFILE_BASE64" | base64 --decode > "$PROFILE_PATH"
+          echo "$IOS_SHARE_EXTENSION_PROFILE_BASE64" | base64 --decode > "$SHARE_PROFILE_PATH"
 
           security cms -D -i "$PROFILE_PATH" > "$PROFILE_PLIST"
           PROFILE_UUID=$(/usr/libexec/PlistBuddy -c "Print :UUID" "$PROFILE_PLIST")
@@ -145,8 +150,15 @@ jobs:
           APP_ID=$(/usr/libexec/PlistBuddy -c "Print :Entitlements:application-identifier" "$PROFILE_PLIST")
           BUNDLE_ID="${APP_ID#${TEAM_ID}.}"
 
+          security cms -D -i "$SHARE_PROFILE_PATH" > "$SHARE_PROFILE_PLIST"
+          SHARE_PROFILE_UUID=$(/usr/libexec/PlistBuddy -c "Print :UUID" "$SHARE_PROFILE_PLIST")
+          SHARE_PROFILE_NAME=$(/usr/libexec/PlistBuddy -c "Print :Name" "$SHARE_PROFILE_PLIST")
+          SHARE_APP_ID=$(/usr/libexec/PlistBuddy -c "Print :Entitlements:application-identifier" "$SHARE_PROFILE_PLIST")
+          SHARE_BUNDLE_ID="${SHARE_APP_ID#${TEAM_ID}.}"
+
           mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
           cp "$PROFILE_PATH" ~/Library/MobileDevice/Provisioning\ Profiles/"${PROFILE_UUID}.mobileprovision"
+          cp "$SHARE_PROFILE_PATH" ~/Library/MobileDevice/Provisioning\ Profiles/"${SHARE_PROFILE_UUID}.mobileprovision"
 
           security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
@@ -159,6 +171,8 @@ jobs:
           echo "profile_name=${PROFILE_NAME}" >> "$GITHUB_OUTPUT"
           echo "team_id=${TEAM_ID}" >> "$GITHUB_OUTPUT"
           echo "bundle_id=${BUNDLE_ID}" >> "$GITHUB_OUTPUT"
+          echo "share_profile_name=${SHARE_PROFILE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "share_bundle_id=${SHARE_BUNDLE_ID}" >> "$GITHUB_OUTPUT"
 
       - name: Archive & export signed App Store IPA
         if: steps.signing.outputs.can_sign == 'true'
@@ -168,6 +182,8 @@ jobs:
           TEAM_ID: ${{ steps.apple_cert.outputs.team_id }}
           PROFILE_NAME: ${{ steps.apple_cert.outputs.profile_name }}
           BUNDLE_ID: ${{ steps.apple_cert.outputs.bundle_id }}
+          SHARE_PROFILE_NAME: ${{ steps.apple_cert.outputs.share_profile_name }}
+          SHARE_BUNDLE_ID: ${{ steps.apple_cert.outputs.share_bundle_id }}
         run: |
           xcodebuild \
             -project Nuwa.xcodeproj \
@@ -180,8 +196,10 @@ jobs:
             CODE_SIGN_STYLE=Manual \
             DEVELOPMENT_TEAM="$TEAM_ID" \
             CODE_SIGN_IDENTITY="Apple Distribution" \
-            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
-            PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
+            NUWA_APP_BUNDLE_ID="$BUNDLE_ID" \
+            NUWA_APP_PROFILE="$PROFILE_NAME" \
+            NUWA_SHARE_BUNDLE_ID="$SHARE_BUNDLE_ID" \
+            NUWA_SHARE_PROFILE="$SHARE_PROFILE_NAME" \
             archive
 
           cat > build/ExportOptions.plist <<EOF
@@ -199,6 +217,8 @@ jobs:
             <dict>
               <key>${BUNDLE_ID}</key>
               <string>${PROFILE_NAME}</string>
+              <key>${SHARE_BUNDLE_ID}</key>
+              <string>${SHARE_PROFILE_NAME}</string>
             </dict>
             <key>uploadSymbols</key>
             <true/>
@@ -243,4 +263,4 @@ jobs:
         run: |
           security delete-keychain "${RUNNER_TEMP}/app-signing.keychain-db" 2>/dev/null || true
           rm -rf ~/.appstoreconnect/private_keys
-          rm -f "${RUNNER_TEMP}/dist.p12" "${RUNNER_TEMP}/appstore.mobileprovision" "${RUNNER_TEMP}/profile.plist"
+          rm -f "${RUNNER_TEMP}/dist.p12" "${RUNNER_TEMP}/appstore.mobileprovision" "${RUNNER_TEMP}/profile.plist" "${RUNNER_TEMP}/share_appstore.mobileprovision" "${RUNNER_TEMP}/share_profile.plist"

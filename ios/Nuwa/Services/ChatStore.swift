@@ -231,6 +231,7 @@ final class ChatStore: ObservableObject {
     @Published private(set) var importProgress: ImportProgress?
     @Published var toastMessage: String?
     @Published var pendingIncomingFile: IncomingFileRequest?
+    @Published var shareToChatFocusToken = 0
     @Published private(set) var historyLoaded = false
     @Published private(set) var historyLoadFailed = false
 
@@ -248,6 +249,7 @@ final class ChatStore: ObservableObject {
     private var rejectedHistoryImageIds: Set<String> = []
     private var consumingPendingMigration = false
     private var pendingAutoImports: [IncomingFileRequest] = []
+    private var consumedShareTokens = Set<String>()
     private var committingImport = false
     private var saveDeferredByImport = false
     private var activeTimelineCache: ActiveTimeline?
@@ -466,6 +468,7 @@ final class ChatStore: ObservableObject {
         sessions[sIdx].updatedAt = Date()
         listStore.sync(from: sessions)
         scheduleSave()
+        ShareSuggestionDonor.donateUsage(mode: .chat)
 
         streamReply(
             sessionId: sessionId,
@@ -1095,7 +1098,224 @@ final class ChatStore: ObservableObject {
         }
     }
 
-    // MARK: - Incoming External Files (WeChat "Open In", Files, iOS Proximity AirDrop .nuwa)
+    // MARK: - Incoming External Files (Share Extension App Group, WeChat "Open In", iOS Proximity AirDrop .nuwa)
+
+    /// Unified URL entrypoint for `NuwaApp.onOpenURL`: handles `nuwa://share?token=...` from the
+    /// Share Extension (including Row 1 Siri Share Suggestions) as well as direct `.zip`/`.json`/`.nuwa` file URLs.
+    func handleIncomingURL(_ url: URL, settings: SettingsStore) {
+        if url.scheme?.lowercased() == NuwaShareGroup.urlScheme {
+            if url.host?.lowercased() == "share",
+               let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+               let token = components.queryItems?.first(where: { $0.name == "token" })?.value,
+               !token.isEmpty {
+                consumeAppGroupShare(token: token, settings: settings)
+            } else {
+                consumePendingAppGroupShares(settings: settings)
+            }
+            return
+        }
+        if url.isFileURL {
+            handleIncomingFileURL(url)
+        }
+    }
+
+    func consumePendingAppGroupShares(settings: SettingsStore) {
+        NuwaShareGroup.cleanupStaleInboxEntries()
+        guard let inbox = NuwaShareGroup.shareInboxURL,
+              let entries = try? FileManager.default.contentsOfDirectory(
+                at: inbox,
+                includingPropertiesForKeys: [.creationDateKey],
+                options: [.skipsHiddenFiles]
+              )
+        else { return }
+        let sorted = entries.sorted { lhs, rhs in
+            let d1 = (try? lhs.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast
+            let d2 = (try? rhs.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast
+            return d1 < d2
+        }
+        for folder in sorted {
+            let manifestURL = NuwaShareGroup.manifestURL(in: folder)
+            guard FileManager.default.fileExists(atPath: manifestURL.path) else { continue }
+            consumeAppGroupShare(token: folder.lastPathComponent, settings: settings)
+        }
+    }
+
+    private func consumeAppGroupShare(token: String, settings: SettingsStore) {
+        guard !consumedShareTokens.contains(token),
+              let folder = NuwaShareGroup.folderURL(forToken: token)
+        else { return }
+        let manifestURL = NuwaShareGroup.manifestURL(in: folder)
+        guard let data = try? Data(contentsOf: manifestURL),
+              let manifest = try? JSONDecoder().decode(NuwaShareGroup.HandoffManifest.self, from: data)
+        else {
+            try? FileManager.default.removeItem(at: folder)
+            return
+        }
+        consumedShareTokens.insert(token)
+        ShareSuggestionDonor.donateUsage(mode: manifest.mode)
+
+        let fileURLs = manifest.fileNames
+            .map { folder.appendingPathComponent($0) }
+            .filter { FileManager.default.fileExists(atPath: $0.path) }
+
+        switch manifest.mode {
+        case .import:
+            if !fileURLs.isEmpty {
+                Task { [weak self] in
+                    defer { try? FileManager.default.removeItem(at: folder) }
+                    guard let self else { return }
+                    if !self.historyLoaded {
+                        for _ in 0..<40 where !self.historyLoaded {
+                            try? await Task.sleep(for: .milliseconds(100))
+                        }
+                    }
+                    var totalAdded = 0
+                    var totalUpdated = 0
+                    var totalBranched = 0
+                    var totalSkipped = 0
+                    var lastFocus: UUID?
+                    var lastError: Error?
+                    for fileURL in fileURLs {
+                        do {
+                            let outcome = try await self.importFromFileWithOutcome(fileURL)
+                            totalAdded += outcome.addedCount
+                            totalUpdated += outcome.updatedCount
+                            totalBranched += outcome.branchedCount
+                            totalSkipped += outcome.skippedCount
+                            if let focus = outcome.focusSessionId { lastFocus = focus }
+                        } catch {
+                            lastError = error
+                            AppLogStore.shared.record(.error, source: "shareExt.import", message: error.localizedDescription)
+                        }
+                    }
+                    let combined = SessionImportOutcome(
+                        addedCount: totalAdded,
+                        updatedCount: totalUpdated,
+                        branchedCount: totalBranched,
+                        skippedCount: totalSkipped,
+                        focusSessionId: lastFocus
+                    )
+                    let singleNuwa = fileURLs.count == 1
+                        && fileURLs[0].pathExtension.lowercased() == NuwaShareTypes.sessionExtension
+                    if combined.importedCount > 0 || lastError == nil {
+                        if (singleNuwa || combined.importedCount == 1), let focusId = combined.focusSessionId {
+                            self.activeSessionId = focusId
+                        }
+                        self.showToast(Self.importSummaryToast(for: combined, singleShare: singleNuwa || combined.importedCount == 1))
+                    } else if let lastError {
+                        self.showToast("导入失败：\(lastError.localizedDescription)")
+                    }
+                }
+            } else if let text = manifest.text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+                try? FileManager.default.removeItem(at: folder)
+                Task { [weak self] in
+                    guard let self else { return }
+                    do {
+                        _ = try await self.importFromShareLink(text)
+                        self.showToast("已导入分享对话")
+                    } catch {
+                        self.showToast("导入失败：\(error.localizedDescription)")
+                    }
+                }
+            } else {
+                try? FileManager.default.removeItem(at: folder)
+                showToast("未找到可导入的对话备份文件")
+            }
+
+        case .chat:
+            shareToChatFocusToken += 1
+            guard settings.hasActiveCredential else {
+                try? FileManager.default.removeItem(at: folder)
+                showToast("请先登录 DeepSeek 账号或配置 API Key 后再添加到对话")
+                return
+            }
+            let targetSession = activeSessionId
+            if let text = manifest.text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+                let existingText = draftStore.draft(for: targetSession).text
+                let mergedText = existingText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? text
+                    : "\(existingText)\n\(text)"
+                draftStore.setText(mergedText, for: targetSession)
+            }
+            guard !fileURLs.isEmpty else {
+                try? FileManager.default.removeItem(at: folder)
+                if !(manifest.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    showToast("已添加到当前对话")
+                }
+                return
+            }
+            let currentCount = draftStore.draft(for: targetSession).attachments.count
+            let remainingSlots = max(0, AttachmentStore.maxCount - currentCount)
+            guard remainingSlots > 0 else {
+                try? FileManager.default.removeItem(at: folder)
+                showToast("上传文件最多支持 \(AttachmentStore.maxCount) 个")
+                return
+            }
+            Task.detached(priority: .userInitiated) { [weak self] in
+                defer { try? FileManager.default.removeItem(at: folder) }
+                var toAttach: [(name: String, data: Data, isImage: Bool)] = []
+                var skipped = 0
+                var hadZip = false
+                for fileURL in fileURLs {
+                    guard toAttach.count < remainingSlots else {
+                        skipped += 1
+                        continue
+                    }
+                    guard let fileData = try? Data(contentsOf: fileURL, options: .mappedIfSafe), !fileData.isEmpty else {
+                        skipped += 1
+                        continue
+                    }
+                    let name = fileURL.lastPathComponent
+                    if name.lowercased().hasSuffix(".zip") || DeepSeekZipImporter.isZipData(fileData) {
+                        hadZip = true
+                        let slotsLeft = max(0, remainingSlots - toAttach.count)
+                        if let extracted = try? DeepSeekZipImporter.extractFilesForChat(fileData, maxFiles: slotsLeft) {
+                            for item in extracted.files {
+                                toAttach.append((item.fileName, item.data, item.isImage))
+                            }
+                            skipped += extracted.skippedUnsupported + extracted.skippedOversized + extracted.truncatedByLimit
+                        } else {
+                            skipped += 1
+                        }
+                    } else {
+                        toAttach.append((name, fileData, AttachmentStore.isImageName(name)))
+                    }
+                }
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    guard !toAttach.isEmpty else {
+                        self.showToast(hadZip ? "压缩包内没有可直接用于对话的文档、代码或图片" : "无法读取分享的文件")
+                        return
+                    }
+                    for item in toAttach {
+                        self.draftStore.addFile(
+                            data: item.data,
+                            fileName: item.name,
+                            isImage: item.isImage,
+                            for: targetSession,
+                            settings: settings,
+                            onToast: { self.showToast($0) }
+                        )
+                    }
+                    if hadZip {
+                        if skipped > 0 {
+                            self.showToast("已解压并添加 \(toAttach.count) 个文件到对话（跳过 \(skipped) 个不支持或超限项）")
+                        } else {
+                            self.showToast("已解压并添加 \(toAttach.count) 个文件到对话")
+                        }
+                    } else {
+                        self.showToast(toAttach.count == 1 ? "已将「\(toAttach[0].name)」添加到对话" : "已添加 \(toAttach.count) 个文件到对话")
+                    }
+                }
+            }
+
+        case .ask:
+            if let first = fileURLs.first {
+                handleIncomingFileURL(first)
+            }
+            try? FileManager.default.removeItem(at: folder)
+        }
+    }
 
     /// Handles files opened into Nuwa via iOS `onOpenURL` (e.g. WeChat "用其他应用打开" `.zip`/`.json`,
     /// or iOS proximity AirDrop / 碰一碰 `.nuwa` session share).
@@ -1453,6 +1673,7 @@ final class ChatStore: ObservableObject {
         // An unrelated reply can finish while the disk write runs.
         sessions = saveDeferredByImport ? mergeSessions(incoming).sessions : snapshot
         listStore.sync(from: sessions)
+        ShareSuggestionDonor.donateUsage(mode: .import)
         return merged.outcome
     }
 

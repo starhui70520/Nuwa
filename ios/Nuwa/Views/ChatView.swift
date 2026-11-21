@@ -251,6 +251,13 @@ struct ChatView: View {
             if searchPanelResults != nil { searchPanelResults = nil }
             if previewImage != nil { previewImage = nil }
         }
+        .onChange(of: chatStore.shareToChatFocusToken) { _, _ in
+            dismissKeyboard()
+            if drawerOpen { drawerOpen = false }
+            if showSettings { showSettings = false }
+            if searchPanelResults != nil { searchPanelResults = nil }
+            if previewImage != nil { previewImage = nil }
+        }
         .sheet(isPresented: $showSettings) {
             SettingsView(settings: settings, chatStore: chatStore)
                 .environment(\.nuwaFontScale, fontScale)

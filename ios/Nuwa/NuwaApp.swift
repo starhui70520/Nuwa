@@ -33,13 +33,17 @@ struct NuwaApp: App {
             .tint(Color.nuwaBrand)
             .task {
                 updateMonitor.start()
+                ShareSuggestionDonor.donateDefaultSuggestionsIfNeeded()
+                chatStore.consumePendingAppGroupShares(settings: settings)
             }
             .onOpenURL { url in
-                chatStore.handleIncomingFileURL(url)
+                chatStore.handleIncomingURL(url, settings: settings)
             }
             .onChange(of: scenePhase) { _, phase in
                 if phase == .active {
                     updateMonitor.handleForegroundActive()
+                    ShareSuggestionDonor.donateDefaultSuggestionsIfNeeded()
+                    chatStore.consumePendingAppGroupShares(settings: settings)
                 } else if phase == .background {
                     updateMonitor.handleBackground()
                 }

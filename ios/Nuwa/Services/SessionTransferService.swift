@@ -1,4 +1,5 @@
 import Foundation
+import Intents
 import LinkPresentation
 import SwiftUI
 import UIKit
@@ -103,6 +104,145 @@ private final class SessionSnapshotBox: @unchecked Sendable {
         defer { lock.unlock() }
         guard eligible, let session, !session.messages.isEmpty else { return nil }
         return session
+    }
+}
+
+/// Donates two `INSendMessageIntent` communication suggestions ("用 Nuwa 对话" & "导入到 Nuwa")
+/// so iOS places both quick-action circles directly in the Share Sheet's top Share Suggestions row
+/// (same mechanism used by DeepSeek, QQ "用 QQ 查看 / 用 QQ 闪传分享", and Doubao).
+enum ShareSuggestionDonor {
+    private static var lastDefaultDonationAt: Date?
+
+    @MainActor
+    static func donateDefaultSuggestionsIfNeeded(force: Bool = false) {
+        let now = Date()
+        if !force, let last = lastDefaultDonationAt, now.timeIntervalSince(last) < 600 {
+            return
+        }
+        lastDefaultDonationAt = now
+        donate(
+            conversationId: NuwaShareGroup.intentConversationImport,
+            title: "导入到 Nuwa",
+            symbolName: "square.and.arrow.down.on.square.fill",
+            topColor: UIColor(red: 0.055, green: 0.647, blue: 0.914, alpha: 1),
+            bottomColor: UIColor(red: 0.145, green: 0.388, blue: 0.922, alpha: 1),
+            date: now.addingTimeInterval(-2)
+        )
+        donate(
+            conversationId: NuwaShareGroup.intentConversationChat,
+            title: "用 Nuwa 对话",
+            symbolName: "bubble.left.and.text.bubble.right.fill",
+            topColor: UIColor(red: 0.231, green: 0.510, blue: 0.965, alpha: 1),
+            bottomColor: UIColor(red: 0.145, green: 0.388, blue: 0.922, alpha: 1),
+            date: now
+        )
+    }
+
+    @MainActor
+    static func donateUsage(mode: NuwaShareGroup.ActionMode) {
+        let now = Date()
+        switch mode {
+        case .chat:
+            donate(
+                conversationId: NuwaShareGroup.intentConversationChat,
+                title: "用 Nuwa 对话",
+                symbolName: "bubble.left.and.text.bubble.right.fill",
+                topColor: UIColor(red: 0.231, green: 0.510, blue: 0.965, alpha: 1),
+                bottomColor: UIColor(red: 0.145, green: 0.388, blue: 0.922, alpha: 1),
+                date: now
+            )
+        case .import:
+            donate(
+                conversationId: NuwaShareGroup.intentConversationImport,
+                title: "导入到 Nuwa",
+                symbolName: "square.and.arrow.down.on.square.fill",
+                topColor: UIColor(red: 0.055, green: 0.647, blue: 0.914, alpha: 1),
+                bottomColor: UIColor(red: 0.145, green: 0.388, blue: 0.922, alpha: 1),
+                date: now
+            )
+        case .ask:
+            donateDefaultSuggestionsIfNeeded(force: true)
+        }
+    }
+
+    private static func donate(
+        conversationId: String,
+        title: String,
+        symbolName: String,
+        topColor: UIColor,
+        bottomColor: UIColor,
+        date: Date
+    ) {
+        let iconImage = renderCircularBadge(symbolName: symbolName, topColor: topColor, bottomColor: bottomColor)
+        let inImage = iconImage.pngData().map { INImage(imageData: $0) }
+
+        let recipient = INPerson(
+            personHandle: INPersonHandle(value: conversationId, type: .unknown),
+            nameComponents: nil,
+            displayName: title,
+            image: inImage,
+            contactIdentifier: nil,
+            customIdentifier: conversationId
+        )
+        let intent = INSendMessageIntent(
+            recipients: [recipient],
+            outgoingMessageType: .outgoingMessageText,
+            content: nil,
+            speakableGroupName: INSpeakableString(spokenPhrase: title),
+            conversationIdentifier: conversationId,
+            serviceName: "Nuwa",
+            sender: nil,
+            attachments: nil
+        )
+        if let inImage {
+            intent.setImage(inImage, forParameterNamed: \.speakableGroupName)
+        }
+
+        let interaction = INInteraction(intent: intent, response: nil)
+        interaction.direction = .outgoing
+        interaction.groupIdentifier = conversationId
+        interaction.dateInterval = DateInterval(start: date, duration: 1)
+        interaction.donate { _ in }
+    }
+
+    private static func renderCircularBadge(
+        symbolName: String,
+        topColor: UIColor,
+        bottomColor: UIColor
+    ) -> UIImage {
+        let size = CGSize(width: 192, height: 192)
+        let renderer = UIGraphicsImageRenderer(size: size)
+        return renderer.image { ctx in
+            let rect = CGRect(origin: .zero, size: size)
+            let path = UIBezierPath(ovalIn: rect)
+            path.addClip()
+
+            let colors = [topColor.cgColor, bottomColor.cgColor] as CFArray
+            if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 1]) {
+                ctx.cgContext.drawLinearGradient(
+                    gradient,
+                    start: CGPoint(x: size.width * 0.2, y: 0),
+                    end: CGPoint(x: size.width * 0.8, y: size.height),
+                    options: []
+                )
+            } else {
+                topColor.setFill()
+                ctx.fill(rect)
+            }
+
+            let config = UIImage.SymbolConfiguration(pointSize: 78, weight: .semibold)
+            if let symbol = UIImage(systemName: symbolName, withConfiguration: config)?
+                .withTintColor(.white, renderingMode: .alwaysOriginal) {
+                let symSize = symbol.size
+                let drawRect = CGRect(
+                    x: (size.width - symSize.width) / 2,
+                    y: (size.height - symSize.height) / 2,
+                    width: symSize.width,
+                    height: symSize.height
+                )
+                symbol.draw(in: drawRect)
+            }
+        }
     }
 }
 
