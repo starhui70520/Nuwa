@@ -134,6 +134,7 @@ struct SettingsView: View {
 
     private let docsURL = URL(string: "https://api-docs.deepseek.com/zh-cn/")!
     private let topUpURL = URL(string: "https://platform.deepseek.com/top_up")!
+    private let privacyPolicyURL = URL(string: "https://rankchord.com/nuwa/privacy")!
 
     private var fontScale: CGFloat {
         CGFloat(settings.chatFontSize / 16.0)
@@ -544,6 +545,14 @@ struct SettingsView: View {
                 value: nil
             ) {
                 openURL(docsURL)
+            }
+            rowDivider
+            navRow(
+                icon: "hand.raised",
+                label: L10n.t("privacyPolicy", locale: loc),
+                value: nil
+            ) {
+                openURL(privacyPolicyURL)
             }
         }
 

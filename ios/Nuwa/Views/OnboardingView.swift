@@ -24,6 +24,7 @@ struct OnboardingScreenView: View {
 
     private let docsURL = URL(string: "https://api-docs.deepseek.com/zh-cn/")!
     private let platformKeysURL = URL(string: "https://platform.deepseek.com/api_keys")!
+    private let privacyPolicyURL = URL(string: "https://rankchord.com/nuwa/privacy")!
 
     var body: some View {
         ZStack {
@@ -232,10 +233,21 @@ struct OnboardingScreenView: View {
                                 }
                             }
 
-                            Text("凭据与历史对话仅保存在本地设备")
-                                .font(NuwaFont.badge(fontScale))
-                                .foregroundStyle(Color.nuwaLabelTertiary)
-                                .padding(.top, 6)
+                            HStack(spacing: 6) {
+                                Text("凭据与历史对话仅保存在本地设备")
+                                    .foregroundStyle(Color.nuwaLabelTertiary)
+                                Text("·")
+                                    .foregroundStyle(Color.nuwaLabelTertiary)
+                                Button {
+                                    openURL(privacyPolicyURL)
+                                } label: {
+                                    Text(L10n.t("privacyPolicy", locale: settings.locale))
+                                        .foregroundStyle(Color.nuwaBrandText)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .font(NuwaFont.badge(fontScale))
+                            .padding(.top, 6)
                         }
                         .frame(maxWidth: 420)
                         .padding(.horizontal, 24)
