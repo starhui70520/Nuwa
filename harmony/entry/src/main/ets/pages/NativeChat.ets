@@ -411,6 +411,7 @@ struct NativeChat {
   @StorageProp(NUWA_CONTINUATION_SEQ_KEY) @Watch('handleContinuationSeq') private continuationSeq: number = 0;
   @State private incomingChoice: NativeIncomingSharePayload | null = null;
   @State private composerHeight: number = 112;
+  private readonly navPathStack: NavPathStack = new NavPathStack();
   private readonly headerCapsuleModifier = new ImmersiveGlassCapsuleModifier(true);
   private readonly composerElevatedModifier = new ImmersiveComposerModifier(true);
   private readonly surfaceModifier = new ImmersiveSurfaceModifier();
@@ -3361,16 +3362,18 @@ struct NativeChat {
       if (this.history.activeId !== null) {
         Row({ space: 4 }) {
           Text(this.session()?.title || this.label('新对话', "New chat"))
-            .fontSize(this.appFontSize(this.compact() ? 13 : 15)).fontWeight(FontWeight.Medium)
+            .fontSize(this.appFontSize(this.compact() ? 13 : 14)).fontWeight(FontWeight.Medium)
             .fontColor($r('app.color.native_chat_primary')).textAlign(TextAlign.Center)
-            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-            .constraintSize({ maxWidth: this.compact() ? 130 : Math.max(120, this.viewportWidth - 220) })
+            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).wordBreak(WordBreak.BREAK_ALL)
+            .constraintSize({ maxWidth: this.compact() ? 110 : Math.max(96, this.viewportWidth - 256) })
           if (!this.compact()) {
             Image($r('app.media.native_chevron_down')).width(11).height(11)
               .colorFilter(nativeIconTint($r('app.color.native_chat_secondary'))).draggable(false)
           }
         }
-        .padding({ left: 10, right: 8, top: 6, bottom: 6 }).borderRadius(999)
+        .height(this.compact() ? 30 : 42)
+        .padding({ left: 14, right: 10 }).borderRadius(999)
+        .attributeModifier(this.headerCapsuleModifier)
         .clickEffect(NATIVE_PILL_CLICK_EFFECT)
         .bindMenu(this.activeChatTitleMenu())
       }
@@ -6237,30 +6240,75 @@ struct NativeChat {
         if (!this.editId && this.followLatest && this.laterCount === 0) this.scrollToLatest();
       }
     })
-    .padding({
-      left: 20,
-      right: 20,
-      top: floatingChrome ? (this.wide() ? 66 : 64) : 0,
-      bottom: floatingChrome ? Math.max(124, this.composerHeight + 14) : 16,
-    })
+    .contentStartOffset(floatingChrome && this.viewportHeight > 260 ? (this.wide() ? 66 : 64) : 0)
+    .contentEndOffset(floatingChrome && this.viewportHeight > 260 ? Math.max(124, this.composerHeight + 14) : 16)
+    .padding({ left: 20, right: 20 })
+  }
+
+  private shouldShowChatHeader(): boolean {
+    return (this.wide() && (this.history.activeId !== null || this.settings.desktopSidebarCollapsed)) ||
+      (!this.wide() && this.viewportHeight > 180);
+  }
+
+  private chatHeaderHeight(): number {
+    return this.wide() ? 60 : this.compact() ? 40 : 58;
+  }
+
+  @Builder
+  private floatingNavHeader() {
+    Column() {
+      if (this.wide() && (this.history.activeId !== null || this.settings.desktopSidebarCollapsed)) {
+        this.desktopHeader()
+      } else if (!this.wide() && this.viewportHeight > 180) {
+        this.header()
+      }
+    }
+    .width('100%').alignItems(HorizontalAlign.Center)
   }
 
   @Builder
   private chatPage() {
-    if (this.floatingImmersiveChat()) {
-      Stack({ alignContent: Alignment.Top }) {
-        Column() {
-          ForEach([this.history.activeId ?? ''], (id: string) => {
-            this.transcriptList(id, true)
-          }, (id: string): string => id)
-        }
-        .width('100%').height('100%').alignItems(HorizontalAlign.Center)
+    Navigation(this.navPathStack) {
+      if (this.floatingImmersiveChat()) {
+        Stack({ alignContent: Alignment.Bottom }) {
+          Column() {
+            ForEach([this.history.activeId ?? ''], (id: string) => {
+              this.transcriptList(id, true)
+            }, (id: string): string => id)
+          }
+          .width('100%').height('100%').alignItems(HorizontalAlign.Center)
 
+          if (this.loaded && (this.historySaveError || this.migrationReloadFailed)) {
+            Column() {
+              Row({ space: 12 }) {
+                Text(this.migrationReloadFailed ? this.label('无法读取导入的对话，请重试', 'Unable to load imported chats. Please retry.') :
+                  this.label('对话或附件尚未保存到本机，关闭页面可能丢失，请重试',
+                    'Chats or attachments have not been saved locally. Closing this page may lose them. Please retry.'))
+                  .fontSize(this.appFontSize(14)).fontColor($r('app.color.native_chat_primary')).layoutWeight(1)
+                Button(this.label('重试', 'Retry'), { type: ButtonType.Capsule })
+                  .fontSize(this.appFontSize(13)).fontColor($r('app.color.native_chat_primary')).height(30)
+                  .backgroundColor($r('app.color.native_chat_surface'))
+                  .border({ width: 1, color: $r('app.color.native_chat_stroke') })
+                  .enabled(!this.backupBusy && !this.reloadingMigratedHistory).onClick(() => { this.retryHistorySave(); })
+              }
+              .width('100%').constraintSize({ maxWidth: 680 }).padding({ left: 16, right: 16, top: 8, bottom: 8 })
+              .borderRadius(16).attributeModifier(this.composerElevatedModifier)
+            }
+            .width('100%').alignItems(HorizontalAlign.Center)
+            .position({ top: this.chatHeaderHeight() + 4, left: 0, right: 0 })
+            .padding({ left: 14, right: 14 })
+          }
+
+          Column() {
+            this.composerContainer()
+          }
+          .width('100%').alignItems(HorizontalAlign.Center)
+        }
+        .width('100%').height('100%')
+      } else {
         Column() {
-          if (this.wide() && (this.history.activeId !== null || this.settings.desktopSidebarCollapsed)) {
-            this.desktopHeader()
-          } else if (!this.wide() && this.viewportHeight > 180) {
-            this.header()
+          if (this.shouldShowChatHeader()) {
+            Blank().height(this.chatHeaderHeight())
           }
           if (this.loaded && (this.historySaveError || this.migrationReloadFailed)) {
             Row({ space: 12 }) {
@@ -6274,101 +6322,65 @@ struct NativeChat {
                 .border({ width: 1, color: $r('app.color.native_chat_stroke') })
                 .enabled(!this.backupBusy && !this.reloadingMigratedHistory).onClick(() => { this.retryHistorySave(); })
             }
-            .width('100%').constraintSize({ maxWidth: 680 }).padding({ left: 16, right: 16, top: 8, bottom: 8 })
-            .borderRadius(16).attributeModifier(this.headerCapsuleModifier).margin({ top: 4 })
+            .width('100%').constraintSize({ maxWidth: 680 }).padding({ left: 16, right: 16, top: 12, bottom: 12 })
           }
-        }
-        .width('100%').alignItems(HorizontalAlign.Center)
-        .linearGradient({
-          direction: GradientDirection.Bottom,
-          colors: [
-            [$r('app.color.native_chat_bg'), 0.0],
-            [$r('app.color.native_chat_bg_fade'), 0.55],
-            [$r('app.color.native_chat_bg_clear'), 1.0],
-          ],
-        })
-
-        Column() {
-          this.composerContainer()
-        }
-        .width('100%').alignItems(HorizontalAlign.Center)
-        .position({ bottom: 0, left: 0, right: 0 })
-        .padding({ top: 18 })
-        .linearGradient({
-          direction: GradientDirection.Top,
-          colors: [
-            [$r('app.color.native_chat_bg'), 0.0],
-            [$r('app.color.native_chat_bg_fade'), 0.55],
-            [$r('app.color.native_chat_bg_clear'), 1.0],
-          ],
-        })
-      }
-      .width('100%').height('100%').backgroundColor($r('app.color.native_chat_bg'))
-      .bindSheet($$this.settingsVisible, this.settingsPage(), this.settingsSheetOptions())
-    } else {
-      Column() {
-        if (this.wide() && (this.history.activeId !== null || this.settings.desktopSidebarCollapsed)) {
-          this.desktopHeader()
-        } else if (!this.wide() && this.viewportHeight > 180) {
-          this.header()
-        }
-        if (this.loaded && (this.historySaveError || this.migrationReloadFailed)) {
-          Row({ space: 12 }) {
-            Text(this.migrationReloadFailed ? this.label('无法读取导入的对话，请重试', 'Unable to load imported chats. Please retry.') :
-              this.label('对话或附件尚未保存到本机，关闭页面可能丢失，请重试',
-                'Chats or attachments have not been saved locally. Closing this page may lose them. Please retry.'))
-              .fontSize(this.appFontSize(14)).fontColor($r('app.color.native_chat_primary')).layoutWeight(1)
-            Button(this.label('重试', 'Retry'), { type: ButtonType.Capsule })
-              .fontSize(this.appFontSize(13)).fontColor($r('app.color.native_chat_primary')).height(30)
-              .backgroundColor($r('app.color.native_chat_surface'))
-              .border({ width: 1, color: $r('app.color.native_chat_stroke') })
-              .enabled(!this.backupBusy && !this.reloadingMigratedHistory).onClick(() => { this.retryHistorySave(); })
-          }
-          .width('100%').constraintSize({ maxWidth: 680 }).padding({ left: 16, right: 16, top: 12, bottom: 12 })
-        }
-        if (!this.loaded) {
-          Column({ space: 8 }) {
-            if (this.status) {
-              Text(this.status).fontColor($r('app.color.native_chat_secondary'))
-              Button(this.label('重试', "Retry")).fontSize(this.appFontSize(14)).onClick(() => { void this.load(); })
-            } else {
+          if (!this.loaded) {
+            Column({ space: 8 }) {
+              if (this.status) {
+                Text(this.status).fontColor($r('app.color.native_chat_secondary'))
+                Button(this.label('重试', "Retry")).fontSize(this.appFontSize(14)).onClick(() => { void this.load(); })
+              } else {
+                LoadingProgress().width(28).height(28).color($r('app.color.native_chat_blue'))
+              }
+            }
+            .layoutWeight(1).width('100%').justifyContent(FlexAlign.Center)
+          } else if (this.session()?.unloaded) {
+            Column() {
               LoadingProgress().width(28).height(28).color($r('app.color.native_chat_blue'))
             }
-          }
-          .layoutWeight(1).width('100%').justifyContent(FlexAlign.Center)
-        } else if (this.session()?.unloaded) {
-          Column() {
-            LoadingProgress().width(28).height(28).color($r('app.color.native_chat_blue'))
-          }
-          .layoutWeight(1).width('100%').justifyContent(FlexAlign.Center)
-        } else if (this.session()?.unreadable) {
-          this.unreadableChat(this.history.activeId ?? '')
-        } else if (this.history.activeId === null) {
-          if (this.centeredComposer()) {
-            Column({ space: this.viewportHeight <= 500 ? 18 : 26 }) {
-              this.welcome(false)
-              this.composerContainer()
+            .layoutWeight(1).width('100%').justifyContent(FlexAlign.Center)
+          } else if (this.session()?.unreadable) {
+            this.unreadableChat(this.history.activeId ?? '')
+          } else if (this.history.activeId === null) {
+            if (this.centeredComposer()) {
+              Column({ space: this.viewportHeight <= 500 ? 18 : 26 }) {
+                this.welcome(false)
+                this.composerContainer()
+              }
+              .width('100%').layoutWeight(1).justifyContent(FlexAlign.Center)
+            } else {
+              this.welcome()
             }
-            .width('100%').layoutWeight(1).justifyContent(FlexAlign.Center)
           } else {
-            this.welcome()
+            ForEach([this.history.activeId ?? ''], (id: string) => {
+              this.transcriptList(id, false)
+            }, (id: string): string => id)
           }
-        } else {
-          ForEach([this.history.activeId ?? ''], (id: string) => {
-            this.transcriptList(id, false)
-          }, (id: string): string => id)
+          if (this.loaded && this.status) {
+            Text(this.status).fontSize(this.appFontSize(13)).fontColor($r('app.color.native_chat_error'))
+              .width('100%').padding({ left: 16, right: 16, bottom: 4 })
+          }
+          if (!this.centeredComposer() && !this.session()?.unreadable) {
+            this.composerContainer()
+          }
         }
-        if (this.loaded && this.status) {
-          Text(this.status).fontSize(this.appFontSize(13)).fontColor($r('app.color.native_chat_error'))
-            .width('100%').padding({ left: 16, right: 16, bottom: 4 })
-        }
-        if (!this.centeredComposer() && !this.session()?.unreadable) {
-          this.composerContainer()
-        }
+        .width('100%').height('100%')
       }
-      .width('100%').height('100%').backgroundColor($r('app.color.native_chat_bg'))
-      .bindSheet($$this.settingsVisible, this.settingsPage(), this.settingsSheetOptions())
     }
+    .mode(NavigationMode.Stack)
+    .titleMode(NavigationTitleMode.Mini)
+    .hideBackButton(true)
+    .hideToolBar(true)
+    .hideTitleBar(!this.shouldShowChatHeader())
+    .title({
+      builder: (): void => { this.floatingNavHeader(); },
+      height: this.chatHeaderHeight(),
+    }, {
+      backgroundColor: Color.Transparent,
+      barStyle: BarStyle.STACK,
+    })
+    .width('100%').height('100%').backgroundColor($r('app.color.native_chat_bg'))
+    .bindSheet($$this.settingsVisible, this.settingsPage(), this.settingsSheetOptions())
   }
 
   @Builder

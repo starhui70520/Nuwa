@@ -138,23 +138,27 @@
     },
     {
       "name": "native_immersive_tint",
-      "value": "#C428282C"
+      "value": "#24FFFFFF"
     },
     {
       "name": "native_immersive_composer_tint",
-      "value": "#D926262A"
+      "value": "#4D2A2A32"
     },
     {
       "name": "native_glass_rim",
-      "value": "#26FFFFFF"
+      "value": "#38FFFFFF"
+    },
+    {
+      "name": "native_glass_sheen",
+      "value": "#1CFFFFFF"
     },
     {
       "name": "native_glass_shadow",
-      "value": "#4D000000"
+      "value": "#59000000"
     },
     {
       "name": "native_glass_composer_shadow",
-      "value": "#5C000000"
+      "value": "#66000000"
     },
     {
       "name": "native_chat_drag_mask",

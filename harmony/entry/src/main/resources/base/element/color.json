@@ -142,15 +142,19 @@
     },
     {
       "name": "native_immersive_tint",
-      "value": "#EBFFFFFF"
+      "value": "#26FFFFFF"
     },
     {
       "name": "native_immersive_composer_tint",
-      "value": "#F2FFFFFF"
+      "value": "#A6FFFFFF"
     },
     {
       "name": "native_glass_rim",
-      "value": "#14000000"
+      "value": "#1A000000"
+    },
+    {
+      "name": "native_glass_sheen",
+      "value": "#33FFFFFF"
     },
     {
       "name": "native_glass_shadow",

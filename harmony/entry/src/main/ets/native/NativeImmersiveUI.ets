@@ -17,9 +17,10 @@ export function isImmersiveMaterialAvailable(): boolean {
     if (deviceInfo.sdkApiVersion >= 26) {
       cachedImmersiveSupport = uiMaterial.isImmersiveMaterialSupported();
       const level = cachedImmersiveSupport ? uiMaterial.getGlobalMaterialLevel() : -1;
+      const info = uiMaterial.getMaterialInfo();
       hilog.info(IMMERSIVE_LOG_DOMAIN, IMMERSIVE_LOG_TAG,
-        'sdkApi=%{public}d immersiveSupported=%{public}s level=%{public}d',
-        deviceInfo.sdkApiVersion, String(cachedImmersiveSupport), level);
+        'sdkApi=%{public}d supported=%{public}s level=%{public}d state=%{public}d type=%{public}d',
+        deviceInfo.sdkApiVersion, String(cachedImmersiveSupport), level, info.state, info.type);
       return cachedImmersiveSupport;
     }
   } catch {
@@ -111,13 +112,11 @@ export const NATIVE_CARD_CLICK_EFFECT: ClickEffect = {
 };
 
 /**
- * Floating luminous glass capsule for header chrome & floating action pills.
- * Note: HarmonyOS 26+ restricts systemMaterial(ImmersiveMaterial) on ordinary page containers
- * outside Navigation titleBar / bottom TabBar (logging "Material inactive: out of scope"),
- * whereas system Menu/Dialog/Sheet/Toggle/Toast get ImmersiveMaterial globally via module.json5.
- * For floating custom chrome, combining GPU BlurStyle + pure translucent crystal fill + specular rim +
- * soft elevation shadow + HarmonyOS 6.0+ HDS pointLight/pressShadow delivers crisp, reliable glass
- * on both pure-white backgrounds and scrolling content across API 12–26+.
+ * Native HarmonyOS 26+ ImmersiveMaterial modifier for Navigation title bar chrome.
+ * Because these capsules live inside Navigation().title(..., { barStyle: BarStyle.STACK }),
+ * RenderService activates genuine GPU Immersive Light (optical refraction, specular rim,
+ * press deformation, and touch light) with zero out-of-scope rejection.
+ * Falls back cleanly to high-luminance frosted backgroundEffect + HDS pointLight on API 12-25.
  */
 export class ImmersiveGlassCapsuleModifier implements AttributeModifier<CommonAttribute> {
   private readonly interactive: boolean;
@@ -127,19 +126,40 @@ export class ImmersiveGlassCapsuleModifier implements AttributeModifier<CommonAt
   }
 
   applyNormalAttribute(instance: CommonAttribute): void {
+    if (isImmersiveMaterialAvailable()) {
+      try {
+        instance
+          .backgroundColor(Color.Transparent)
+          .systemMaterial(new uiMaterial.ImmersiveMaterial({
+            style: uiMaterial.ImmersiveStyle.THIN,
+            applyShadow: true,
+            interactive: this.interactive,
+            lightEffect: {},
+          }));
+        return;
+      } catch {
+        // Fall through to GPU frosted glass fallback.
+      }
+    }
     instance
-      .backgroundColor($r('app.color.native_immersive_tint'))
-      .backgroundBlurStyle(BlurStyle.COMPONENT_THIN)
+      .backgroundColor(Color.Transparent)
+      .backgroundEffect({
+        radius: 36,
+        saturation: 1.5,
+        brightness: 1.08,
+        color: $r('app.color.native_immersive_composer_tint'),
+      })
       .border({ width: 0.75, color: $r('app.color.native_glass_rim') })
-      .shadow({ radius: 12, color: $r('app.color.native_glass_shadow'), offsetY: 3 });
+      .shadow({ radius: 14, color: $r('app.color.native_glass_shadow'), offsetY: 3 });
     applyHdsGlassLight(instance, this.interactive);
   }
 }
 
 /**
- * Floating luminous glass dock for the chat composer.
- * Crisp translucent crystal surface with backdrop blur, delicate rim, airy elevation shadow,
- * and HDS border point-light illumination so scrolled messages softly glow beneath.
+ * Floating luminous crystal glass dock for the chat composer.
+ * Uses pure GPU backgroundEffect (44px blur, boosted saturation & brightness, low-alpha smoked/crystal tint)
+ * + delicate luminous glass rim + subtle top specular sheen + HDS pointLight so scrolled messages
+ * genuinely refract and glow behind the composer across both light and dark modes (API 12-26+).
  */
 export class ImmersiveComposerModifier implements AttributeModifier<CommonAttribute> {
   private readonly elevated: boolean;
@@ -150,10 +170,22 @@ export class ImmersiveComposerModifier implements AttributeModifier<CommonAttrib
 
   applyNormalAttribute(instance: CommonAttribute): void {
     instance
-      .backgroundColor($r('app.color.native_immersive_composer_tint'))
-      .backgroundBlurStyle(this.elevated ? BlurStyle.COMPONENT_THICK : BlurStyle.COMPONENT_THIN)
-      .border({ width: 0.75, color: $r('app.color.native_glass_rim') })
-      .shadow({ radius: 18, offsetY: 4, color: $r('app.color.native_glass_composer_shadow') });
+      .backgroundColor(Color.Transparent)
+      .backgroundEffect({
+        radius: this.elevated ? 44 : 32,
+        saturation: 1.6,
+        brightness: 1.1,
+        color: $r('app.color.native_immersive_composer_tint'),
+      })
+      .linearGradient({
+        direction: GradientDirection.Bottom,
+        colors: [
+          [$r('app.color.native_glass_sheen'), 0.0],
+          ['#00FFFFFF', 0.35],
+        ],
+      })
+      .border({ width: 0.85, color: $r('app.color.native_glass_rim') })
+      .shadow({ radius: 20, offsetY: 6, color: $r('app.color.native_glass_composer_shadow') });
     applyHdsGlassLight(instance, false);
   }
 }
@@ -164,10 +196,15 @@ export class ImmersiveComposerModifier implements AttributeModifier<CommonAttrib
 export class ImmersiveSurfaceModifier implements AttributeModifier<CommonAttribute> {
   applyNormalAttribute(instance: CommonAttribute): void {
     instance
-      .backgroundColor($r('app.color.native_chat_surface'))
-      .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-      .border({ width: 0.75, color: $r('app.color.native_glass_rim') })
-      .shadow({ radius: 22, offsetY: 8, color: '#24000000' });
+      .backgroundColor(Color.Transparent)
+      .backgroundEffect({
+        radius: 48,
+        saturation: 1.5,
+        brightness: 1.08,
+        color: $r('app.color.native_immersive_composer_tint'),
+      })
+      .border({ width: 0.85, color: $r('app.color.native_glass_rim') })
+      .shadow({ radius: 24, offsetY: 8, color: '#2E000000' });
     applyHdsGlassLight(instance, false);
   }
 }
