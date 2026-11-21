@@ -15,11 +15,13 @@ import {
   NativeConversation,
   NativeConversationMessage,
   NativeConversationState,
+  NativeConversationSummary,
   NativeStoredMessage,
   appendBranch,
   createConversation,
   createConversationMessage,
   upsertConversation,
+  unloadedConversation,
 } from './NativeConversation';
 
 const TRANSCRIPT_FILE = 'nuwa-native-chat.json';
@@ -35,12 +37,7 @@ interface LegacyConversationDocument extends NativeConversationState {
   version: number;
 }
 
-interface SessionMetadata {
-  id: string;
-  title: string;
-  createdAt: number;
-  updatedAt: number;
-  pinnedAt?: number;
+interface SessionMetadata extends NativeConversationSummary {
   rootMessageId: string | null;
   messageCount: number;
 }
@@ -561,13 +558,8 @@ export class NativeChatStorage {
           committedIndexes.set(directory, index);
           return {
             activeId: index.activeId,
-            sessions: index.sessions.map<NativeConversation>((entry: SessionIndexEntry): NativeConversation => {
-              const metadata = entry.metadata;
-              return {
-                id: metadata.id, title: metadata.title, createdAt: metadata.createdAt, updatedAt: metadata.updatedAt,
-                pinnedAt: metadata.pinnedAt, rootMessageId: null, messages: [], unloaded: true,
-              };
-            }),
+            sessions: index.sessions.map<NativeConversation>((entry: SessionIndexEntry): NativeConversation =>
+              unloadedConversation(entry.metadata)),
           };
         }
         state = await loadIndexedHistory(directory, index);
@@ -620,6 +612,12 @@ export class NativeChatStorage {
       }
       return session;
     });
+  }
+
+  forgetConversationImageCache(context: common.UIAbilityContext, ids: string[]): void {
+    const path = `${context.filesDir}/${TRANSCRIPT_FILE}`;
+    const cached = cachedSessionImages.get(path);
+    for (const id of ids) cached?.delete(id);
   }
 
   // Pass every modified session ID for a streaming-only checkpoint of an existing history.

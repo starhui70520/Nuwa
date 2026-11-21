@@ -56,12 +56,13 @@ import { NativeVoiceSpectrum } from '../native/NativeVoiceSpectrum';
 import { NativeToolTimeline, NativeToolTimelineStep, NativeToolTimelineView } from '../native/NativeToolTimeline';
 import { NativeToolTimelinePanel } from '../native/NativeToolTimelinePanel';
 import { NativeChatStorage } from '../native/NativeChatStorage';
+import { NativeConversationCache } from '../native/NativeConversationCache';
 import {
   appendBranch, createConversation, createConversationMessage, deleteConversations, groupConversations,
   messageVersions, NativeConversation, NativeConversationGroup, NativeConversationMessage, NativeConversationState,
   renameConversation, replaceConversationAttachment, selectConversation, selectMessageVersion,
   setConversationsPinned, toggleConversationPin,
-  updateConversationMessage, upsertConversation, visibleMessages,
+  unloadedConversation, updateConversationMessage, upsertConversation, visibleMessages,
 } from '../native/NativeConversation';
 import { NativeMarkdown } from '../native/NativeMarkdown';
 import { NativeMathRendererHost } from '../native/NativeMathRendererHost';
@@ -330,6 +331,9 @@ struct NativeChat {
   private composerTooltipTimer: number = -1;
 
   private readonly storage = new NativeChatStorage();
+  private readonly conversationCache = new NativeConversationCache();
+  private historyWritesPending: number = 0;
+  private sidebarMetadataLoads: number = 0;
   private historySaveSequence: number = 0;
   private historyFullSaveSequence: number = 0;
   private historyFailedSaveSequence: number = 0;
@@ -488,6 +492,7 @@ struct NativeChat {
       if (this.migrationPageWasHidden) void this.reloadMigratedHistory();
     } else {
       this.retryHistorySave();
+      this.trimConversationCache();
     }
   }
 
@@ -506,6 +511,7 @@ struct NativeChat {
       } else {
         this.history = history;
       }
+      this.conversationCache.confirm(this.history.sessions);
       reloaded = true;
     } catch {
       this.cancelHistorySaveRetry();
@@ -520,6 +526,7 @@ struct NativeChat {
         this.migrationInProgress = false;
         this.restoreAuthorizationSettings();
         this.retryHistorySave();
+        this.trimConversationCache();
       }
     }
   }
@@ -607,6 +614,7 @@ struct NativeChat {
       else this.returnToSettings();
     } else if (this.renamingId) {
       this.cancelSidebarRename(this.renamingId);
+      this.trimConversationCache();
     } else if (this.selecting) {
       this.resetSelection();
     } else if (this.drawerOpen) {
@@ -653,6 +661,7 @@ struct NativeChat {
       const context = this.host();
       // Start a fresh chat on cold launch. Drafts are restored by session when opened.
       this.history = selectConversation(await this.storage.loadConversations(context, true), null);
+      this.conversationCache.confirm(this.history.sessions);
       try {
         this.settings = await this.settingsStore.load(context);
         if (this.updateNotice) this.presentUpdate(this.updateNotice.update);
@@ -674,6 +683,7 @@ struct NativeChat {
       await this.loadDrafts(context);
       await this.loadMigrationUsed(context);
       this.loaded = true;
+      this.trimConversationCache();
       this.applyTheme();
       this.scrollToLatest();
       if (!this.coldMigrationChecked) {
@@ -688,6 +698,7 @@ struct NativeChat {
   private async save(context: common.UIAbilityContext = this.host(), checkpoint: boolean = false): Promise<void> {
     if (!this.loaded || this.deletingSessions || this.committingHistoryImport || this.migrationNavigationStarted) return;
     const sequence = ++this.historySaveSequence;
+    this.historyWritesPending++;
     let full = !checkpoint || this.hasPendingHistorySave();
     try {
       let snapshot = this.historyWithPartialReplies();
@@ -695,6 +706,7 @@ struct NativeChat {
         const dirty = this.replies.map<string>((reply: NativeReply): string => reply.sessionId);
         try {
           await this.storage.saveConversations(context, snapshot, dirty);
+          this.conversationCache.confirm(snapshot.sessions, new Set<string>(dirty));
         } catch (error) {
           if (this.deletingSessions) return;
           // Retry with the current history after the import replaces its snapshot.
@@ -707,6 +719,7 @@ struct NativeChat {
         await this.storage.saveConversations(context, snapshot);
       }
       if (full) {
+        this.conversationCache.confirm(snapshot.sessions);
         this.historyFullSaveSequence = Math.max(sequence, this.historyFullSaveSequence);
         if (!this.hasPendingHistorySave()) {
           this.historySaveError = false;
@@ -720,6 +733,9 @@ struct NativeChat {
         this.historyFailedSaveSequence = Math.max(this.historyFailedSaveSequence, sequence);
         this.scheduleHistorySaveRetry();
       }
+    } finally {
+      this.historyWritesPending--;
+      this.trimConversationCache();
     }
   }
 
@@ -1300,6 +1316,28 @@ struct NativeChat {
     return this.history.sessions.find((item: NativeConversation): boolean => item.id === id);
   }
 
+  private trimConversationCache(): void {
+    if (!this.loaded || !this.visible || this.backupBusy || this.migrationInProgress || this.reloadingMigratedHistory ||
+      this.deletingSessions || this.signingOut || this.draftSaving || this.selecting || this.sidebarMetadataLoads > 0 ||
+      this.historyWritesPending > 0 || this.hasPendingHistorySave()) return;
+    const protectedIds = new Set<string>(this.retryingConversationIds);
+    if (this.history.activeId) protectedIds.add(this.history.activeId);
+    if (this.visibleSession) protectedIds.add(this.visibleSession.id);
+    if (this.renamingId) protectedIds.add(this.renamingId);
+    for (const reply of this.replies) protectedIds.add(reply.sessionId);
+    this.stoppedUploadReplies.forEach((reply: NativeReply): void => { protectedIds.add(reply.sessionId); });
+    const ids = this.conversationCache.evictable(this.history.sessions, protectedIds);
+    if (!ids.length) return;
+    for (const id of ids) this.conversationCache.forget(id);
+    this.storage.forgetConversationImageCache(this.host(), ids);
+    const evicted = new Set<string>(ids);
+    this.history = {
+      activeId: this.history.activeId,
+      sessions: this.history.sessions.map<NativeConversation>((session: NativeConversation): NativeConversation =>
+        evicted.has(session.id) ? unloadedConversation(session) : session),
+    };
+  }
+
   private async retryConversation(id: string): Promise<void> {
     const previous = this.session(id);
     if (!(previous?.unloaded || previous?.unreadable) || !this.canModifyHistory() || this.deletingSessions ||
@@ -1309,6 +1347,8 @@ struct NativeChat {
       const recovered = await this.storage.loadConversation(this.host(), id);
       if (this.deletingSessionIds.has(id) || this.session(id) !== previous) return;
       this.history = upsertConversation(this.history, recovered);
+      this.conversationCache.confirm(this.history.sessions, new Set<string>([id]));
+      if (this.history.activeId !== id) this.conversationCache.touch(id);
       if (this.history.activeId === id) this.scrollToLatest();
       if (this.removedDraftFiles.size > 0) this.scheduleDraftSave(true);
     } catch {
@@ -1321,6 +1361,7 @@ struct NativeChat {
       }
     } finally {
       this.retryingConversationIds = this.retryingConversationIds.filter((pending: string): boolean => pending !== id);
+      this.trimConversationCache();
     }
   }
 
@@ -1329,12 +1370,18 @@ struct NativeChat {
     const stored = await this.storage.loadConversations(this.host());
     const byId = new Map<string, NativeConversation>();
     for (const session of stored.sessions) byId.set(session.id, session);
-    const sessions = this.history.sessions.map<NativeConversation>((session: NativeConversation): NativeConversation =>
-      session.unloaded ? byId.get(session.id) ?? session : session);
+    const restored = new Set<string>();
+    const sessions = this.history.sessions.map<NativeConversation>((session: NativeConversation): NativeConversation => {
+      const body = session.unloaded ? byId.get(session.id) : undefined;
+      if (!body) return session;
+      restored.add(session.id);
+      return body;
+    });
     if (sessions.some((session: NativeConversation): boolean => session.unloaded === true)) {
       throw new Error('Missing native conversation body');
     }
     this.history = { sessions, activeId: this.history.activeId };
+    this.conversationCache.confirm(this.history.sessions, restored);
   }
 
   private reply(id: string | null = this.history.activeId): NativeReply | undefined {
@@ -1357,6 +1404,7 @@ struct NativeChat {
     const sessionChanged = session?.id !== this.visibleSession?.id;
     const previousLastId = this.messagePath[this.messagePath.length - 1]?.id;
     if (sessionChanged) {
+      if (session) this.conversationCache.touch(session.id);
       this.messageLimit = CHAT_PAGE_SIZE;
       this.rangeFromTop = false;
       this.firstVisibleRow = 0;
@@ -1546,6 +1594,7 @@ struct NativeChat {
   private resetSelection(): void {
     this.selecting = false;
     this.selectedIds = [];
+    this.trimConversationCache();
   }
 
   private toggleSelected(id: string): void {
@@ -1696,6 +1745,7 @@ struct NativeChat {
       } else if (this.deleteNotice) {
         this.refreshDeleteNotice(notice.mode, notice.count, false);
       }
+      this.trimConversationCache();
     }
     if (failed) {
       this.toast(deleteAll ? this.label('删除失败，请重试', 'Failed to delete chats. Please try again.') :
@@ -1752,7 +1802,10 @@ struct NativeChat {
       this.draftHistoryWrites.forEach((sessionId: string, replyId: string): void => {
         if (deleted.has(sessionId)) this.draftHistoryWrites.delete(replyId);
       });
-      for (const id of deleted) this.drafts.delete(id);
+      for (const id of deleted) {
+        this.drafts.delete(id);
+        this.conversationCache.forget(id);
+      }
       if (active !== next.activeId) {
         this.stopVoice();
         this.restoreDraft(next.activeId ?? '');
@@ -1937,6 +1990,7 @@ struct NativeChat {
     } finally {
       this.draftSaving = false;
       if (saved && this.draftDirty) void this.persistDrafts();
+      this.trimConversationCache();
     }
   }
 
@@ -2302,7 +2356,9 @@ struct NativeChat {
       } finally {
         reply.uploadingIds = reply.uploadingIds.filter((id: string): boolean => id !== file.id);
         if (reply.stopped) {
-          if (reply.uploadingIds.length === 0) this.stoppedUploadReplies.delete(reply.client);
+          if (reply.uploadingIds.length === 0 && this.stoppedUploadReplies.delete(reply.client)) {
+            this.trimConversationCache();
+          }
         } else {
           this.paintLiveReplies();
         }
@@ -4204,6 +4260,7 @@ struct NativeChat {
       const merged = await commitChatBackup(context, this.history, sessions,
         (state: NativeConversationState): Promise<void> => this.storage.saveConversations(context, state));
       this.history = merged.history;
+      this.conversationCache.confirm(this.history.sessions);
       const count = merged.importedCount;
       const summary = this.label(`已导入 ${count} 个对话`, count === 1 ? 'Imported 1 chat' : `Imported ${count} chats`);
       if (settingsFile) {
@@ -4229,6 +4286,7 @@ struct NativeChat {
       if (settingsFile) this.historyImportProgress = '';
       this.committingHistoryImport = false;
       this.backupBusy = false;
+      this.trimConversationCache();
     }
   }
 
@@ -4254,6 +4312,7 @@ struct NativeChat {
       }
     } finally {
       this.backupBusy = false;
+      this.trimConversationCache();
     }
   }
 
@@ -4385,6 +4444,7 @@ struct NativeChat {
       this.rememberCurrentDraft();
       if (this.history.activeId !== imported.id) this.stopVoice();
       this.history = lateChanges ? upsertConversation(this.history, imported, true) : next;
+      this.conversationCache.confirm(this.history.sessions, lateChanges ? new Set<string>([imported.id]) : undefined);
       this.restoreDraft(imported.id);
       this.shareImportVisible = false;
       this.shareInput = '';
@@ -4396,6 +4456,7 @@ struct NativeChat {
       this.committingHistoryImport = false;
       this.backupBusy = false;
       if (lateChanges) void this.save();
+      this.trimConversationCache();
     }
   }
 
@@ -5099,16 +5160,26 @@ struct NativeChat {
     this.selecting = true;
   }
 
-  private async beginSidebarRename(session: NativeSidebarSession): Promise<void> {
-    if (!this.canEditSidebarMetadata(session.id) || this.selecting || this.renamingId === session.id) return;
-    if (this.session(session.id)?.unloaded) {
-      await this.retryConversation(session.id);
-      if (!this.canEditSidebarMetadata(session.id) || this.session(session.id)?.unloaded || this.selecting ||
-        (!this.drawerOpen && (!this.wide() || this.settings.desktopSidebarCollapsed))) return;
+  private async editSidebarConversation(id: string, edit: () => void): Promise<void> {
+    if (!this.canEditSidebarMetadata(id)) return;
+    this.sidebarMetadataLoads++;
+    try {
+      if (this.session(id)?.unloaded) await this.retryConversation(id);
+      if (this.canEditSidebarMetadata(id) && !this.session(id)?.unloaded) edit();
+    } finally {
+      this.sidebarMetadataLoads--;
+      this.trimConversationCache();
     }
-    this.finishSidebarRename(this.renamingId, this.renameText);
-    this.renameText = this.sidebarSessionTitle(this.session(session.id)?.title ?? session.title);
-    this.renamingId = session.id;
+  }
+
+  private beginSidebarRename(session: NativeSidebarSession): Promise<void> {
+    return this.editSidebarConversation(session.id, (): void => {
+      if (this.selecting || this.renamingId === session.id ||
+        (!this.drawerOpen && (!this.wide() || this.settings.desktopSidebarCollapsed))) return;
+      this.finishSidebarRename(this.renamingId, this.renameText);
+      this.renameText = this.sidebarSessionTitle(this.session(session.id)?.title ?? session.title);
+      this.renamingId = session.id;
+    });
   }
 
   private focusSidebarRename(id: string, retry: boolean = true): void {
@@ -5135,8 +5206,11 @@ struct NativeChat {
     this.cancelSidebarRename(id);
     const current = this.session(id);
     const trimmed = title.trim();
-    if (!this.canModifyHistory() || !current || current.unreadable || !trimmed ||
-      trimmed === this.sidebarSessionTitle(current.title)) return;
+    if (!this.canModifyHistory() || !current || current.unloaded || current.unreadable || !trimmed ||
+      trimmed === this.sidebarSessionTitle(current.title)) {
+      this.trimConversationCache();
+      return;
+    }
     this.history = renameConversation(this.history, id, trimmed);
     void this.save();
   }
@@ -5144,6 +5218,7 @@ struct NativeChat {
   private handleSidebarRenameKey(id: string, event: KeyEvent): boolean {
     if (event.type !== KeyType.Down || event.keyCode !== KeyCode.KEYCODE_ESCAPE) return false;
     this.cancelSidebarRename(id);
+    this.trimConversationCache();
     return true;
   }
 
@@ -5160,12 +5235,11 @@ struct NativeChat {
     return this.selectedIds.length > 0 && this.selectedIds.every((id: string): boolean => this.canEditSidebarMetadata(id));
   }
 
-  private async pinSidebarSession(id: string): Promise<void> {
-    if (this.session(id)?.unloaded) await this.retryConversation(id);
-    if (!this.canEditSidebarMetadata(id)) return;
-    if (this.session(id)?.unloaded) return;
-    this.history = toggleConversationPin(this.history, id);
-    void this.save();
+  private pinSidebarSession(id: string): Promise<void> {
+    return this.editSidebarConversation(id, (): void => {
+      this.history = toggleConversationPin(this.history, id);
+      void this.save();
+    });
   }
 
   private async pinSidebarSelection(): Promise<void> {

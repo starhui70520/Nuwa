@@ -34,12 +34,15 @@ export interface NativeConversationMessage extends NativeStoredMessage {
   files?: NativeAttachment[];
 }
 
-export interface NativeConversation {
+export interface NativeConversationSummary {
   id: string;
   title: string;
   createdAt: number;
   updatedAt: number;
   pinnedAt?: number;
+}
+
+export interface NativeConversation extends NativeConversationSummary {
   // The selected root and child links identify the visible path through all versions.
   rootMessageId: string | null;
   messages: NativeConversationMessage[];
@@ -64,6 +67,13 @@ export interface NativeConversationGroup {
 
 const DAY_MS = 86_400_000;
 const TITLE_LENGTH = 36;
+
+export function unloadedConversation(summary: NativeConversationSummary): NativeConversation {
+  return {
+    id: summary.id, title: summary.title, createdAt: summary.createdAt, updatedAt: summary.updatedAt,
+    pinnedAt: summary.pinnedAt, rootMessageId: null, messages: [], unloaded: true,
+  };
+}
 
 export function createConversation(now: number = Date.now()): NativeConversation {
   return {
