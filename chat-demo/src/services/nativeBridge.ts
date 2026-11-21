@@ -51,6 +51,13 @@ export type DeepSeekMigrationPlugin = {
   icloudStatus: () => Promise<{ available: boolean }>
   icloudBackupNow: (options: { name: string; data: string }) => Promise<{ path: string }>
   fetchShareContent: (options: { shareId: string }) => Promise<{ status: number; body: string }>
+  downloadRemoteFile: (options: { url: string }) => Promise<{
+    status: number
+    filePath: string
+    fileName: string
+    contentType: string
+    finalUrl: string
+  }>
 }
 
 export const DeepSeekMigration = registerPlugin<DeepSeekMigrationPlugin>('DeepSeekMigration')

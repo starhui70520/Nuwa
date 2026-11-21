@@ -1354,6 +1354,104 @@ public class DeepSeekMigrationPlugin extends Plugin {
         }).start();
     }
 
+    @PluginMethod
+    public void downloadRemoteFile(PluginCall call) {
+        final String rawUrl = call.getString("url", "").trim();
+        if (!rawUrl.startsWith("https://") && !rawUrl.startsWith("http://")) {
+            call.reject("INVALID_URL");
+            return;
+        }
+        new Thread(() -> {
+            HttpURLConnection conn = null;
+            try {
+                String currentUrl = rawUrl;
+                int status = 0;
+                for (int hop = 0; hop < 6; hop++) {
+                    URL url = new URL(currentUrl);
+                    conn = (HttpURLConnection) url.openConnection();
+                    conn.setInstanceFollowRedirects(false);
+                    conn.setRequestMethod("GET");
+                    conn.setConnectTimeout(15000);
+                    conn.setReadTimeout(60000);
+                    conn.setRequestProperty(
+                        "User-Agent",
+                        "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+                    );
+                    status = conn.getResponseCode();
+                    if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
+                        String location = conn.getHeaderField("Location");
+                        conn.disconnect();
+                        conn = null;
+                        if (location == null || location.trim().isEmpty()) {
+                            break;
+                        }
+                        currentUrl = new URL(url, location.trim()).toString();
+                        continue;
+                    }
+                    break;
+                }
+                if (conn == null) {
+                    call.reject("DOWNLOAD_REDIRECT_FAILED");
+                    return;
+                }
+                String contentType = conn.getContentType();
+                if (contentType == null) {
+                    contentType = "";
+                }
+                String fileName = "deepseek_export.zip";
+                String cd = conn.getHeaderField("Content-Disposition");
+                if (cd != null && !cd.isEmpty()) {
+                    java.util.regex.Matcher m = java.util.regex.Pattern
+                        .compile("filename\\*?=(?:UTF-8''|\"?)([^\";\\r\\n]+)", java.util.regex.Pattern.CASE_INSENSITIVE)
+                        .matcher(cd);
+                    if (m.find() && m.group(1) != null) {
+                        String candidate = java.net.URLDecoder.decode(m.group(1).replace("\"", "").trim(), "UTF-8");
+                        if (!candidate.isEmpty()) {
+                            fileName = candidate;
+                        }
+                    }
+                } else {
+                    try {
+                        String path = new URL(currentUrl).getPath();
+                        int slash = path.lastIndexOf('/');
+                        String seg = slash >= 0 ? path.substring(slash + 1) : path;
+                        if (!seg.isEmpty() && seg.contains(".")) {
+                            fileName = seg;
+                        }
+                    } catch (Exception ignored) {
+                    }
+                }
+                java.io.File outFile = new java.io.File(getContext().getCacheDir(), "link_import_latest.zip");
+                java.io.InputStream stream = status >= 400 ? conn.getErrorStream() : conn.getInputStream();
+                if (stream != null) {
+                    try (java.io.FileOutputStream fos = new java.io.FileOutputStream(outFile)) {
+                        byte[] buf = new byte[16384];
+                        int read;
+                        while ((read = stream.read(buf)) != -1) {
+                            fos.write(buf, 0, read);
+                        }
+                    }
+                    stream.close();
+                } else if (outFile.exists()) {
+                    outFile.delete();
+                }
+                JSObject ret = new JSObject();
+                ret.put("status", status);
+                ret.put("filePath", outFile.getAbsolutePath());
+                ret.put("fileName", fileName);
+                ret.put("contentType", contentType);
+                ret.put("finalUrl", currentUrl);
+                call.resolve(ret);
+            } catch (Exception e) {
+                call.reject("DOWNLOAD_REMOTE_FAILED: " + e.getMessage());
+            } finally {
+                if (conn != null) {
+                    conn.disconnect();
+                }
+            }
+        }).start();
+    }
+
     private void emitWebEvent(final String script) {
         if (getBridge() != null && getBridge().getWebView() != null) {
             mainHandler.post(() -> {

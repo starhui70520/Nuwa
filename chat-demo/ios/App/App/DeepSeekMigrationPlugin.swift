@@ -28,6 +28,7 @@ public class DeepSeekMigrationPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "icloudStatus", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "icloudBackupNow", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "fetchShareContent", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "downloadRemoteFile", returnType: CAPPluginReturnPromise),
     ]
 
     private var pendingAuthCall: CAPPluginCall?
@@ -105,6 +106,46 @@ public class DeepSeekMigrationPlugin: CAPPlugin, CAPBridgedPlugin {
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
             call.resolve(["status": status, "body": body])
+        }.resume()
+    }
+
+    /// 下载远程导出 ZIP 或追踪重定向链接到本地临时文件，返回 {status, filePath, fileName, contentType, finalUrl}。
+    @objc func downloadRemoteFile(_ call: CAPPluginCall) {
+        let rawUrl = (call.getString("url") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (rawUrl.hasPrefix("https://") || rawUrl.hasPrefix("http://")),
+              let url = URL(string: rawUrl) else {
+            call.reject("INVALID_URL")
+            return
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 60
+        URLSession.shared.downloadTask(with: request) { tempUrl, response, error in
+            if let error {
+                call.reject("DOWNLOAD_REMOTE_FAILED: \(error.localizedDescription)")
+                return
+            }
+            let http = response as? HTTPURLResponse
+            let status = http?.statusCode ?? 0
+            let finalUrl = response?.url?.absoluteString ?? rawUrl
+            let contentType = http?.value(forHTTPHeaderField: "Content-Type") ?? ""
+            let fileName = response?.suggestedFilename ?? "deepseek_export.zip"
+            let destUrl = FileManager.default.temporaryDirectory.appendingPathComponent("link_import_latest.zip")
+            try? FileManager.default.removeItem(at: destUrl)
+            if let tempUrl {
+                do {
+                    try FileManager.default.moveItem(at: tempUrl, to: destUrl)
+                } catch {
+                    call.reject("DOWNLOAD_SAVE_FAILED: \(error.localizedDescription)")
+                    return
+                }
+            }
+            call.resolve([
+                "status": status,
+                "filePath": destUrl.path,
+                "fileName": fileName,
+                "contentType": contentType,
+                "finalUrl": finalUrl,
+            ])
         }.resume()
     }
 

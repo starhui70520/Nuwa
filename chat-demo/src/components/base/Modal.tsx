@@ -9,6 +9,25 @@ import styles from './Modal.module.css'
 /** 当前打开的弹窗，后打开的在末尾；叠放时 Esc / 系统返回键只作用于最上层 */
 const openModals: { token: object; onBack: () => void }[] = []
 
+/** 注册一个自定义全屏浮层（如图片预览）到返回键栈中，返回注销函数 */
+export const registerModalBackHandler = (onBack: () => void): (() => void) => {
+  const entry = { token: {}, onBack }
+  openModals.push(entry)
+  const onKeyDown = (event: KeyboardEvent) => {
+    if (event.key === 'Escape' && openModals.at(-1) === entry) {
+      entry.onBack()
+    }
+  }
+  document.addEventListener('keydown', onKeyDown)
+  return () => {
+    const idx = openModals.indexOf(entry)
+    if (idx >= 0) {
+      openModals.splice(idx, 1)
+    }
+    document.removeEventListener('keydown', onKeyDown)
+  }
+}
+
 /** 供 Android 物理返回键/侧滑返回调用：消费最上层弹窗返回 true，无弹窗返回 false */
 export const handleTopModalBack = (): boolean => {
   const top = openModals.at(-1)

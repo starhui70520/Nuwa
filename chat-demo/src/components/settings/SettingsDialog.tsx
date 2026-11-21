@@ -26,7 +26,7 @@ import {
   hasUsedOneClickMigration,
   triggerOneClickMigration,
 } from '../../services/chat/migrationBridge.js'
-import { importFromShareLink } from '../../services/chat/history/importShareLink.js'
+import { importFromLink } from '../../services/chat/history/importShareLink.js'
 import { useChatStore } from '../../services/chat/store.js'
 import { getRegionName, provinces, regionCodes } from '../../services/location.js'
 import {
@@ -1313,12 +1313,13 @@ const useHistoryImport = () => {
   return { file, busy, status, select: setFile, cancel: () => setFile(null), confirm }
 }
 
-/** 通过 DeepSeek 分享链接直接导入单条对话 */
+/** 通过 DeepSeek 分享链接或官方数据导出 ZIP 下载链接直接导入对话 */
 const ShareLinkImportSetting = ({ disabled }: { disabled: boolean }) => {
   const t = useTranslate()
   const [opened, setOpened] = useState(false)
   const [linkText, setLinkText] = useState('')
   const [busy, setBusy] = useState(false)
+  const [stageText, setStageText] = useState('')
   const [errorText, setErrorText] = useState<string | null>(null)
 
   const onClose = () => {
@@ -1333,28 +1334,38 @@ const ShareLinkImportSetting = ({ disabled }: { disabled: boolean }) => {
       return
     }
     setBusy(true)
+    setStageText('正在识别链接…')
     setErrorText(null)
     try {
-      const session = await importFromShareLink(linkText)
+      const result = await importFromLink(linkText, (stage) => setStageText(stage))
       setOpened(false)
       setLinkText('')
       closeSettings()
-      showToast({
-        key: 'historyImportedOne',
-        params: { count: session.messages.length },
-      })
+      if (result.kind === 'archive') {
+        showToast(
+          result.count === 1
+            ? { key: 'historyImportedOne' }
+            : { key: 'historyImported', params: { count: result.count } }
+        )
+      } else {
+        showToast({
+          key: 'historyImportedOne',
+          params: { count: result.session.messages.length },
+        })
+      }
     } catch (error) {
       setErrorText(error instanceof Error ? error.message : '导入失败，请检查链接是否有效')
     } finally {
       setBusy(false)
+      setStageText('')
     }
   }
 
   return (
     <>
       <SettingCell
-        label="通过分享链接导入"
-        description="粘贴 DeepSeek 分享链接（如 chat.deepseek.com/share/...）直接导入并继续对话"
+        label="通过链接导入"
+        description="粘贴 DeepSeek 分享链接或官方数据导出 ZIP 下载链接，直接导入对话"
         status={null}
         action={
           <Button
@@ -1373,7 +1384,7 @@ const ShareLinkImportSetting = ({ disabled }: { disabled: boolean }) => {
       />
       {opened ? (
         <Modal
-          title="通过 DeepSeek 分享链接导入"
+          title="通过 DeepSeek 链接导入"
           className={styles.importConfirm}
           onClose={onClose}
           footer={
@@ -1387,7 +1398,7 @@ const ShareLinkImportSetting = ({ disabled }: { disabled: boolean }) => {
                 disabled={busy || !linkText.trim()}
                 onClick={() => void onConfirm()}
               >
-                {busy ? '导入中…' : '确认导入'}
+                {busy ? stageText || '导入中…' : '确认导入'}
               </Button>
             </>
           }
@@ -1396,7 +1407,7 @@ const ShareLinkImportSetting = ({ disabled }: { disabled: boolean }) => {
             <textarea
               className={styles.shareLinkInput}
               rows={3}
-              placeholder="粘贴分享链接或包含链接的完整分享文案，例如：https://chat.deepseek.com/share/..."
+              placeholder="粘贴 DeepSeek 分享链接（如 chat.deepseek.com/share/...）或官方数据导出 ZIP 下载链接"
               value={linkText}
               disabled={busy}
               onChange={(event) => {

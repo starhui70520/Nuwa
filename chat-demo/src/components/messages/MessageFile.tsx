@@ -5,6 +5,7 @@ import { useUploads } from '../../services/attachments.js'
 import { loadFile } from '../../services/chat/db.js'
 import type { FileAttachment } from '../../services/chat/types.js'
 import { IconPhotoErrorFill20, IconRefreshOutline16 } from '../base/icons.js'
+import { ImagePreviewModal } from '../base/ImagePreviewModal.js'
 import { Tooltip } from '../base/Tooltip.js'
 import { FileCard } from '../files/FileCard.js'
 import styles from './MessageFile.module.css'
@@ -58,6 +59,7 @@ export const MessageFile = ({
   const t = useTranslate()
   const url = useFileUrl(file.id)
   const [failedUrl, setFailedUrl] = useState<string | null>(null)
+  const [previewOpen, setPreviewOpen] = useState(false)
   const upload = useUploadState(file)
   const uploading = upload?.status === 'uploading'
   const failed = upload?.status === 'error'
@@ -134,17 +136,26 @@ export const MessageFile = ({
       )
     }
 
-    // 正常态：链接到原件
+    // 正常态：应用内全屏预览（支持系统返回键关闭与超长图缩放滚动）
     return url ? (
-      <a
-        className={clsx(styles.image, styles.imageThumb)}
-        href={url}
-        target="_blank"
-        rel="noreferrer"
-        title={file.name}
-      >
-        {preview}
-      </a>
+      <>
+        <button
+          type="button"
+          className={clsx(styles.image, styles.imageThumb)}
+          title={file.name}
+          aria-label={file.name}
+          onClick={() => setPreviewOpen(true)}
+        >
+          {preview}
+        </button>
+        {previewOpen ? (
+          <ImagePreviewModal
+            src={url}
+            name={file.name}
+            onClose={() => setPreviewOpen(false)}
+          />
+        ) : null}
+      </>
     ) : (
       // 原件还没加载出来（极短暂）
       <div className={styles.image} />

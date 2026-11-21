@@ -70,9 +70,42 @@ const is32kInputLimitError = (error: unknown): boolean =>
   error instanceof ApiError &&
   /user input too long.*exceeds max 32768 tokens/i.test(error.message)
 
-/** 被服务端判定为不支持/已损坏/超尺寸的历史图片 file_id；同会话后续轮次直接跳过，避免整段对话死锁。 */
-const rejectedHistoryImageIds = new Set<string>()
-const MAX_SKIPPED_BAD_IMAGES = 40
+/** 被服务端判定为不支持/已损坏/超尺寸的历史图片 file_id；持久化到 localStorage，后续轮次与重启后直接跳过，避免整段对话死锁。 */
+const REJECTED_IMAGES_STORAGE_KEY = 'nuwa_rejected_history_images'
+const MAX_STORED_REJECTED_IMAGES = 500
+const MAX_SKIPPED_BAD_IMAGES = 60
+
+const loadRejectedHistoryImages = (): Set<string> => {
+  try {
+    const raw = localStorage.getItem(REJECTED_IMAGES_STORAGE_KEY)
+    if (!raw) {
+      return new Set()
+    }
+    const parsed: unknown = JSON.parse(raw)
+    if (Array.isArray(parsed)) {
+      return new Set(parsed.filter((item): item is string => typeof item === 'string'))
+    }
+  } catch {
+    // 忽略存储受限或损坏数据
+  }
+  return new Set()
+}
+
+const rejectedHistoryImageIds = loadRejectedHistoryImages()
+
+const markRejectedHistoryImage = (fileId: string): boolean => {
+  if (!fileId || rejectedHistoryImageIds.has(fileId)) {
+    return false
+  }
+  rejectedHistoryImageIds.add(fileId)
+  try {
+    const list = Array.from(rejectedHistoryImageIds).slice(-MAX_STORED_REJECTED_IMAGES)
+    localStorage.setItem(REJECTED_IMAGES_STORAGE_KEY, JSON.stringify(list))
+  } catch {
+    // 忽略存储受限
+  }
+  return true
+}
 
 const parseUnsupportedImageError = (
   error: unknown
@@ -91,6 +124,70 @@ const parseUnsupportedImageError = (
     messageIndex: Number.parseInt(match[1], 10),
     blockIndex: Number.parseInt(match[2], 10),
   }
+}
+
+/**
+ * 根据服务端报错的 `messages.{N}.content.{M}` 定位被拒绝的历史图片 file_id。
+ * 兼容服务端是否剔除/合并 `latest_reminder` 导致的索引偏移，确保一定能准确命中并跳过坏图。
+ */
+const resolveBadHistoryImageIds = (
+  sentMessages: MessageParam[],
+  messageIndex: number,
+  blockIndex: number
+): { ids: string[]; isCurrentTurn: boolean } => {
+  const lastUserMsg = sentMessages.findLast((m) => m.role === 'user')
+  const nonReminders = sentMessages.filter((m) => m.role !== 'latest_reminder')
+  const candidates: MessageParam[] = []
+  const direct = sentMessages[messageIndex]
+  const withoutReminder = nonReminders[messageIndex]
+  // 若请求中包含 latest_reminder，服务端通常按剔除/合并后的消息序号报错，优先检查无 reminder 序号，再查原始序号
+  if (withoutReminder && withoutReminder !== direct) {
+    candidates.push(withoutReminder)
+  }
+  if (direct) {
+    candidates.push(direct)
+  }
+
+  for (const msg of candidates) {
+    if (msg.role !== 'user' || !Array.isArray(msg.content)) {
+      continue
+    }
+    if (msg === lastUserMsg) {
+      return { ids: [], isCurrentTurn: true }
+    }
+    // 1. 精确命中 content[M] 或因前置文本块偏移 1 位的 content[M - 1]
+    for (const idx of [blockIndex, blockIndex - 1]) {
+      const block = idx >= 0 ? msg.content[idx] : undefined
+      if (block?.type === 'image' && !rejectedHistoryImageIds.has(block.source.file_id)) {
+        return { ids: [block.source.file_id], isCurrentTurn: false }
+      }
+    }
+    // 2. 按图片在消息内的序号兜底
+    const imageBlocks = msg.content.filter((block) => block.type === 'image')
+    const byImageIdx = imageBlocks[blockIndex]
+    if (
+      byImageIdx?.type === 'image' &&
+      !rejectedHistoryImageIds.has(byImageIdx.source.file_id)
+    ) {
+      return { ids: [byImageIdx.source.file_id], isCurrentTurn: false }
+    }
+  }
+
+  // 3. 若候选历史用户消息本身带图但块序号仍偏移，跳过该历史消息内尚未跳过的图片，保证绝不死循环卡死
+  for (const msg of candidates) {
+    if (msg.role !== 'user' || msg === lastUserMsg || !Array.isArray(msg.content)) {
+      continue
+    }
+    const ids = msg.content
+      .filter((block) => block.type === 'image' && !rejectedHistoryImageIds.has(block.source.file_id))
+      .map((block) => (block.type === 'image' ? block.source.file_id : ''))
+      .filter(Boolean)
+    if (ids.length > 0) {
+      return { ids, isCurrentTurn: false }
+    }
+  }
+
+  return { ids: [], isCurrentTurn: false }
 }
 
 /** 服务端单次请求允许携带的最大图片数；超出时仅在请求中裁剪最早的历史图片，本地记录完整保留。 */
@@ -1350,6 +1447,7 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
   let skippedBadImages = 0
   let imageCap = MAX_REQUEST_IMAGES
   let sentMessages: MessageParam[] = []
+  let cachedPrepared: Request | null = null
   const flush = () => {
     cancelAnimationFrame(frame)
     frame = 0
@@ -1360,18 +1458,23 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
   try {
     for (let attempt = 0; ; attempt += 1) {
       /** 附件补齐前出错属于上传失败，请求还没有发出 */
-      let preparing = true
+      let preparing = !cachedPrepared
       let receivedContent = false
       try {
-        const prepared = await prepareFiles(sessionId, request, controller.signal)
+        const prepared: Request =
+          cachedPrepared ?? (await prepareFiles(sessionId, request, controller.signal))
+        const firstPrepared = !cachedPrepared
+        cachedPrepared = prepared
         preparing = false
         // 附件就绪后获取本轮信息；续写沿用原回答快照，重新生成的快照独立保存。
         const latestReminder = prepared.prefix
           ? prepared.prefix.latestReminder
           : createLatestReminder(useSettings.getState())
-        reply = { ...reply, latestReminder }
-        updateReply(sessionId, reply)
-        persist(sessionId)
+        if (firstPrepared) {
+          reply = { ...reply, latestReminder }
+          updateReply(sessionId, reply)
+          persist(sessionId)
+        }
         const messages = limitRequestImages(
           stripRejectedImages(
             toRequestMessages(
@@ -1460,34 +1563,27 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
           imageCap = reportedImageCap
           continue
         }
-        // 历史消息夹带不支持/已损坏的图片时，跳过该坏图并重试，避免整段长对话永久卡死。
+        // 历史消息夹带不支持/已损坏/超尺寸的图片时，兼容 latest_reminder 索引偏移，跳过坏图并重试。
         const badImage = !receivedContent ? parseUnsupportedImageError(error) : null
         if (badImage) {
-          let lastUserIndex = -1
-          for (let i = sentMessages.length - 1; i >= 0; i--) {
-            if (sentMessages[i].role === 'user') {
-              lastUserIndex = i
-              break
+          const resolved = resolveBadHistoryImageIds(
+            sentMessages,
+            badImage.messageIndex,
+            badImage.blockIndex
+          )
+          if (resolved.ids.length > 0 && skippedBadImages < MAX_SKIPPED_BAD_IMAGES) {
+            let added = 0
+            for (const fileId of resolved.ids) {
+              if (markRejectedHistoryImage(fileId)) {
+                added += 1
+              }
             }
-          }
-          const targetMsg = sentMessages[badImage.messageIndex]
-          if (
-            badImage.messageIndex < lastUserIndex &&
-            skippedBadImages < MAX_SKIPPED_BAD_IMAGES &&
-            targetMsg?.role === 'user' &&
-            Array.isArray(targetMsg.content)
-          ) {
-            const targetBlock = targetMsg.content[badImage.blockIndex]
-            if (
-              targetBlock?.type === 'image' &&
-              !rejectedHistoryImageIds.has(targetBlock.source.file_id)
-            ) {
-              rejectedHistoryImageIds.add(targetBlock.source.file_id)
-              skippedBadImages += 1
+            if (added > 0) {
+              skippedBadImages += added
               continue
             }
           }
-          if (badImage.messageIndex === lastUserIndex && error instanceof ApiError) {
+          if (resolved.isCurrentTurn && error instanceof ApiError) {
             reply = settleReply(reply, 'error', Date.now(), {
               kind: error.kind,
               message: error.message,
@@ -1503,6 +1599,7 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
           !receivedContent &&
           reuploadInvalidatedFiles(sessionId, request, error)
         ) {
+          cachedPrepared = null
           await waitForRetry(attempt, controller.signal)
           if (controller.signal.aborted) {
             reply = settleReply(reply, 'stopped', Date.now())
