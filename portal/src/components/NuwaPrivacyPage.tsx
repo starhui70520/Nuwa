@@ -376,7 +376,7 @@ export function NuwaPrivacyPage({ onNavigate }: NuwaPrivacyPageProps) {
             </div>
 
             <p className="m-0">
-              Nuwa (including the Nuwa AI app and its Share Extension) is developed by Guangzhou
+              Nuwa (including the Nuwa AI app and its Share Extension) is developed by Canton
               RankChord Technology Co., Ltd. (&ldquo;we&rdquo;, &ldquo;us&rdquo;). Nuwa is a
               local-first, bring-your-own-key (BYOK) AI chat client that connects directly to
               user-selected AI providers (such as DeepSeek Open Platform or user-configured
@@ -471,7 +471,7 @@ export function NuwaPrivacyPage({ onNavigate }: NuwaPrivacyPageProps) {
               </p>
               <div className="rounded-[14px] border border-[#e8e8e8] bg-white p-5 space-y-1 text-[13px]">
                 <p className="m-0">
-                  <strong className="font-medium text-[#18181b]">Developer:</strong> Guangzhou
+                  <strong className="font-medium text-[#18181b]">Developer:</strong> Canton
                   RankChord Technology Co., Ltd.
                 </p>
                 <p className="m-0">
