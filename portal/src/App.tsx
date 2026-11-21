@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { AboutPage } from './components/AboutPage';
 import { AdminPanel } from './components/AdminPanel';
 import { HomePage } from './components/HomePage';
+import { NuwaPrivacyPage } from './components/NuwaPrivacyPage';
 import { PublicPortal } from './components/PublicPortal';
 import { ResearchDetailPage, ResearchListPage } from './components/ResearchPage';
 import type { ArticleItem, PublicReleasesResponse } from './types';
@@ -81,7 +82,10 @@ export function App() {
   };
 
   const isAdmin = pathname.startsWith('/admin');
-  const isNuwa = pathname.startsWith('/nuwa') || pathname.startsWith('/download');
+  const isNuwaPrivacy =
+    pathname === '/nuwa/privacy' || pathname === '/nuwa/privacy/' || pathname === '/privacy';
+  const isNuwa =
+    !isNuwaPrivacy && (pathname.startsWith('/nuwa') || pathname.startsWith('/download'));
   const isAbout = pathname.startsWith('/about');
   const isResearchDetail =
     pathname.startsWith('/research/') && pathname.length > '/research/'.length;
@@ -93,6 +97,8 @@ export function App() {
   useEffect(() => {
     if (isAdmin) {
       document.title = '管理后台 | RankChord';
+    } else if (isNuwaPrivacy) {
+      document.title = 'Nuwa 隐私政策 | RankChord';
     } else if (isNuwa) {
       document.title = 'Nuwa 客户端下载 | RankChord';
     } else if (isAbout) {
@@ -107,10 +113,20 @@ export function App() {
     }
     const iconLink = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
     if (iconLink) {
-      iconLink.type = isNuwa ? 'image/png' : 'image/svg+xml';
-      iconLink.href = isNuwa ? '/logo.png' : '/rankchord-favicon.svg';
+      const useNuwaIcon = isNuwa || isNuwaPrivacy;
+      iconLink.type = useNuwaIcon ? 'image/png' : 'image/svg+xml';
+      iconLink.href = useNuwaIcon ? '/logo.png' : '/rankchord-favicon.svg';
     }
-  }, [articles, isAbout, isAdmin, isNuwa, isResearchDetail, isResearchList, researchSlug]);
+  }, [
+    articles,
+    isAbout,
+    isAdmin,
+    isNuwa,
+    isNuwaPrivacy,
+    isResearchDetail,
+    isResearchList,
+    researchSlug
+  ]);
 
   return (
     <div className="min-h-screen flex flex-col bg-white text-[#18181b]">
@@ -404,6 +420,8 @@ export function App() {
       <main id="main-content" className="flex-1">
         {isAdmin ? (
           <AdminPanel onDataChanged={loadAllPublicData} />
+        ) : isNuwaPrivacy ? (
+          <NuwaPrivacyPage onNavigate={navigate} />
         ) : isNuwa ? (
           <PublicPortal
             data={releasesData}
@@ -468,6 +486,13 @@ export function App() {
                 className="hover:opacity-55 transition-opacity cursor-pointer"
               >
                 Nuwa
+              </button>
+              <button
+                type="button"
+                onClick={() => navigate('/nuwa/privacy')}
+                className="hover:opacity-55 transition-opacity cursor-pointer"
+              >
+                隐私政策
               </button>
               <a
                 href="https://github.com/RankChord"
