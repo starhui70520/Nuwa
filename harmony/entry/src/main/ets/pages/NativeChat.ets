@@ -3257,11 +3257,51 @@ struct NativeChat {
     symbolSize: number = 18, color: ResourceColor = $r('app.color.native_chat_primary'),
     background: ResourceColor = Color.Transparent, enabled: () => boolean = () => true) {
     Button({ type: ButtonType.Circle }) {
-      SymbolGlyph(symbol).fontSize(symbolSize).fontColor([color]).renderingStrategy(SymbolRenderingStrategy.SINGLE)
+      SymbolGlyph(symbol).fontSize(symbolSize).fontWeight(FontWeight.Medium).fontColor([color])
+        .renderingStrategy(SymbolRenderingStrategy.SINGLE)
     }
     .width(size).height(size).padding(0).backgroundColor(background)
     .clickEffect(NATIVE_ICON_CLICK_EFFECT)
     .enabled(enabled()).accessibilityText(label).onClick(action)
+  }
+
+  private scrollActiveChatToTop(): void {
+    this.followLatest = false;
+    if (this.earlierCount > 0) {
+      this.rangeFromTop = true;
+      this.messageLimit = CHAT_PAGE_SIZE;
+      this.updateMessageWindow();
+    }
+    this.restoreListPosition(0, 0);
+  }
+
+  @Builder
+  private activeChatTitleMenu() {
+    Menu() {
+      MenuItem(this.sidebarMenuSymbolLabel($r('sys.symbol.share'), this.label('分享对话', 'Share chat')))
+        .enabled(this.messages().length > 0 && !this.backupBusy)
+        .onClick(() => {
+          triggerNativeHaptic('light');
+          void this.shareActiveSession();
+        })
+      if (this.history.activeId !== null) {
+        MenuItem(this.sidebarMenuLabel($r('app.media.native_pin'),
+          this.session()?.pinnedAt ? this.label('取消置顶', 'Unpin') : this.label('置顶对话', 'Pin')))
+          .enabled(this.canEditSidebarMetadata(this.history.activeId))
+          .onClick(() => {
+            if (!this.history.activeId) return;
+            triggerNativeHaptic('selection');
+            void this.pinSidebarSession(this.history.activeId);
+          })
+      }
+      if (this.messages().length > 0) {
+        MenuItem(this.sidebarMenuSymbolLabel($r('sys.symbol.chevron_up'), this.label('回到顶部', 'Scroll to top')))
+          .onClick(() => {
+            this.scrollActiveChatToTop();
+          })
+      }
+    }
+    .constraintSize({ minWidth: SIDEBAR_MENU_WIDTH })
   }
 
   @Builder
@@ -3298,32 +3338,42 @@ struct NativeChat {
 
   @Builder
   private header() {
-    Row({ space: this.compact() ? 6 : 10 }) {
+    Stack({ alignContent: Alignment.Center }) {
       Row() {
-        this.iconButton($r('app.media.native_menu'), this.label('展开侧边栏', "Open sidebar"), () => { this.setDrawer(true); }, this.compact() ? 30 : 42)
-      }
-      .borderRadius(999)
-      .attributeModifier(this.headerCapsuleModifier)
-      if (this.history.activeId !== null) {
-        Text(this.session()?.title || this.label('新对话', "New chat")).fontSize(this.appFontSize(this.compact() ? 13 : 14)).fontWeight(FontWeight.Medium)
-          .fontColor($r('app.color.native_chat_primary')).textAlign(TextAlign.Center)
-          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
-          .onClick(() => { this.titlePressed(); })
-      } else {
-        Blank().layoutWeight(1)
-      }
-      Row({ space: 2 }) {
-        this.iconButton(this.settings.ttsMuted && !this.readingId ? $r('app.media.native_muted') : $r('app.media.native_speaker'),
-        this.speakerAccessibilityLabel(), () => { this.toggleSpeaker(); }, this.compact() ? 26 : 34)
-        if (!this.compact() && this.history.activeId !== null && this.messages().length > 0) {
-          this.symbolIconButton($r('sys.symbol.share'), this.label('分享对话', 'Share chat'),
-            () => { void this.shareActiveSession(); }, 34, 17)
+        Row() {
+          this.iconButton($r('app.media.native_menu'), this.label('展开侧边栏', "Open sidebar"),
+            () => { this.setDrawer(true); }, this.compact() ? 30 : 42)
         }
-        this.iconButton($r('app.media.native_new_chat'), this.label('开启新对话', "New chat"), () => { this.activate(null); }, this.compact() ? 26 : 34)
+        .borderRadius(999)
+        .attributeModifier(this.headerCapsuleModifier)
+        Blank().layoutWeight(1)
+        Row({ space: 2 }) {
+          this.iconButton(this.settings.ttsMuted && !this.readingId ? $r('app.media.native_muted') : $r('app.media.native_speaker'),
+            this.speakerAccessibilityLabel(), () => { this.toggleSpeaker(); }, this.compact() ? 26 : 36)
+          this.iconButton($r('app.media.native_new_chat'), this.label('开启新对话', "New chat"),
+            () => { this.activate(null); }, this.compact() ? 26 : 36)
+        }
+        .height(this.compact() ? 30 : 42).padding({ left: 4, right: 4 })
+        .borderRadius(999)
+        .attributeModifier(this.headerCapsuleModifier)
       }
-      .height(this.compact() ? 30 : 42).padding({ left: 6, right: 6 })
-      .borderRadius(999)
-      .attributeModifier(this.headerCapsuleModifier)
+      .width('100%')
+      if (this.history.activeId !== null) {
+        Row({ space: 4 }) {
+          Text(this.session()?.title || this.label('新对话', "New chat"))
+            .fontSize(this.appFontSize(this.compact() ? 13 : 15)).fontWeight(FontWeight.Medium)
+            .fontColor($r('app.color.native_chat_primary')).textAlign(TextAlign.Center)
+            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+            .constraintSize({ maxWidth: this.compact() ? 130 : Math.max(120, this.viewportWidth - 220) })
+          if (!this.compact()) {
+            Image($r('app.media.native_chevron_down')).width(11).height(11)
+              .colorFilter(nativeIconTint($r('app.color.native_chat_secondary'))).draggable(false)
+          }
+        }
+        .padding({ left: 10, right: 8, top: 6, bottom: 6 }).borderRadius(999)
+        .clickEffect(NATIVE_PILL_CLICK_EFFECT)
+        .bindMenu(this.activeChatTitleMenu())
+      }
     }
     .width('100%').height(this.compact() ? 40 : 58)
     .padding({ left: this.compact() ? 8 : 16, right: this.compact() ? 8 : 16, top: 4 })
@@ -3872,7 +3922,6 @@ struct NativeChat {
     }
     .width('100%').borderRadius(this.compact() ? 18 : 24)
     .attributeModifier(this.composerElevatedModifier)
-    .clip(true)
   }
 
   @Builder
@@ -5787,7 +5836,8 @@ struct NativeChat {
   @Builder
   private sidebarMenuSymbolLabel(symbol: Resource, title: string, color: ResourceColor = $r('app.color.native_chat_primary')) {
     Row({ space: 8 }) {
-      SymbolGlyph(symbol).fontSize(16).fontColor([color]).renderingStrategy(SymbolRenderingStrategy.SINGLE)
+      SymbolGlyph(symbol).fontSize(16).fontWeight(FontWeight.Medium).fontColor([color])
+        .renderingStrategy(SymbolRenderingStrategy.SINGLE)
         .accessibilityLevel('no')
       Text(title).fontSize(this.appFontSize(14)).fontColor(color)
     }
@@ -6231,7 +6281,11 @@ struct NativeChat {
         .width('100%').alignItems(HorizontalAlign.Center)
         .linearGradient({
           direction: GradientDirection.Bottom,
-          colors: [[$r('app.color.native_chat_bg'), 0.0], ['#00000000', 1.0]],
+          colors: [
+            [$r('app.color.native_chat_bg'), 0.0],
+            [$r('app.color.native_chat_bg_fade'), 0.55],
+            [$r('app.color.native_chat_bg_clear'), 1.0],
+          ],
         })
 
         Column() {
@@ -6242,7 +6296,11 @@ struct NativeChat {
         .padding({ top: 18 })
         .linearGradient({
           direction: GradientDirection.Top,
-          colors: [[$r('app.color.native_chat_bg'), 0.0], ['#00000000', 1.0]],
+          colors: [
+            [$r('app.color.native_chat_bg'), 0.0],
+            [$r('app.color.native_chat_bg_fade'), 0.55],
+            [$r('app.color.native_chat_bg_clear'), 1.0],
+          ],
         })
       }
       .width('100%').height('100%').backgroundColor($r('app.color.native_chat_bg'))

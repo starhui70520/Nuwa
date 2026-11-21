@@ -33,6 +33,14 @@
       "value": "#FFFFFF"
     },
     {
+      "name": "native_chat_bg_fade",
+      "value": "#D9FFFFFF"
+    },
+    {
+      "name": "native_chat_bg_clear",
+      "value": "#00FFFFFF"
+    },
+    {
       "name": "native_chat_sidebar",
       "value": "#F9FAFB"
     },
@@ -134,7 +142,23 @@
     },
     {
       "name": "native_immersive_tint",
-      "value": "#CCF4F6FA"
+      "value": "#EBFFFFFF"
+    },
+    {
+      "name": "native_immersive_composer_tint",
+      "value": "#F2FFFFFF"
+    },
+    {
+      "name": "native_glass_rim",
+      "value": "#14000000"
+    },
+    {
+      "name": "native_glass_shadow",
+      "value": "#12000000"
+    },
+    {
+      "name": "native_glass_composer_shadow",
+      "value": "#14000000"
     },
     {
       "name": "native_chat_drag_mask",
