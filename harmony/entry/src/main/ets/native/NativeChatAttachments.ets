@@ -106,7 +106,9 @@ const IO_CHUNK = 256 * 1024;
 const MAX_ACTIVE_UPLOADS = 3;
 // The decoded RGBA surface can use four bytes per pixel. Convert one image at a time.
 const MAX_UPLOAD_DECODE_PIXELS = 32 * 1024 * 1024;
-const MAX_UPLOAD_DECODE_SIDE = 16384;
+const MAX_UPLOAD_DECODE_SIDE = 65536;
+const MAX_IMAGE_UPLOAD_DIMENSION = 4096;
+const API_SUPPORTED_UPLOAD_IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
 const EXIF_ORIENTATIONS = [
   'top-left', 'top-right', 'bottom-right', 'bottom-left', 'left-top', 'right-top', 'right-bottom', 'left-bottom',
 ];
@@ -501,13 +503,26 @@ async function convertImage(file: UploadFile, sourcePath: string): Promise<Uploa
     source = image.createImageSource(sourcePath);
     const size = (await source.getImageInfo()).size;
     if (!Number.isSafeInteger(size.width) || !Number.isSafeInteger(size.height) ||
-      size.width < 1 || size.height < 1 || Math.max(size.width, size.height) > MAX_UPLOAD_DECODE_SIDE ||
-      size.width * size.height > MAX_UPLOAD_DECODE_PIXELS) {
+      size.width < 1 || size.height < 1 || Math.max(size.width, size.height) > MAX_UPLOAD_DECODE_SIDE) {
+      return file;
+    }
+    const formatSupported = API_SUPPORTED_UPLOAD_IMAGE_MIMES.includes(file.mimeType);
+    const needsResize = size.width > MAX_IMAGE_UPLOAD_DIMENSION || size.height > MAX_IMAGE_UPLOAD_DIMENSION;
+    if (formatSupported && !needsResize) {
+      return file;
+    }
+    const scale = needsResize ? MAX_IMAGE_UPLOAD_DIMENSION / Math.max(size.width, size.height) : 1;
+    const targetW = Math.max(1, Math.floor(size.width * scale));
+    const targetH = Math.max(1, Math.floor(size.height * scale));
+    if (targetW * targetH > MAX_UPLOAD_DECODE_PIXELS) {
       return file;
     }
     const orientation = sourcePath === file.localPath ? await uploadOrientation(source, file.mimeType) : 1;
-    pixels = await source.createPixelMap({ editable: orientation > 1 });
-    if (orientation > 1) await orientUploadPixels(pixels, size, orientation);
+    const decodingOptions: image.DecodingOptions = needsResize
+      ? { editable: orientation > 1, desiredSize: { width: targetW, height: targetH } }
+      : { editable: orientation > 1 };
+    pixels = await source.createPixelMap(decodingOptions);
+    if (orientation > 1) await orientUploadPixels(pixels, { width: targetW, height: targetH }, orientation);
     packer = image.createImagePacker();
     const out = await fileIo.open(path, fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
     try {
@@ -833,7 +848,7 @@ export class NativeChatAttachments {
       name: item.name.replace(/[\u0000-\u001f\u007f\\/"]/g, '_'),
       temporary: false,
     };
-    if (item.isImage && !['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(file.mimeType)) {
+    if (item.isImage) {
       file = await queueImageConversion(file, transfer);
     }
     try {

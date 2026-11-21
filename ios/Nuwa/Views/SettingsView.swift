@@ -114,6 +114,7 @@ struct SettingsView: View {
     @State private var showShareLinkAlert = false
     @State private var shareLinkDraft = ""
     @State private var importingShareLink = false
+    @State private var shareImportStage = ""
 
     @State private var isExporting = false
     @State private var isImporting = false
@@ -307,8 +308,8 @@ struct SettingsView: View {
                 chatStore.showToast("选择文件失败：\(error.localizedDescription)")
             }
         }
-        .alert("通过 DeepSeek 分享链接导入", isPresented: $showShareLinkAlert) {
-            TextField("粘贴 chat.deepseek.com/share/... 链接或分享 ID", text: $shareLinkDraft)
+        .alert("通过 DeepSeek 链接导入", isPresented: $showShareLinkAlert) {
+            TextField("粘贴 DeepSeek 分享链接或官方数据导出 ZIP 链接", text: $shareLinkDraft)
             Button("取消", role: .cancel) { shareLinkDraft = "" }
             Button("导入") {
                 let raw = shareLinkDraft
@@ -316,7 +317,7 @@ struct SettingsView: View {
                 Task { await runShareLinkImport(raw) }
             }
         } message: {
-            Text("支持直接粘贴官方 DeepSeek App 或网页版复制的完整分享文案。")
+            Text("支持直接粘贴 DeepSeek 分享链接（含完整分享文案）或官方数据导出 ZIP 下载链接。")
         }
         .alert("删除后，所有对话都将被清空且无法找回", isPresented: $showDeleteAllConfirm) {
             Button("取消", role: .cancel) {}
@@ -825,8 +826,10 @@ struct SettingsView: View {
             rowDivider
             actionCell(
                 title: L10n.t("shareLinkImport", locale: loc),
-                subtitle: "粘贴官方 DeepSeek 分享链接或分享 ID，将对话保存到本机",
-                buttonTitle: importingShareLink ? "导入中..." : "链接导入",
+                subtitle: importingShareLink && !shareImportStage.isEmpty
+                    ? shareImportStage
+                    : "粘贴 DeepSeek 分享链接或官方数据导出 ZIP 下载链接，直接导入对话",
+                buttonTitle: importingShareLink ? "导入中…" : "链接导入",
                 disabled: historyBusy || importingShareLink
             ) {
                 if !importingShareLink {
@@ -1471,10 +1474,21 @@ struct SettingsView: View {
 
     private func runShareLinkImport(_ raw: String) async {
         importingShareLink = true
-        defer { importingShareLink = false }
+        shareImportStage = "正在识别链接…"
+        defer {
+            importingShareLink = false
+            shareImportStage = ""
+        }
         do {
-            let session = try await chatStore.importFromShareLink(raw)
-            chatStore.showToast("已导入「\(session.title)」")
+            let result = try await chatStore.importFromLink(raw) { stage in
+                shareImportStage = stage
+            }
+            switch result {
+            case .share(let session):
+                chatStore.showToast("已导入「\(session.title)」")
+            case .archive(let outcome):
+                chatStore.showToast(ChatStore.importSummaryToast(for: outcome, singleShare: false))
+            }
             dismiss()
         } catch {
             chatStore.showToast(error.localizedDescription)

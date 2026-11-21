@@ -9,6 +9,7 @@ enum AttachmentStore {
     static let maxSizeMB = 64
     static let maxUserDataSizeMB = 32
     static let maxCount = 50
+    static let maxImageDimension = 4096
 
     private static let layoutRecognitionExts: Set<String> = ["pdf", "doc", "docx", "ppt", "pptx"]
     private static let imageExts: Set<String> = ["jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "bmp", "tif", "tiff", "avif"]
@@ -162,18 +163,78 @@ enum AttachmentStore {
         return nil
     }
 
-    /// Transcodes any unsupported image format (HEIC / HEIF / AVIF / BMP / TIFF / etc., regardless of filename)
-    /// to JPEG (`0.92`) before upload so DeepSeek Messages API never rejects it (`6ba574f`).
+    /// Reads pixel dimensions from image headers without decoding the full bitmap.
+    private static func imagePixelDimensions(_ data: Data) -> (width: Int, height: Int)? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let rawW = props[kCGImagePropertyPixelWidth] as? Int,
+              let rawH = props[kCGImagePropertyPixelHeight] as? Int,
+              rawW > 0, rawH > 0
+        else { return nil }
+        let orientation = (props[kCGImagePropertyOrientation] as? Int) ?? 1
+        if (5...8).contains(orientation) {
+            return (rawH, rawW)
+        }
+        return (rawW, rawH)
+    }
+
+    /// Normalizes images before upload (matching Android v0.1.33):
+    /// - Transcodes non-standard formats (HEIC/HEIF/AVIF/BMP/TIFF) to JPEG (0.92);
+    /// - Proportionally downscales any image whose width or height exceeds 4096px (e.g. long screenshots)
+    ///   via memory-safe `CGImageSourceCreateThumbnailAtIndex` so DeepSeek API never rejects with `too large to process`;
+    /// - Leaves standard-format images within 4096px untouched and lossless.
     static func normalizeImageForUpload(data: Data, fileName: String) -> (data: Data, fileName: String, mimeType: String) {
-        if let supportedMime = sniffApiSupportedImageMime(data) {
+        let supportedMime = sniffApiSupportedImageMime(data)
+        let dims = imagePixelDimensions(data)
+        let needsResize = dims.map { $0.width > maxImageDimension || $0.height > maxImageDimension } ?? false
+
+        if let supportedMime, !needsResize {
             return (data, fileName, supportedMime)
         }
-        if let uiImage = UIImage(data: data), let jpeg = uiImage.jpegData(compressionQuality: 0.92), !jpeg.isEmpty {
+
+        let jpegName: String = {
             let stem = (fileName as NSString).deletingPathExtension
-            let nextName = stem.isEmpty ? "\(fileName).jpg" : "\(stem).jpg"
-            return (jpeg, nextName, "image/jpeg")
+            return stem.isEmpty ? "\(fileName).jpg" : "\(stem).jpg"
+        }()
+
+        if needsResize,
+           let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+           let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+               kCGImageSourceCreateThumbnailFromImageAlways: true,
+               kCGImageSourceCreateThumbnailWithTransform: true,
+               kCGImageSourceShouldCacheImmediately: true,
+               kCGImageSourceThumbnailMaxPixelSize: maxImageDimension
+           ] as CFDictionary),
+           let jpeg = UIImage(cgImage: cgImage).jpegData(compressionQuality: 0.92),
+           !jpeg.isEmpty {
+            return (jpeg, jpegName, "image/jpeg")
         }
-        return (data, fileName, inferMimeType(fileName: fileName, isImage: true))
+
+        if let uiImage = UIImage(data: data) {
+            let pixelW = uiImage.size.width * uiImage.scale
+            let pixelH = uiImage.size.height * uiImage.scale
+            let maxSide = max(pixelW, pixelH)
+            let outputImage: UIImage
+            if maxSide > CGFloat(maxImageDimension), maxSide > 0 {
+                let scale = CGFloat(maxImageDimension) / maxSide
+                let targetSize = CGSize(
+                    width: max(1, floor(pixelW * scale)),
+                    height: max(1, floor(pixelH * scale))
+                )
+                let format = UIGraphicsImageRendererFormat()
+                format.scale = 1
+                format.opaque = true
+                outputImage = UIGraphicsImageRenderer(size: targetSize, format: format).image { _ in
+                    uiImage.draw(in: CGRect(origin: .zero, size: targetSize))
+                }
+            } else {
+                outputImage = uiImage
+            }
+            if let jpeg = outputImage.jpegData(compressionQuality: 0.92), !jpeg.isEmpty {
+                return (jpeg, jpegName, "image/jpeg")
+            }
+        }
+        return (data, fileName, supportedMime ?? inferMimeType(fileName: fileName, isImage: true))
     }
 
     static func saveLocally(data: Data, originalName: String, isImage: Bool) throws -> (FileAttachment, Data) {

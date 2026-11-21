@@ -15,7 +15,7 @@ const SHARE_EXPORT_DIR: string = 'nuwa-share';
 const KNOCK_INBOX_DIR: string = 'nuwa-knock-inbox';
 const COLLAB_INBOX_DIR: string = 'nuwa-collab';
 const SHARE_CLEANUP_AGE_MS: number = 60 * 60 * 1000;
-const DEEPSEEK_SHARE_URL_PATTERN = /https?:\/\/chat\.deepseek\.com\/share\/[A-Za-z0-9_-]+/i;
+const DEEPSEEK_SHARE_URL_PATTERN = /https?:\/\/(?:[a-z0-9-]+\.)*deepseek\.com\/(?:a\/chat\/s|share)\/[A-Za-z0-9_-]+/i;
 
 export interface NativeIncomingSharePayload {
   text: string;

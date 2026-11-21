@@ -246,7 +246,10 @@ final class ChatStore: ObservableObject {
     private var saveWorkItem: DispatchWorkItem?
     private var lastIcloudBackupAt: Date?
     private var manuallyRenamedSessions: Set<UUID> = []
+    private var rejectedHistoryImageOrder: [String] = []
     private var rejectedHistoryImageIds: Set<String> = []
+    private static let rejectedHistoryImagesStorageKey = "nuwa_rejected_history_images"
+    private static let maxStoredRejectedHistoryImages = 500
     private var consumingPendingMigration = false
     private var pendingAutoImports: [IncomingFileRequest] = []
     private var consumedShareTokens = Set<String>()
@@ -264,7 +267,39 @@ final class ChatStore: ObservableObject {
     }
 
     init() {
+        loadRejectedHistoryImages()
         loadAsync()
+    }
+
+    private func loadRejectedHistoryImages() {
+        guard let stored = UserDefaults.standard.stringArray(forKey: Self.rejectedHistoryImagesStorageKey) else {
+            return
+        }
+        var seen: Set<String> = []
+        var ordered: [String] = []
+        for id in stored where !id.isEmpty && seen.insert(id).inserted {
+            ordered.append(id)
+        }
+        if ordered.count > Self.maxStoredRejectedHistoryImages {
+            ordered = Array(ordered.suffix(Self.maxStoredRejectedHistoryImages))
+            seen = Set(ordered)
+        }
+        rejectedHistoryImageOrder = ordered
+        rejectedHistoryImageIds = seen
+    }
+
+    @discardableResult
+    private func markRejectedHistoryImage(_ fileId: String) -> Bool {
+        guard !fileId.isEmpty, rejectedHistoryImageIds.insert(fileId).inserted else {
+            return false
+        }
+        rejectedHistoryImageOrder.append(fileId)
+        if rejectedHistoryImageOrder.count > Self.maxStoredRejectedHistoryImages {
+            rejectedHistoryImageOrder = Array(rejectedHistoryImageOrder.suffix(Self.maxStoredRejectedHistoryImages))
+            rejectedHistoryImageIds = Set(rejectedHistoryImageOrder)
+        }
+        UserDefaults.standard.set(rejectedHistoryImageOrder, forKey: Self.rejectedHistoryImagesStorageKey)
+        return true
     }
 
     var activeSession: ChatSession? {
@@ -676,8 +711,14 @@ final class ChatStore: ObservableObject {
             saveServerIds(sessionId: sessionId, map: uploadedMap)
         }
 
+        var imageBudget = max(0, AIClient.maxRequestImages - liveQuestion.files.filter(\.isImage).count)
         for (msg, _) in AIClient.contextRounds(liveHistory).reversed() {
-            for file in msg.files where file.serverId == nil && uploadedMap[file.id] == nil {
+            for file in msg.files.reversed() {
+                if file.isImage {
+                    if imageBudget <= 0 { continue }
+                    imageBudget -= 1
+                }
+                guard file.serverId == nil, uploadedMap[file.id] == nil else { continue }
                 try Task.checkCancellation()
                 guard let url = AttachmentStore.localURL(for: file),
                       let rawData = try? Data(contentsOf: url)
@@ -762,20 +803,29 @@ final class ChatStore: ObservableObject {
             var omitExtendedFor1M = false
             var fileRetryAttempt = 0
             var skippedBadImages = 0
+            var imageCap = AIClient.maxRequestImages
+            var cachedPrepared: (history: [ChatMessage], question: ChatMessage)?
             let maxFileRetries = 2
-            let maxSkippedBadImages = 10
+            let maxSkippedBadImages = 60
 
-            for _ in 0..<15 {
+            for _ in 0..<80 {
                 guard generationID == generation else { return }
                 var receivedContent = false
                 var working: ChatMessage?
                 do {
-                    let prepared = try await prepareFilesForRequest(
-                        sessionId: sessionId,
-                        history: history,
-                        question: question,
-                        settings: settings
-                    )
+                    let prepared: (history: [ChatMessage], question: ChatMessage)
+                    if let existingPrepared = cachedPrepared {
+                        prepared = existingPrepared
+                    } else {
+                        let fresh = try await prepareFilesForRequest(
+                            sessionId: sessionId,
+                            history: history,
+                            question: question,
+                            settings: settings
+                        )
+                        cachedPrepared = fresh
+                        prepared = fresh
+                    }
                     guard generationID == generation else { return }
 
                     let wantsTitle = initialWantsTitle && !manuallyRenamedSessions.contains(sessionId)
@@ -794,7 +844,8 @@ final class ChatStore: ObservableObject {
                         wantsTitle: wantsTitle,
                         latestReminder: latestReminder,
                         omitExtendedFor1M: omitExtendedFor1M,
-                        rejectedFileIds: rejectedHistoryImageIds
+                        rejectedFileIds: rejectedHistoryImageIds,
+                        imageCap: imageCap
                     )
 
                     guard let initSIdx = sessions.firstIndex(where: { $0.id == sessionId }),
@@ -925,19 +976,35 @@ final class ChatStore: ObservableObject {
                 } catch let err as AIClientError where !receivedContent && !omitExtendedFor1M && err.is32kInputLimit {
                     omitExtendedFor1M = true
                     continue
-                } catch AIClientError.unsupportedImage(let historyFileId) where !receivedContent {
-                    if let historyFileId, skippedBadImages < maxSkippedBadImages,
-                       rejectedHistoryImageIds.insert(historyFileId).inserted {
-                        skippedBadImages += 1
+                } catch AIClientError.tooManyImages(let reportedCap, let message) where !receivedContent {
+                    if reportedCap > 0 && reportedCap < imageCap {
+                        imageCap = reportedCap
                         continue
                     }
-                    let error = AIClientError.unsupportedImage(historyFileId: historyFileId)
+                    let error = AIClientError.tooManyImages(maxImages: reportedCap, message: message)
+                    setStreamError(sessionId: sessionId, assistantId: assistantId, message: error.localizedDescription)
+                    break
+                } catch AIClientError.unsupportedImage(let historyFileIds, let message) where !receivedContent {
+                    if !historyFileIds.isEmpty && skippedBadImages < maxSkippedBadImages {
+                        var added = 0
+                        for fileId in historyFileIds {
+                            if markRejectedHistoryImage(fileId) {
+                                added += 1
+                            }
+                        }
+                        if added > 0 {
+                            skippedBadImages += added
+                            continue
+                        }
+                    }
+                    let error = AIClientError.unsupportedImage(historyFileIds: historyFileIds, message: message)
                     setStreamError(sessionId: sessionId, assistantId: assistantId, message: error.localizedDescription)
                     break
                 } catch AIClientError.invalidatedFiles(let targetIds, let message) where !receivedContent {
                     guard generationID == generation else { return }
                     if fileRetryAttempt < maxFileRetries,
                        invalidateServerFileIds(sessionId: sessionId, targetServerIds: targetIds) {
+                        cachedPrepared = nil
                         let delayMs = 1000 * (1 << fileRetryAttempt)
                         fileRetryAttempt += 1
                         try? await Task.sleep(for: .milliseconds(delayMs))
@@ -1211,8 +1278,13 @@ final class ChatStore: ObservableObject {
                 Task { [weak self] in
                     guard let self else { return }
                     do {
-                        _ = try await self.importFromShareLink(text)
-                        self.showToast("已导入分享对话")
+                        let result = try await self.importFromLink(text)
+                        switch result {
+                        case .share(let session):
+                            self.showToast("已导入「\(session.title)」")
+                        case .archive(let outcome):
+                            self.showToast(Self.importSummaryToast(for: outcome, singleShare: false))
+                        }
                     } catch {
                         self.showToast("导入失败：\(error.localizedDescription)")
                     }
@@ -1612,6 +1684,54 @@ final class ChatStore: ObservableObject {
             return "已导入 \(outcome.importedCount) 个对话（含 \(outcome.branchedCount) 个分叉分支）"
         }
         return outcome.importedCount == 1 ? "已导入 1 个对话" : "已导入 \(outcome.importedCount) 个对话"
+    }
+
+    enum LinkImportResult {
+        case share(ChatSession)
+        case archive(SessionImportOutcome)
+    }
+
+    func importFromLink(
+        _ input: String,
+        onStage: (@MainActor @Sendable (String) -> Void)? = nil
+    ) async throws -> LinkImportResult {
+        guard historyLoaded else { throw HistoryUnavailable() }
+        guard !importingHistory else { throw HistoryImportInProgress() }
+        importingHistory = true
+        defer {
+            importingHistory = false
+            importProgress = nil
+        }
+        do {
+            let payload = try await ShareLinkImporter.importFromLink(input: input, onStage: onStage)
+            switch payload {
+            case .share(let session):
+                stopGenerating()
+                let outcome = try await commitImportedSessions([session])
+                activeSessionId = outcome.focusSessionId ?? session.id
+                return .share(session)
+            case .archiveData(let data, _):
+                importProgress = ImportProgress(phase: .reading, sessions: 0, images: 0)
+                let parsed: [ChatSession] = try await Task.detached(priority: .userInitiated) { [weak self] in
+                    try DeepSeekZipImporter.parseZipData(data) { sessionsCount, imagesCount in
+                        Task { @MainActor [weak self] in
+                            self?.importProgress = ImportProgress(phase: .reading, sessions: sessionsCount, images: imagesCount)
+                        }
+                    }
+                }.value
+                let current = importProgress
+                importProgress = ImportProgress(
+                    phase: .merging,
+                    sessions: max(parsed.count, current?.sessions ?? 0),
+                    images: current?.images ?? 0
+                )
+                let outcome = try await commitImportedSessions(parsed)
+                return .archive(outcome)
+            }
+        } catch {
+            AppLogStore.shared.record(.error, source: "shareLink.import", message: error.localizedDescription)
+            throw error
+        }
     }
 
     func importFromShareLink(_ input: String) async throws -> ChatSession {

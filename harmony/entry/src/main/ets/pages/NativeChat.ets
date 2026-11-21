@@ -11,6 +11,7 @@ import { KeyCode } from '@kit.InputKit';
 import { inputMethod } from '@kit.IMEKit';
 import { url, util } from '@kit.ArkTS';
 import { preferences } from '@kit.ArkData';
+import { fileIo, fileUri } from '@kit.CoreFileKit';
 import { webview } from '@kit.ArkWeb';
 import { filePreview } from '@kit.PreviewKit';
 import {
@@ -31,8 +32,8 @@ import {
   NUWA_CONTINUATION_SEQ_KEY, takePendingNativeContinuation, updateNativeContinuationSnapshot,
 } from '../native/NativeContinuity';
 import {
-  NativeChatClient, NativeChatConfig, NativeChatFileRef, NativeChatMessage, NativeModelError, NativeReplyOutcome,
-  usesExtendedNativeRequest,
+  limitNativeRequestImages, MAX_NATIVE_REQUEST_IMAGES, NativeChatClient, NativeChatConfig, NativeChatFileRef,
+  NativeChatMessage, NativeModelError, NativeReplyOutcome, usesExtendedNativeRequest,
 } from '../native/NativeChatClient';
 import { loadNativeAccount, saveNativeAccount } from '../native/NativeAccountStore';
 import { allowsKeylessNativeApi, NativeApiCredential, verifyNativeApiCredential } from '../native/NativeApiCredential';
@@ -115,7 +116,7 @@ import {
 } from '../native/NativeUpdates';
 import { NativeUpdateDialog, NativeUpdateDialogModel } from '../native/NativeUpdateDialog';
 import { NativeDeleteDialog, NativeDeleteDialogModel, NativeDeleteMode } from '../native/NativeDeleteDialog';
-import { importNativeShareLink } from '../native/NativeShareImport';
+import { importNativeLink } from '../native/NativeShareImport';
 import { openNuwaPrivacyPolicy } from '../native/PrivacyPolicy';
 import { HarmonySpeechRecognition } from '../speech/HarmonySpeechRecognition';
 import { HarmonyTextToSpeech } from '../speech/HarmonyTextToSpeech';
@@ -158,6 +159,11 @@ type ComposerToggle = 'thinking' | 'search';
 interface NativeImagePreview {
   uri: string;
   originalPath: string;
+}
+
+interface NativeBadImageResolution {
+  ids: string[];
+  isCurrentTurn: boolean;
 }
 
 interface NativeSidebarScrollPosition {
@@ -232,6 +238,7 @@ struct NativeChat {
   @State private attachmentIntakeDraftId: string | null = null;
   @State private fileDropHint: 'attachment' | 'history' | null = null;
   @State private imagePreview: NativeImagePreview | null = null;
+  @State private imagePreviewZoomed: boolean = false;
   @State private loaded: boolean = false;
   @State private retryingConversationIds: string[] = [];
   @State private status: string = '';
@@ -305,6 +312,7 @@ struct NativeChat {
   @State private notesLoading: boolean = false;
   @State private notesError: boolean = false;
   @State private shareInput: string = '';
+  @State private shareImportStage: string = '';
   @State private shareImportError: string = '';
   private committingHistoryImport: boolean = false;
   private deletingSessions: boolean = false;
@@ -457,7 +465,9 @@ struct NativeChat {
   private latestScrollQueued: boolean = false;
   private streamCheckpointTimer: number = -1;
   private rejectedImageBinding: string = '';
+  private rejectedHistoryImageOrder: string[] = [];
   private rejectedHistoryImages: Set<string> = new Set();
+  private rejectedImagesLoadedBinding: string = '';
   private streamFrame: number = -1;
   private drawerTouchDownAt: number = 0;
   private drawerPanStartedAt: number | undefined;
@@ -642,6 +652,7 @@ struct NativeChat {
       this.closeUpdateNotice(true);
     } else if (this.imagePreview) {
       this.imagePreview = null;
+      this.imagePreviewZoomed = false;
     } else if (this.authorizing) {
       this.cancelAuthorization();
     } else if (this.sourcePanelEntry) {
@@ -731,6 +742,7 @@ struct NativeChat {
       this.trimConversationCache();
       this.applyTheme();
       setNativeHapticEnabled(this.settings.hapticFeedback);
+      await this.loadRejectedHistoryImages(context, this.settings.attachmentBinding);
       this.scrollToLatest();
       this.syncContinuationState();
       void this.consumeContinuation();
@@ -2305,12 +2317,10 @@ struct NativeChat {
       this.draftFiles.every((file: NativeDraftAttachment): boolean => file.state === 'ready');
   }
 
-  private async prepareMessages(context: common.UIAbilityContext, session: NativeConversation, config: NativeChatConfig,
-    reply: NativeReply, rejectedImages: Set<string>): Promise<NativeChatMessage[]> {
-    const messages: NativeChatMessage[] = [];
+  private async prepareReplyAttachmentMap(context: common.UIAbilityContext, session: NativeConversation,
+    config: NativeChatConfig, reply: NativeReply): Promise<Map<string, NativeChatFileRef>> {
     const current = this.session(session.id) ?? session;
     const path = visibleMessages(current);
-    const prompt = path[path.length - 2];
     const usesFiles = !!config.accountToken || config.protocol === 'anthropic';
     const prepared = new Map<string, NativeChatFileRef>();
     if (usesFiles) {
@@ -2323,6 +2333,16 @@ struct NativeChat {
         reply.stopPreparing = undefined;
       }
     }
+    return prepared;
+  }
+
+  private buildPreparedMessages(session: NativeConversation, config: NativeChatConfig,
+    reply: NativeReply, prepared: Map<string, NativeChatFileRef>, rejectedImages: Set<string>): NativeChatMessage[] {
+    const messages: NativeChatMessage[] = [];
+    const current = this.session(session.id) ?? session;
+    const path = visibleMessages(current);
+    const prompt = path[path.length - 2];
+    const usesFiles = !!config.accountToken || config.protocol === 'anthropic';
     if (reply.stopped) return [];
     let previousReminder: string | undefined;
     for (let index = 0; index < path.length - 1; index++) {
@@ -2398,12 +2418,22 @@ struct NativeChat {
       };
       throw new Error(failures[0].detail);
     }
-    // Older rounds use available attachments, and an isolated historical upload failure does not block a new reply.
+    // Older rounds use available attachments up to the 600-image request budget, walking backwards from newest turns.
+    const promptImages = (prompt?.files ?? []).filter((file: NativeAttachment): boolean => file.isImage).length;
+    let imageBudget = Math.max(0, MAX_NATIVE_REQUEST_IMAGES - promptImages);
     for (let index = path.length - 3; index >= 0 && !reply.stopped; index--) {
       const message = path[index];
       if (message.role === 'user' && this.usableContextReply(session, path[index + 1])) {
-        for (const item of message.files ?? []) {
+        const items = message.files ?? [];
+        for (let fileIndex = items.length - 1; fileIndex >= 0; fileIndex--) {
           if (reply.stopped) return;
+          const item = items[fileIndex];
+          if (item.isImage) {
+            if (imageBudget <= 0) {
+              continue;
+            }
+            imageBudget -= 1;
+          }
           await prepare(item);
         }
       }
@@ -2599,17 +2629,27 @@ struct NativeChat {
 
   private async requestReply(context: common.UIAbilityContext, config: NativeChatConfig,
     session: NativeConversation, reply: NativeReply): Promise<NativeReplyOutcome | undefined> {
+    await this.loadRejectedHistoryImages(context, reply.attachmentBinding);
     const rejectedImages = this.historyImageRejections(reply.attachmentBinding);
     const prefixBlocks = config.prefill?.blocks ?? [];
     const previousSources = reply.message.sources ?? [];
     const previousCitations = reply.message.citations ?? [];
     const previousTextLength = reply.message.content.length;
+    const maxSkippedBadImages = 60;
     let skippedBadImages = 0;
     let fileRetries = 0;
+    let imageCap = MAX_NATIVE_REQUEST_IMAGES;
+    let cachedPrepared: Map<string, NativeChatFileRef> | null = null;
     while (!reply.stopped) {
       let messages: NativeChatMessage[];
       try {
-        messages = await this.prepareMessages(context, session, config, reply, rejectedImages);
+        if (!cachedPrepared) {
+          cachedPrepared = await this.prepareReplyAttachmentMap(context, session, config, reply);
+        }
+        messages = limitNativeRequestImages(
+          this.buildPreparedMessages(session, config, reply, cachedPrepared, rejectedImages),
+          imageCap
+        );
       } catch (cause) {
         const detail = cause instanceof Error ? cause.message : '';
         if (!reply.stopped && !reply.message.failure) {
@@ -2682,25 +2722,34 @@ struct NativeChat {
           config.omitExtended = true;
           continue;
         }
-        if (cause.imageMessageIndex >= 0 && cause.imageMessageIndex < messages.length) {
-          const target = messages[cause.imageMessageIndex];
-          const image = target.files?.[cause.imageBlockIndex];
-          if (target.role === 'user' && image?.isImage) {
-            let lastUserIndex = messages.length - 1;
-            while (lastUserIndex > cause.imageMessageIndex && messages[lastUserIndex].role !== 'user') lastUserIndex--;
-            if (cause.imageMessageIndex === lastUserIndex) {
-              reply.message.failure = { kind: 'unsupported-image', detail: '' };
-              throw cause;
+        if (cause.maxImagesLimit > 0 && cause.maxImagesLimit < imageCap) {
+          imageCap = cause.maxImagesLimit;
+          continue;
+        }
+        if (cause.imageMessageIndex >= 0) {
+          const resolved = this.resolveBadHistoryImageIds(
+            messages, cause.imageMessageIndex, cause.imageBlockIndex, rejectedImages
+          );
+          if (resolved.ids.length > 0 && skippedBadImages < maxSkippedBadImages) {
+            let added = 0;
+            for (const fileId of resolved.ids) {
+              if (this.markRejectedHistoryImage(context, reply.attachmentBinding, fileId)) {
+                added += 1;
+              }
             }
-            if (skippedBadImages < 10 && !rejectedImages.has(image.serverId)) {
-              rejectedImages.add(image.serverId);
-              skippedBadImages++;
+            if (added > 0) {
+              skippedBadImages += added;
               continue;
             }
+          }
+          if (resolved.isCurrentTurn) {
+            reply.message.failure = { kind: 'unsupported-image', detail: '' };
+            throw cause;
           }
         }
         if (cause.invalidFile && fileRetries < 2 &&
           this.invalidateReplyFiles(session, messages, cause, reply.attachmentBinding)) {
+          cachedPrepared = null;
           void this.save(context);
           await this.waitForFileRetry(reply, fileRetries++);
           continue;
@@ -2748,9 +2797,135 @@ struct NativeChat {
   private historyImageRejections(binding: string): Set<string> {
     if (this.rejectedImageBinding !== binding) {
       this.rejectedImageBinding = binding;
+      this.rejectedHistoryImageOrder = [];
       this.rejectedHistoryImages = new Set<string>();
     }
     return this.rejectedHistoryImages;
+  }
+
+  private async loadRejectedHistoryImages(context: common.UIAbilityContext, binding: string): Promise<void> {
+    if (!binding || this.rejectedImagesLoadedBinding === binding) {
+      return;
+    }
+    this.historyImageRejections(binding);
+    this.rejectedImagesLoadedBinding = binding;
+    try {
+      const store = await preferences.getPreferences(context, 'nuwa_rejected_history_images');
+      const raw = await store.get('ids_' + binding, '') as string;
+      if (!raw) return;
+      const parsed: Object = JSON.parse(raw) as Object;
+      if (!Array.isArray(parsed)) return;
+      for (let i = 0; i < parsed.length; i++) {
+        const id = parsed[i] as Object;
+        if (typeof id === 'string' && id && !this.rejectedHistoryImages.has(id)) {
+          this.rejectedHistoryImages.add(id);
+          this.rejectedHistoryImageOrder.push(id);
+        }
+      }
+      if (this.rejectedHistoryImageOrder.length > 500) {
+        this.rejectedHistoryImageOrder = this.rejectedHistoryImageOrder.slice(-500);
+        this.rejectedHistoryImages = new Set<string>(this.rejectedHistoryImageOrder);
+      }
+    } catch {
+      // Ignore storage errors for cached bad-image skips.
+    }
+  }
+
+  private markRejectedHistoryImage(context: common.UIAbilityContext, binding: string, fileId: string): boolean {
+    const set = this.historyImageRejections(binding);
+    if (!fileId || set.has(fileId)) {
+      return false;
+    }
+    set.add(fileId);
+    this.rejectedHistoryImageOrder.push(fileId);
+    if (this.rejectedHistoryImageOrder.length > 500) {
+      this.rejectedHistoryImageOrder = this.rejectedHistoryImageOrder.slice(-500);
+      this.rejectedHistoryImages = new Set<string>(this.rejectedHistoryImageOrder);
+    }
+    const snapshot = this.rejectedHistoryImageOrder.slice();
+    void preferences.getPreferences(context, 'nuwa_rejected_history_images').then(async (store: preferences.Preferences) => {
+      await store.put('ids_' + binding, JSON.stringify(snapshot));
+      await store.flush();
+    }).catch(() => {});
+    return true;
+  }
+
+  private resolveBadHistoryImageIds(
+    messages: NativeChatMessage[],
+    messageIndex: number,
+    blockIndex: number,
+    rejectedImages: Set<string>
+  ): NativeBadImageResolution {
+    let lastUserIndex = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'user') {
+        lastUserIndex = i;
+        break;
+      }
+    }
+    const nonReminderIndices: number[] = [];
+    for (let i = 0; i < messages.length; i++) {
+      if (messages[i].role !== 'latest_reminder') {
+        nonReminderIndices.push(i);
+      }
+    }
+    const candidates: number[] = [];
+    if (messageIndex >= 0 && messageIndex < nonReminderIndices.length) {
+      const mapped = nonReminderIndices[messageIndex];
+      if (mapped !== messageIndex) {
+        candidates.push(mapped);
+      }
+    }
+    if (messageIndex >= 0 && messageIndex < messages.length) {
+      candidates.push(messageIndex);
+    }
+
+    for (let c = 0; c < candidates.length; c++) {
+      const cIdx = candidates[c];
+      const msg = messages[cIdx];
+      const files = msg.files ?? [];
+      if (msg.role !== 'user' || files.length === 0) continue;
+      if (cIdx === lastUserIndex) {
+        return { ids: [], isCurrentTurn: true };
+      }
+      const indicesToCheck = [blockIndex, blockIndex - 1];
+      for (let k = 0; k < indicesToCheck.length; k++) {
+        const idx = indicesToCheck[k];
+        if (idx >= 0 && idx < files.length) {
+          const item = files[idx];
+          if (item.isImage && item.serverId && !rejectedImages.has(item.serverId)) {
+            return { ids: [item.serverId], isCurrentTurn: false };
+          }
+        }
+      }
+      const imageFiles = files.filter((file: NativeChatFileRef): boolean => file.isImage);
+      if (blockIndex >= 0 && blockIndex < imageFiles.length) {
+        const item = imageFiles[blockIndex];
+        if (item.serverId && !rejectedImages.has(item.serverId)) {
+          return { ids: [item.serverId], isCurrentTurn: false };
+        }
+      }
+    }
+
+    for (let c = 0; c < candidates.length; c++) {
+      const cIdx = candidates[c];
+      if (cIdx === lastUserIndex) continue;
+      const msg = messages[cIdx];
+      const files = msg.files ?? [];
+      if (msg.role !== 'user' || files.length === 0) continue;
+      const ids: string[] = [];
+      for (let f = 0; f < files.length; f++) {
+        const item = files[f];
+        if (item.isImage && item.serverId && !rejectedImages.has(item.serverId)) {
+          ids.push(item.serverId);
+        }
+      }
+      if (ids.length > 0) {
+        return { ids, isCurrentTurn: false };
+      }
+    }
+
+    return { ids: [], isCurrentTurn: false };
   }
 
   private mergeReplyTimeline(prefix: string, previous: NativeToolTimelineView | undefined,
@@ -3591,6 +3766,7 @@ struct NativeChat {
   }
 
   private showAttachmentPreview(item: NativeAttachment, uri: string): void {
+    this.imagePreviewZoomed = false;
     this.imagePreview = { uri: uri, originalPath: this.attachmentAvifPath(item, uri) };
   }
 
@@ -4803,11 +4979,46 @@ struct NativeChat {
     }
     this.backupBusy = true;
     this.shareImportError = '';
+    this.shareImportStage = this.label('正在识别链接…', 'Inspecting link…');
     let lateChanges = false;
+    let downloadedArchivePath = '';
     try {
-      const ids = new Set<string>(this.history.sessions.map((session: NativeConversation): string => session.id));
-      const imported = await importNativeShareLink(this.shareInput, ids);
       const context = this.host();
+      const ids = new Set<string>(this.history.sessions.map((session: NativeConversation): string => session.id));
+      const result = await importNativeLink(context, this.shareInput, ids, (stage: string): void => {
+        this.shareImportStage = stage;
+      });
+      if (result.kind === 'archive' && result.archivePath) {
+        downloadedArchivePath = result.archivePath;
+        const onVerified = async (): Promise<void> => {
+          this.stopVoice();
+          const active = Array.from(this.replies);
+          this.cancelAllReplies();
+          await Promise.all(active.map((reply: NativeReply): Promise<void> => reply.completion ?? Promise.resolve()));
+          await this.loadHistoryBodies();
+        };
+        const sessions = await this.backup.importFromUri(fileUri.getUriFromPath(downloadedArchivePath), context, onVerified);
+        if (!sessions || sessions.length === 0) {
+          throw new Error(this.label('压缩包中没有可导入的对话记录', 'No chats found in the downloaded archive'));
+        }
+        this.committingHistoryImport = true;
+        const merged = await commitChatBackup(context, this.history, sessions,
+          (state: NativeConversationState): Promise<void> => this.storage.saveConversations(context, state));
+        this.history = merged.history;
+        this.conversationCache.confirm(this.history.sessions);
+        this.shareImportVisible = false;
+        this.shareInput = '';
+        this.settingsVisible = false;
+        const count = merged.importedCount;
+        this.toast(count ?
+          this.label(`已导入 ${count} 个对话`, count === 1 ? 'Imported 1 chat' : `Imported ${count} chats`) :
+          this.label('没有新增对话', 'No new chats to import'));
+        return;
+      }
+      const imported = result.session;
+      if (!imported) {
+        throw new Error(this.label('该链接无法导入', 'Unable to import this link'));
+      }
       const previous = this.history;
       const next = upsertConversation(previous, imported, true);
       this.committingHistoryImport = true;
@@ -4823,13 +5034,18 @@ struct NativeChat {
       this.restoreDraft(imported.id);
       this.shareImportVisible = false;
       this.shareInput = '';
+      this.settingsVisible = false;
       this.scrollToLatest();
       this.toast(this.label('已导入 1 个对话', "Imported 1 chat"));
     } catch (error) {
-      this.shareImportError = (error as Error).message || this.label('该分享链接无法导入', "Unable to import this share link");
+      this.shareImportError = (error as Error).message || this.label('该链接无法导入，请检查链接是否有效', "Unable to import this link");
     } finally {
+      if (downloadedArchivePath) {
+        await fileIo.unlink(downloadedArchivePath).catch(() => {});
+      }
       this.committingHistoryImport = false;
       this.backupBusy = false;
+      this.shareImportStage = '';
       if (lateChanges) void this.save();
       this.trimConversationCache();
     }
@@ -4838,11 +5054,11 @@ struct NativeChat {
   @Builder
   private shareImportDialog() {
     Column({ space: 14 }) {
-      Text(this.label('通过 DeepSeek 分享链接导入', "Import from a DeepSeek share link")).fontSize(this.appFontSize(18)).fontWeight(FontWeight.Medium).width('100%')
+      Text(this.label('通过 DeepSeek 链接导入', "Import from DeepSeek link")).fontSize(this.appFontSize(18)).fontWeight(FontWeight.Medium).width('100%')
         .fontColor($r('app.color.native_chat_primary'))
       TextArea({ text: this.shareInput, placeholder: this.label(
-        '粘贴分享链接或包含链接的完整分享文案，例如：https://chat.deepseek.com/share/...',
-        'Paste a link or text containing a link, such as https://chat.deepseek.com/share/…') })
+        '粘贴 DeepSeek 分享链接（如 chat.deepseek.com/share/...）或官方数据导出 ZIP 下载链接',
+        'Paste a DeepSeek share link (e.g. chat.deepseek.com/share/…) or an official export ZIP download link') })
         .height(96).width('100%').fontSize(this.appFontSize(14)).enabled(!this.backupBusy).maxLength(4096).borderRadius(14)
         .backgroundColor($r('app.color.native_chat_field')).fontColor($r('app.color.native_chat_primary'))
         .onChange((text: string) => { this.shareInput = text; this.shareImportError = ''; })
@@ -4853,7 +5069,7 @@ struct NativeChat {
         Button(this.label('取消', "Cancel"), { buttonStyle: ButtonStyleMode.TEXTUAL })
           .fontSize(this.appFontSize(14)).enabled(!this.backupBusy)
           .onClick(() => { this.closeShareImport(); })
-        Button(this.backupBusy ? this.label('导入中…', "Importing…") : this.label('确认导入', "Import"))
+        Button(this.backupBusy ? (this.shareImportStage || this.label('导入中…', "Importing…")) : this.label('确认导入', "Import"))
           .fontSize(this.appFontSize(14)).enabled(!this.backupBusy && !!this.shareInput.trim())
           .backgroundColor($r('app.color.native_chat_blue')).onClick(() => { void this.acceptShareImport(); })
       }
@@ -6751,17 +6967,66 @@ struct NativeChat {
       }
       if (this.imagePreview) {
         Stack({ alignContent: Alignment.TopEnd }) {
-          Stack() {
-            NativeAvifImage({ uri: this.imagePreview.uri, originalPath: this.imagePreview.originalPath,
-              fit: ImageFit.Contain, active: this.visible })
+          if (this.imagePreviewZoomed) {
+            Scroll() {
+              Column() {
+                NativeAvifImage({ uri: this.imagePreview.uri, originalPath: this.imagePreview.originalPath,
+                  fit: ImageFit.Contain, active: this.visible, autoHeight: true })
+                  .onClick(() => {
+                    triggerNativeHaptic('light');
+                    this.imagePreviewZoomed = false;
+                  })
+              }
+              .width('100%').padding({ top: 68, bottom: 88 })
+            }
+            .width('100%').height('100%').backgroundColor('#F0000000')
+            .scrollable(ScrollDirection.Vertical).scrollBar(BarState.Auto)
+          } else {
+            Stack() {
+              NativeAvifImage({ uri: this.imagePreview.uri, originalPath: this.imagePreview.originalPath,
+                fit: ImageFit.Contain, active: this.visible })
+                .onClick(() => {
+                  triggerNativeHaptic('light');
+                  this.imagePreviewZoomed = true;
+                })
+            }
+            .width('100%').height('100%').padding({ top: 60, bottom: 76 }).backgroundColor('#F0000000')
+            .onClick(() => {
+              this.imagePreview = null;
+              this.imagePreviewZoomed = false;
+            })
           }
-            .width('100%').height('100%').backgroundColor(Color.Black)
-            .onClick(() => { this.imagePreview = null; })
           Row() {
-            this.iconButton($r('app.media.native_close'), this.label('关闭图片', "Close image"), () => { this.imagePreview = null; },
-              42, 22, Color.White, '#660F1115')
+            this.iconButton($r('app.media.native_close'), this.label('关闭图片', "Close image"), () => {
+              triggerNativeHaptic('light');
+              this.imagePreview = null;
+              this.imagePreviewZoomed = false;
+            }, 42, 22, Color.White, '#660F1115')
           }
-          .padding(12)
+          .padding(14)
+          Row({ space: 12 }) {
+            Button(this.imagePreviewZoomed ? this.label('适应屏幕', 'Fit screen') : this.label('放大查看', 'Zoom in'),
+              { type: ButtonType.Capsule })
+              .height(38).padding({ left: 16, right: 16 }).fontSize(this.appFontSize(14)).fontColor(Color.White)
+              .backgroundColor('#7A1A1D24').border({ width: 0.75, color: '#33FFFFFF' })
+              .clickEffect(NATIVE_PILL_CLICK_EFFECT)
+              .onClick(() => {
+                triggerNativeHaptic('selection');
+                this.imagePreviewZoomed = !this.imagePreviewZoomed;
+              })
+            Button(this.label('关闭', 'Close'), { type: ButtonType.Capsule })
+              .height(38).padding({ left: 16, right: 16 }).fontSize(this.appFontSize(14)).fontColor(Color.White)
+              .backgroundColor('#7A1A1D24').border({ width: 0.75, color: '#33FFFFFF' })
+              .clickEffect(NATIVE_PILL_CLICK_EFFECT)
+              .onClick(() => {
+                triggerNativeHaptic('light');
+                this.imagePreview = null;
+                this.imagePreviewZoomed = false;
+              })
+          }
+          .position({ x: 0, y: '100%' }).markAnchor({ x: 0, y: '100%' })
+          .width('100%').justifyContent(FlexAlign.Center).padding({ bottom: 26 })
+          .hitTestBehavior(HitTestMode.Transparent)
         }
         .width('100%').height('100%')
       }

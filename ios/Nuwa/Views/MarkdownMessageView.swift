@@ -916,47 +916,157 @@ struct BranchSwitcherView: View {
     }
 }
 
-/// Full-screen pinch-to-zoom image preview overlay for message/draft image attachments.
+/// Full-screen image preview overlay supporting tap-to-zoom, pinch-to-zoom,
+/// smooth scrolling for super-tall / super-wide images, and reliable dismissal.
 struct ImageLightboxOverlay: View {
     let image: UIImage
     let onDismiss: () -> Void
 
-    @State private var scale: CGFloat = 1.0
+    @State private var isZoomed = false
+    @State private var pinchScale: CGFloat = 1.0
+    @State private var baseScale: CGFloat = 1.0
+
+    private var imageAspect: CGFloat {
+        let size = image.size
+        guard size.width > 0, size.height > 0 else { return 1.0 }
+        return size.height / size.width
+    }
+
+    private var isTallImage: Bool { imageAspect > 1.6 }
+    private var isWideImage: Bool { imageAspect < 1.0 / 1.6 }
+
+    private func toggleZoom() {
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+            if isZoomed || baseScale > 1.05 {
+                isZoomed = false
+                baseScale = 1.0
+                pinchScale = 1.0
+            } else {
+                isZoomed = true
+                baseScale = 1.0
+                pinchScale = 1.0
+            }
+        }
+    }
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            Color.black.opacity(0.92)
-                .ignoresSafeArea()
-                .onTapGesture { onDismiss() }
+        GeometryReader { proxy in
+            let viewportW = max(1, proxy.size.width)
+            let viewportH = max(1, proxy.size.height)
+            let effectiveScale = max(1.0, min(4.0, baseScale * pinchScale))
+            let showingZoomed = isZoomed || effectiveScale > 1.05
 
-            Image(uiImage: image)
-                .resizable()
-                .scaledToFit()
-                .scaleEffect(scale)
-                .gesture(
-                    MagnificationGesture()
-                        .onChanged { value in
-                            scale = max(1.0, min(4.0, value))
-                        }
-                        .onEnded { _ in
-                            withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
-                                if scale < 1.05 { scale = 1.0 }
+            ZStack {
+                Color.black.opacity(0.94)
+                    .ignoresSafeArea()
+                    .onTapGesture { onDismiss() }
+
+                if showingZoomed {
+                    ScrollView(isTallImage && effectiveScale <= 1.05 ? .vertical : [.horizontal, .vertical], showsIndicators: true) {
+                        let targetW: CGFloat = {
+                            if isTallImage {
+                                return viewportW * effectiveScale
+                            } else if isWideImage {
+                                return max(viewportW * 1.8, (viewportH - 120) / max(0.05, imageAspect)) * effectiveScale
+                            } else {
+                                return viewportW * max(1.8, effectiveScale)
                             }
-                        }
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(16)
+                        }()
+                        let targetH = max(1, targetW * imageAspect)
+                        Image(uiImage: image)
+                            .resizable()
+                            .frame(width: targetW, height: targetH)
+                            .padding(.top, 64)
+                            .padding(.bottom, 84)
+                            .frame(minWidth: viewportW, minHeight: viewportH, alignment: isTallImage ? .top : .center)
+                            .contentShape(Rectangle())
+                            .onTapGesture { toggleZoom() }
+                    }
+                    .gesture(
+                        MagnificationGesture()
+                            .onChanged { value in
+                                pinchScale = value
+                            }
+                            .onEnded { value in
+                                let finalScale = baseScale * value
+                                withAnimation(.spring(response: 0.25, dampingFraction: 0.86)) {
+                                    pinchScale = 1.0
+                                    if finalScale < 0.85 {
+                                        isZoomed = false
+                                        baseScale = 1.0
+                                    } else {
+                                        baseScale = max(1.0, min(4.0, finalScale))
+                                    }
+                                }
+                            }
+                    )
+                } else {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .scaleEffect(effectiveScale)
+                        .contentShape(Rectangle())
+                        .onTapGesture { toggleZoom() }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 64)
+                        .gesture(
+                            MagnificationGesture()
+                                .onChanged { value in
+                                    pinchScale = max(1.0, value)
+                                }
+                                .onEnded { value in
+                                    withAnimation(.spring(response: 0.25, dampingFraction: 0.86)) {
+                                        pinchScale = 1.0
+                                        if value > 1.15 {
+                                            isZoomed = true
+                                            baseScale = min(4.0, value)
+                                        }
+                                    }
+                                }
+                        )
+                }
 
-            Button(action: onDismiss) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 40, height: 40)
-                    .nuwaGlass(in: Circle(), interactive: true)
+                VStack {
+                    HStack {
+                        Spacer()
+                        Button(action: onDismiss) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .frame(width: 40, height: 40)
+                                .nuwaGlass(in: Circle(), interactive: true)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.top, 14)
+                    .padding(.trailing, 18)
+
+                    Spacer()
+
+                    HStack(spacing: 12) {
+                        Button(action: toggleZoom) {
+                            Text(showingZoomed ? "适应屏幕" : "放大查看")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 9)
+                                .nuwaGlass(in: Capsule(), interactive: true)
+                        }
+                        .buttonStyle(.plain)
+
+                        Button(action: onDismiss) {
+                            Text("关闭")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 9)
+                                .nuwaGlass(in: Capsule(), interactive: true)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.bottom, 24)
+                }
             }
-            .buttonStyle(.plain)
-            .padding(.top, 16)
-            .padding(.trailing, 18)
         }
     }
 }

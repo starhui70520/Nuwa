@@ -82,9 +82,9 @@ export struct NativeDataSettings {
           this.onMigration,
         )
         this.settingRow(
-          () => this.text('通过分享链接导入', 'Import from share link'),
-          () => this.text('粘贴 DeepSeek 分享链接（如 chat.deepseek.com/share/...）直接导入并继续对话',
-            'Paste a DeepSeek share link (e.g. chat.deepseek.com/share/...) to import and continue the chat.'),
+          () => this.text('通过链接导入', 'Import from link'),
+          () => this.text('粘贴 DeepSeek 分享链接或官方数据导出 ZIP 下载链接，直接导入对话',
+            'Paste a DeepSeek share link or official export ZIP download link to import chats directly.'),
           () => this.text('导入链接', 'Import link'),
           'outlined',
           () => !this.busy,

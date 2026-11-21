@@ -24,6 +24,7 @@ export struct NativeAvifImage {
   @Prop @Watch('syncPlayback') originalPath: string = '';
   @Prop fit: ImageFit = ImageFit.Contain;
   @Prop @Watch('syncPlayback') active: boolean = true;
+  @Prop autoHeight: boolean = false;
   @State private pixels: image.PixelMap | undefined = undefined;
   private mounted: boolean = false;
   private visible: boolean = false;
@@ -153,11 +154,20 @@ export struct NativeAvifImage {
   }
 
   build() {
-    Image(this.pixels ?? this.uri)
-      .width('100%').height('100%').objectFit(this.fit).autoResize(true).draggable(false)
-      .onVisibleAreaChange([0], (_isExpanding: boolean, ratio: number): void => {
-        this.visible = ratio > 0;
-        this.syncPlayback();
-      })
+    if (this.autoHeight) {
+      Image(this.pixels ?? this.uri)
+        .width('100%').objectFit(this.fit).autoResize(false).draggable(false)
+        .onVisibleAreaChange([0], (_isExpanding: boolean, ratio: number): void => {
+          this.visible = ratio > 0;
+          this.syncPlayback();
+        })
+    } else {
+      Image(this.pixels ?? this.uri)
+        .width('100%').height('100%').objectFit(this.fit).autoResize(true).draggable(false)
+        .onVisibleAreaChange([0], (_isExpanding: boolean, ratio: number): void => {
+          this.visible = ratio > 0;
+          this.syncPlayback();
+        })
+    }
   }
 }

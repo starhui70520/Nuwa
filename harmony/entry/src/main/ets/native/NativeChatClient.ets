@@ -242,6 +242,52 @@ const ANTHROPIC_SEARCH_KINDS: Set<string> = new Set<string>(['search', 'deep_sea
 
 export type NativeModelErrorKind = 'http' | 'stream' | 'network' | 'interrupted' | 'protocol';
 
+export const MAX_NATIVE_REQUEST_IMAGES: number = 600;
+
+export function limitNativeRequestImages(messages: NativeChatMessage[],
+  maxImages: number = MAX_NATIVE_REQUEST_IMAGES): NativeChatMessage[] {
+  let remaining = Math.max(0, maxImages);
+  let changed = false;
+  const result: NativeChatMessage[] = new Array<NativeChatMessage>(messages.length);
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.role !== 'user' || !message.files || message.files.length === 0) {
+      result[i] = message;
+      continue;
+    }
+    const kept: NativeChatFileRef[] = [];
+    let droppedInMessage = false;
+    for (let j = message.files.length - 1; j >= 0; j--) {
+      const file = message.files[j];
+      if (file.isImage) {
+        if (remaining > 0) {
+          remaining -= 1;
+          kept.push(file);
+        } else {
+          droppedInMessage = true;
+          changed = true;
+        }
+      } else {
+        kept.push(file);
+      }
+    }
+    if (!droppedInMessage) {
+      result[i] = message;
+    } else {
+      kept.reverse();
+      const content = message.content || (kept.length === 0 ? '[图片]' : '');
+      result[i] = {
+        role: message.role,
+        content: content,
+        files: kept,
+        readLinks: message.readLinks,
+        prefillBlocks: message.prefillBlocks,
+      };
+    }
+  }
+  return changed ? result : messages;
+}
+
 export class NativeModelError extends Error {
   readonly kind: NativeModelErrorKind;
   readonly status: number;
@@ -251,6 +297,7 @@ export class NativeModelError extends Error {
   readonly fileIds: string[];
   readonly imageMessageIndex: number;
   readonly imageBlockIndex: number;
+  readonly maxImagesLimit: number;
 
   constructor(message: string, status: number, receivedContent: boolean, apiKey: string, accountToken: string,
     kind: NativeModelErrorKind = status === 0 ? 'network' : 'http') {
@@ -261,9 +308,12 @@ export class NativeModelError extends Error {
     this.inputLimit = /user input too long.*exceeds max 32768 tokens/i.test(message);
     this.invalidFile = status === 400 && /file_ids do not exist or are not created under your account|file data not found for file_id|\.source\.file_id: invalid file_id/i.test(message);
     this.fileIds = this.invalidFile ? Array.from(new Set(message.match(/file-api-[\w-]+/g) ?? [])) : [];
-    const image = /messages\.(\d+)\.content\.(\d+):.*unsupported image/i.exec(message);
+    const image = /messages\.(\d+)\.content\.(\d+):.*(?:unsupported image|invalid image|image is too large|too large to process)/i.exec(message);
     this.imageMessageIndex = image ? Number(image[1]) : -1;
     this.imageBlockIndex = image ? Number(image[2]) : -1;
+    const tooMany = /Too many images:\s*max\s+(\d+)\s+images/i.exec(message);
+    const parsedMax = tooMany ? Number.parseInt(tooMany[1], 10) : -1;
+    this.maxImagesLimit = Number.isFinite(parsedMax) && parsedMax > 0 ? parsedMax : -1;
   }
 }
 

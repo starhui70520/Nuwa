@@ -1,14 +1,19 @@
-import { util } from '@kit.ArkTS';
+import { common } from '@kit.AbilityKit';
+import { url, util } from '@kit.ArkTS';
+import { fileIo } from '@kit.CoreFileKit';
 import { http } from '@kit.NetworkKit';
 import { NativeConversation, NativeConversationMessage } from './NativeConversation';
 import { buildArchivedNativeTimeline, NativeArchiveTimelineFragment } from './NativeToolTimeline';
 import { NativePrefillBlock } from './NativeReplyPrefill';
 
 const SHARE_ENDPOINT = 'https://chat.deepseek.com/api/v0/share/content?share_id=';
-const SHARE_URL = /(?:^|[^A-Za-z0-9_@%/.\-])(?:https?:\/\/)?chat\.deepseek\.com\/share\/([A-Za-z0-9_-]{4,64})(?=$|[/?#\s)"'!.,;>\]，。！？）】”》])/i;
+const SHARE_URL = /(?:^|[^A-Za-z0-9_@%/.\-])(?:https?:\/\/)?(?:[a-z0-9-]+\.)*deepseek\.com\/(?:a\/chat\/s|share)\/([A-Za-z0-9_-]{4,64})(?=$|[/?#\s)"'!.,;>\]，。！？）】”》])/i;
 const BARE_SHARE_ID = /^[A-Za-z0-9_-]{8,64}$/;
+const HTTP_URL_PATTERN = /https?:\/\/[^\s<>"'`）)】》]+/i;
 const MAX_INPUT = 8_192;
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
+const MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024;
+const MAX_REDIRECT_HOPS = 6;
 const MAX_MESSAGES = 4_000;
 const MAX_FRAGMENTS = 512;
 const MAX_MESSAGE_TEXT = 512 * 1024;
@@ -93,9 +98,9 @@ function tooLarge(): never {
   throw new Error('分享对话过大，无法导入');
 }
 
-function parseShareId(input: string): string {
-  if (input.length > MAX_INPUT) {
-    return tooLarge();
+export function extractDeepSeekShareId(input: string): string | null {
+  if (!input || input.length > MAX_INPUT) {
+    return null;
   }
   const trimmed = input.trim();
   const id = SHARE_URL.exec(trimmed)?.[1];
@@ -104,6 +109,29 @@ function parseShareId(input: string): string {
   }
   if (BARE_SHARE_ID.test(trimmed)) {
     return trimmed;
+  }
+  return null;
+}
+
+export function extractHttpUrl(input: string): string | null {
+  const trimmed = input.trim();
+  if (!trimmed || trimmed.length > MAX_INPUT) {
+    return null;
+  }
+  const match = HTTP_URL_PATTERN.exec(trimmed);
+  if (!match?.[0]) {
+    return null;
+  }
+  return match[0].replace(/[.,;:!?。，；：！？]+$/, '');
+}
+
+function parseShareId(input: string): string {
+  if (input.length > MAX_INPUT) {
+    return tooLarge();
+  }
+  const id = extractDeepSeekShareId(input);
+  if (id) {
+    return id;
   }
   throw new Error('未识别到有效的 DeepSeek 分享链接（格式如 https://chat.deepseek.com/share/...）');
 }
@@ -350,4 +378,202 @@ export async function importNativeShareLink(input: string, reservedIds: Set<stri
     throw new Error('该分享链接中没有可导入的对话内容');
   }
   return buildSession(data, data.messages, Date.now(), reservedIds);
+}
+
+export interface NativeLinkImportResult {
+  kind: 'share' | 'archive';
+  session?: NativeConversation;
+  archivePath?: string;
+}
+
+interface RemoteDownloadResult {
+  status: number;
+  finalUrl: string;
+  filePath: string;
+  size: number;
+}
+
+function headerValue(headers: Object | undefined, targetName: string): string {
+  if (!headers || typeof headers !== 'object') {
+    return '';
+  }
+  const lower = targetName.toLowerCase();
+  const entries = Object.entries(headers as Record<string, Object>);
+  for (let i = 0; i < entries.length; i++) {
+    if (entries[i][0].toLowerCase() === lower) {
+      const value = entries[i][1];
+      if (typeof value === 'string') return value;
+      if (Array.isArray(value) && value.length > 0 && typeof value[0] === 'string') {
+        return value[0] as string;
+      }
+    }
+  }
+  return '';
+}
+
+function resolveRedirectUrl(baseUrl: string, location: string): string {
+  const trimmed = location.trim();
+  if (!trimmed) return '';
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  try {
+    return url.URL.parseURL(trimmed, baseUrl).toString();
+  } catch {
+    return '';
+  }
+}
+
+async function downloadRemoteUrlToCache(context: common.UIAbilityContext, initialUrl: string): Promise<RemoteDownloadResult> {
+  let currentUrl = initialUrl;
+  for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
+    const tempPath = context.cacheDir + '/nuwa_link_import_' + util.generateRandomUUID(true) + '.bin';
+    const file = await fileIo.open(tempPath, fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+    const request = http.createHttp();
+    let totalBytes = 0;
+    let writeFailedMessage: string = '';
+    let redirectLocation = '';
+    try {
+      request.on('headersReceive', (headers: Object): void => {
+        const loc = headerValue(headers, 'location');
+        if (loc) {
+          redirectLocation = loc;
+        }
+      });
+      request.on('dataReceive', (chunk: ArrayBuffer): void => {
+        if (writeFailedMessage || chunk.byteLength === 0) return;
+        if (totalBytes + chunk.byteLength > MAX_DOWNLOAD_BYTES) {
+          writeFailedMessage = '导出文件过大，无法导入';
+          return;
+        }
+        try {
+          fileIo.writeSync(file.fd, chunk);
+          totalBytes += chunk.byteLength;
+        } catch {
+          writeFailedMessage = '保存下载文件失败，请检查设备存储空间';
+        }
+      });
+      const status = await request.requestInStream(currentUrl, {
+        method: http.RequestMethod.GET,
+        header: { 'user-agent': SHARE_USER_AGENT },
+        usingCache: false,
+        maxRedirects: 0,
+        connectTimeout: 15000,
+        readTimeout: 60000,
+      });
+      await fileIo.close(file);
+      request.destroy();
+      if (status === 301 || status === 302 || status === 303 || status === 307 || status === 308) {
+        await fileIo.unlink(tempPath).catch(() => {});
+        const nextUrl = resolveRedirectUrl(currentUrl, redirectLocation);
+        if (!nextUrl || hop === MAX_REDIRECT_HOPS) {
+          throw new Error('链接重定向失败，请检查链接是否有效');
+        }
+        currentUrl = nextUrl;
+        const redirectedShareId = extractDeepSeekShareId(currentUrl);
+        if (redirectedShareId) {
+          return { status: 200, finalUrl: currentUrl, filePath: '', size: 0 };
+        }
+        continue;
+      }
+      if (writeFailedMessage) {
+        await fileIo.unlink(tempPath).catch(() => {});
+        throw new Error(writeFailedMessage);
+      }
+      return { status, finalUrl: currentUrl, filePath: tempPath, size: totalBytes };
+    } catch (error) {
+      await fileIo.close(file).catch(() => {});
+      try {
+        request.destroy();
+      } catch {
+        // Ignore teardown race.
+      }
+      await fileIo.unlink(tempPath).catch(() => {});
+      if (error instanceof Error && (error.message.includes('重定向') || error.message.includes('过大') || error.message.includes('存储空间'))) {
+        throw new Error(error.message);
+      }
+      throw new Error('链接下载失败，请检查网络或链接是否有效');
+    }
+  }
+  throw new Error('链接重定向次数过多');
+}
+
+function isZipMagic(bytes: Uint8Array): boolean {
+  return bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4b && (bytes[2] === 0x03 || bytes[2] === 0x05);
+}
+
+async function readHeadBytes(path: string, count: number): Promise<Uint8Array> {
+  const file = await fileIo.open(path, fileIo.OpenMode.READ_ONLY);
+  try {
+    const buf = new ArrayBuffer(count);
+    const read = await fileIo.read(file.fd, buf);
+    return new Uint8Array(buf, 0, Math.max(0, read));
+  } finally {
+    await fileIo.close(file).catch(() => {});
+  }
+}
+
+/**
+ * Unified link importer matching Android v0.1.34:
+ * 1. DeepSeek share links (all subdomains, `/share/...` and `/a/chat/s/...`, or bare share ID) -> single chat import;
+ * 2. DeepSeek official data export ZIP URLs (e.g. Huawei Cloud OBS signed links) or redirect short links ->
+ *    follows redirects, imports share page if redirected to one, or imports ZIP archive incrementally.
+ */
+export async function importNativeLink(
+  context: common.UIAbilityContext,
+  input: string,
+  reservedIds: Set<string> = new Set<string>(),
+  onStage?: (stage: string) => void
+): Promise<NativeLinkImportResult> {
+  const directShareId = extractDeepSeekShareId(input);
+  if (directShareId) {
+    onStage?.('正在拉取分享对话…');
+    const session = await importNativeShareLink(directShareId, reservedIds);
+    return { kind: 'share', session };
+  }
+
+  const remoteUrl = extractHttpUrl(input);
+  if (!remoteUrl) {
+    throw new Error('未识别到有效链接（支持 DeepSeek 分享链接或官方数据导出 ZIP 下载链接）');
+  }
+
+  onStage?.('正在下载链接内容…');
+  const downloaded = await downloadRemoteUrlToCache(context, remoteUrl);
+  const redirectedShareId = extractDeepSeekShareId(downloaded.finalUrl);
+  if (redirectedShareId) {
+    if (downloaded.filePath) {
+      await fileIo.unlink(downloaded.filePath).catch(() => {});
+    }
+    onStage?.('正在拉取分享对话…');
+    const session = await importNativeShareLink(redirectedShareId, reservedIds);
+    return { kind: 'share', session };
+  }
+
+  if (downloaded.status === 403 || downloaded.status === 404 || downloaded.status === 410) {
+    if (downloaded.filePath) await fileIo.unlink(downloaded.filePath).catch(() => {});
+    throw new Error('导出链接已失效或无权访问（DeepSeek 导出链接有时效限制，请重新导出后再试）');
+  }
+  if (downloaded.status < 200 || downloaded.status >= 300 || !downloaded.filePath) {
+    if (downloaded.filePath) await fileIo.unlink(downloaded.filePath).catch(() => {});
+    throw new Error(`链接下载失败（HTTP ${downloaded.status > 0 ? downloaded.status.toString() : '网络错误'}）`);
+  }
+
+  const head = await readHeadBytes(downloaded.filePath, 4);
+  if (isZipMagic(head)) {
+    onStage?.('正在导入对话记录…');
+    return { kind: 'archive', archivePath: downloaded.filePath };
+  }
+
+  if (downloaded.size > 0 && downloaded.size <= 512 * 1024) {
+    const bodyBytes = await readHeadBytes(downloaded.filePath, downloaded.size);
+    const bodyText = util.TextDecoder.create('utf-8').decodeToString(bodyBytes);
+    const embeddedShareId = extractDeepSeekShareId(bodyText);
+    if (embeddedShareId) {
+      await fileIo.unlink(downloaded.filePath).catch(() => {});
+      onStage?.('正在拉取分享对话…');
+      const session = await importNativeShareLink(embeddedShareId, reservedIds);
+      return { kind: 'share', session };
+    }
+  }
+
+  await fileIo.unlink(downloaded.filePath).catch(() => {});
+  throw new Error('该链接返回的内容不是有效的 DeepSeek 导出压缩包（ZIP）或分享对话');
 }

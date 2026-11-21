@@ -17,7 +17,8 @@ enum AIClientError: LocalizedError {
     case httpError(Int, String)
     case streamError(String)
     case interruptedStream
-    case unsupportedImage(historyFileId: String?)
+    case unsupportedImage(historyFileIds: [String], message: String)
+    case tooManyImages(maxImages: Int, message: String)
     case invalidatedFiles(Set<String>, message: String)
     case decodingError
 
@@ -37,8 +38,11 @@ enum AIClientError: LocalizedError {
             return message
         case .interruptedStream:
             return "回复连接中断，请重试。"
-        case .unsupportedImage:
-            return "暂不支持解析该图片，请更换 JPG / PNG / WebP 图片后重试。"
+        case .unsupportedImage(_, let message):
+            let clean = message.trimmingCharacters(in: .whitespacesAndNewlines)
+            return clean.isEmpty ? "暂不支持解析该图片，请更换 JPG / PNG / WebP 图片后重试。" : clean
+        case .tooManyImages(_, let message):
+            return AIClientError.httpError(400, message).errorDescription
         case .invalidatedFiles(_, let message):
             return AIClientError.httpError(400, message).errorDescription
         case .decodingError:
@@ -76,9 +80,26 @@ enum AIClientError: LocalizedError {
         return target.isEmpty ? nil : .invalidatedFiles(target, message: message)
     }
 
+    fileprivate func tooManyImagesLimit() -> Int? {
+        guard case .httpError(_, let msg) = self,
+              let regex = try? NSRegularExpression(pattern: "Too many images:\\s*max\\s+(\\d+)\\s+images", options: [.caseInsensitive])
+        else { return nil }
+        let range = NSRange(msg.startIndex..., in: msg)
+        guard let m = regex.firstMatch(in: msg, range: range),
+              m.numberOfRanges >= 2,
+              let r1 = Range(m.range(at: 1), in: msg),
+              let limit = Int(msg[r1]),
+              limit > 0
+        else { return nil }
+        return limit
+    }
+
     fileprivate func unsupportedImageIndices() -> (messageIndex: Int, blockIndex: Int)? {
         guard case .httpError(400, let msg) = self,
-              let regex = try? NSRegularExpression(pattern: "messages\\.(\\d+)\\.content\\.(\\d+):.*unsupported image", options: [.caseInsensitive])
+              let regex = try? NSRegularExpression(
+                pattern: "messages\\.(\\d+)\\.content\\.(\\d+):.*(?:unsupported image|invalid image|image is too large|too large to process)",
+                options: [.caseInsensitive]
+              )
         else { return nil }
         let range = NSRange(msg.startIndex..., in: msg)
         guard let m = regex.firstMatch(in: msg, range: range),
@@ -96,6 +117,7 @@ enum AIClient {
     static let deepSeekOrigin = "https://api.deepseek.com"
     static let defaultSystemPrompt = "该助手为DeepSeek，由深度求索公司创造。"
     static let filesBetaHeader = "files-api-2025-04-14"
+    static let maxRequestImages = 600
 
     static func normalizeOrigin(_ rawBaseUrl: String) -> String {
         let trimmed = rawBaseUrl.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -378,6 +400,7 @@ enum AIClient {
         let latestReminder: String?
         let omitExtendedFor1M: Bool
         let rejectedFileIds: Set<String>
+        let imageCap: Int
     }
 
     static func streamChat(_ params: StreamParams) -> AsyncThrowingStream<AIStreamEvent, Error> {
@@ -458,7 +481,6 @@ enum AIClient {
         }
 
         appendReminder(params.latestReminder)
-        let questionIndex = payloadMessages.count
         let (qObj, qHasFile) = buildAnthropicUserMessage(params.question, rejectedFileIds: [])
             ?? (["role": "user", "content": params.question.content], false)
         hasAnyFile = hasAnyFile || qHasFile
@@ -471,6 +493,16 @@ enum AIClient {
                 return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             }) {
                 payloadMessages.append(["role": "assistant", "content": prefixBlocks])
+            }
+        }
+
+        payloadMessages = limitRequestImages(payloadMessages, maxImages: params.imageCap)
+        hasAnyFile = payloadMessages.contains { msg in
+            guard msg["role"] as? String == "user",
+                  let blocks = msg["content"] as? [[String: Any]] else { return false }
+            return blocks.contains { block in
+                let kind = block["type"] as? String
+                return kind == "image" || kind == "document"
             }
         }
 
@@ -532,15 +564,24 @@ enum AIClient {
             throw AIClientError.decodingError
         }
         if !(200...299).contains(http.statusCode) {
-            let error = AIClientError.httpError(http.statusCode, try await collectErrorText(from: bytes))
-            if let (messageIndex, blockIndex) = error.unsupportedImageIndices(),
-               payloadMessages.indices.contains(messageIndex),
-               messageIndex <= questionIndex,
-               let blocks = payloadMessages[messageIndex]["content"] as? [[String: Any]],
-               blocks.indices.contains(blockIndex), blocks[blockIndex]["type"] as? String == "image",
-               let source = blocks[blockIndex]["source"] as? [String: Any],
-               let fileId = source["file_id"] as? String {
-                throw AIClientError.unsupportedImage(historyFileId: messageIndex < questionIndex ? fileId : nil)
+            let errorText = try await collectErrorText(from: bytes)
+            let error = AIClientError.httpError(http.statusCode, errorText)
+            if let reportedCap = error.tooManyImagesLimit() {
+                throw AIClientError.tooManyImages(maxImages: reportedCap, message: errorText)
+            }
+            if let (messageIndex, blockIndex) = error.unsupportedImageIndices() {
+                let resolved = resolveBadHistoryImageIds(
+                    in: payloadMessages,
+                    messageIndex: messageIndex,
+                    blockIndex: blockIndex,
+                    alreadyRejected: params.rejectedFileIds
+                )
+                if !resolved.ids.isEmpty {
+                    throw AIClientError.unsupportedImage(historyFileIds: resolved.ids, message: errorText)
+                }
+                if resolved.isCurrentTurn {
+                    throw AIClientError.unsupportedImage(historyFileIds: [], message: errorText)
+                }
             }
             throw error.invalidatedFiles(in: payloadMessages) ?? error
         }
@@ -648,6 +689,113 @@ enum AIClient {
             }
         }
         if !sawStopReason { throw AIClientError.interruptedStream }
+    }
+
+    /// Keeps at most `maxImages` image blocks walking backwards from the latest message (never mutating local history).
+    private static func limitRequestImages(_ messages: [[String: Any]], maxImages: Int) -> [[String: Any]] {
+        var remaining = max(0, maxImages)
+        var changed = false
+        var result = messages
+        for i in stride(from: messages.count - 1, through: 0, by: -1) {
+            let message = messages[i]
+            guard message["role"] as? String == "user",
+                  let blocks = message["content"] as? [[String: Any]]
+            else { continue }
+            var kept: [[String: Any]] = []
+            var droppedInMessage = false
+            for j in stride(from: blocks.count - 1, through: 0, by: -1) {
+                let block = blocks[j]
+                if block["type"] as? String == "image" {
+                    if remaining > 0 {
+                        remaining -= 1
+                        kept.append(block)
+                    } else {
+                        droppedInMessage = true
+                        changed = true
+                    }
+                } else {
+                    kept.append(block)
+                }
+            }
+            if droppedInMessage {
+                kept.reverse()
+                var updated = message
+                updated["content"] = kept.isEmpty ? [["type": "text", "text": "[图片]"]] : kept
+                result[i] = updated
+            }
+        }
+        return changed ? result : messages
+    }
+
+    /// Resolves server-rejected historical image `file_id`s from `messages.{N}.content.{M}`,
+    /// tolerating `latest_reminder` index offsets and content block shifts (matching Android v0.1.34).
+    private static func resolveBadHistoryImageIds(
+        in payloadMessages: [[String: Any]],
+        messageIndex: Int,
+        blockIndex: Int,
+        alreadyRejected: Set<String>
+    ) -> (ids: [String], isCurrentTurn: Bool) {
+        let lastUserIndex = payloadMessages.lastIndex { ($0["role"] as? String) == "user" }
+        let nonReminderIndices = payloadMessages.indices.filter {
+            (payloadMessages[$0]["role"] as? String) != "latest_reminder"
+        }
+        var candidateIndices: [Int] = []
+        if nonReminderIndices.indices.contains(messageIndex) {
+            let mapped = nonReminderIndices[messageIndex]
+            if mapped != messageIndex {
+                candidateIndices.append(mapped)
+            }
+        }
+        if payloadMessages.indices.contains(messageIndex) {
+            candidateIndices.append(messageIndex)
+        }
+
+        func imageFileId(_ block: [String: Any]) -> String? {
+            guard block["type"] as? String == "image",
+                  let source = block["source"] as? [String: Any],
+                  let fid = source["file_id"] as? String,
+                  !fid.isEmpty
+            else { return nil }
+            return fid
+        }
+
+        for cIdx in candidateIndices {
+            let msg = payloadMessages[cIdx]
+            guard msg["role"] as? String == "user",
+                  let blocks = msg["content"] as? [[String: Any]]
+            else { continue }
+            if cIdx == lastUserIndex {
+                return ([], true)
+            }
+            for idx in [blockIndex, blockIndex - 1] where blocks.indices.contains(idx) {
+                if let fid = imageFileId(blocks[idx]), !alreadyRejected.contains(fid) {
+                    return ([fid], false)
+                }
+            }
+            let imageBlocks = blocks.filter { ($0["type"] as? String) == "image" }
+            if imageBlocks.indices.contains(blockIndex),
+               let fid = imageFileId(imageBlocks[blockIndex]),
+               !alreadyRejected.contains(fid) {
+                return ([fid], false)
+            }
+        }
+
+        for cIdx in candidateIndices {
+            guard cIdx != lastUserIndex else { continue }
+            let msg = payloadMessages[cIdx]
+            guard msg["role"] as? String == "user",
+                  let blocks = msg["content"] as? [[String: Any]]
+            else { continue }
+            let ids = blocks.compactMap { block -> String? in
+                guard let fid = imageFileId(block), !alreadyRejected.contains(fid) else { return nil }
+                return fid
+            }
+            if !ids.isEmpty {
+                return (ids, false)
+            }
+        }
+
+        return ([], false)
     }
 
     private static func buildAnthropicUserMessage(_ message: ChatMessage, rejectedFileIds: Set<String>) -> ([String: Any], Bool)? {
