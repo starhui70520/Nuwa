@@ -129,6 +129,10 @@
       "value": "#801C1C1E"
     },
     {
+      "name": "native_immersive_tint",
+      "value": "#B826262A"
+    },
+    {
       "name": "native_chat_drag_mask",
       "value": "#B3272730"
     },

@@ -86,24 +86,24 @@ export class ImmersiveGlassCapsuleModifier implements AttributeModifier<CommonAt
   }
 
   applyNormalAttribute(instance: CommonAttribute): void {
+    instance
+      .backgroundColor($r('app.color.native_immersive_tint'))
+      .backgroundBlurStyle(BlurStyle.COMPONENT_THIN)
+      .border({ width: 0.75, color: $r('app.color.native_chat_stroke') })
+      .shadow({ radius: 14, color: '#14000000', offsetY: 3 });
     if (isImmersiveMaterialAvailable()) {
       try {
         instance.systemMaterial(new uiMaterial.ImmersiveMaterial({
           style: uiMaterial.ImmersiveStyle.THIN,
-          applyShadow: true,
+          materialColor: $r('app.color.native_immersive_tint'),
+          applyShadow: false,
           interactive: this.interactive,
           lightEffect: {},
         }));
-        return;
       } catch {
-        // Fall through to frosted glass fallback.
+        // Frosted glass styling above remains active.
       }
     }
-    instance
-      .backgroundColor($r('app.color.native_chat_glass'))
-      .backgroundBlurStyle(BlurStyle.COMPONENT_THIN)
-      .border({ width: 1, color: $r('app.color.native_chat_glass_stroke') })
-      .shadow({ radius: 12, color: '#12000000', offsetY: 3 });
   }
 }
 
@@ -119,28 +119,24 @@ export class ImmersiveComposerModifier implements AttributeModifier<CommonAttrib
   }
 
   applyNormalAttribute(instance: CommonAttribute): void {
+    instance
+      .backgroundColor($r('app.color.native_immersive_tint'))
+      .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+      .border({ width: 1, color: $r('app.color.native_chat_stroke') })
+      .shadow({ radius: 18, offsetY: 5, color: '#16000000' });
     if (isImmersiveMaterialAvailable()) {
       try {
         instance.systemMaterial(new uiMaterial.ImmersiveMaterial({
           style: this.elevated ? uiMaterial.ImmersiveStyle.REGULAR : uiMaterial.ImmersiveStyle.THIN,
-          materialColor: $r('app.color.native_chat_glass'),
-          applyShadow: true,
+          materialColor: $r('app.color.native_immersive_tint'),
+          applyShadow: false,
           interactive: false,
           lightEffect: {},
         }));
-        return;
       } catch {
-        // Fall through to frosted glass fallback.
+        // Frosted glass styling above remains active.
       }
     }
-    instance
-      .backgroundColor(this.elevated ? $r('app.color.native_chat_glass') : $r('app.color.native_chat_surface'))
-      .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-      .border({
-        width: 1,
-        color: this.elevated ? $r('app.color.native_chat_glass_stroke') : $r('app.color.native_chat_stroke'),
-      })
-      .shadow({ radius: 14, offsetY: 4, color: '#12000000' });
   }
 }
 
@@ -149,24 +145,23 @@ export class ImmersiveComposerModifier implements AttributeModifier<CommonAttrib
  */
 export class ImmersiveSurfaceModifier implements AttributeModifier<CommonAttribute> {
   applyNormalAttribute(instance: CommonAttribute): void {
+    instance
+      .backgroundColor($r('app.color.native_chat_surface'))
+      .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+      .border({ width: 1, color: $r('app.color.native_chat_stroke') })
+      .shadow({ radius: 22, offsetY: 8, color: '#1E000000' });
     if (isImmersiveMaterialAvailable()) {
       try {
         instance.systemMaterial(new uiMaterial.ImmersiveMaterial({
           style: uiMaterial.ImmersiveStyle.THICK,
-          materialColor: $r('app.color.native_chat_glass'),
-          applyShadow: true,
+          materialColor: $r('app.color.native_immersive_tint'),
+          applyShadow: false,
           interactive: false,
         }));
-        return;
       } catch {
-        // Fall through to frosted glass fallback.
+        // Frosted glass styling above remains active.
       }
     }
-    instance
-      .backgroundColor($r('app.color.native_chat_surface'))
-      .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
-      .border({ width: 1, color: $r('app.color.native_chat_glass_stroke') })
-      .shadow({ radius: 20, offsetY: 6, color: '#1A000000' });
   }
 }
 
