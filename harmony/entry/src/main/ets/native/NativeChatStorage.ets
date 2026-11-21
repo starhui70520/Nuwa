@@ -60,7 +60,7 @@ interface SessionIndex {
 interface SessionWrite {
   metadata: SessionMetadata;
   snapshot?: string;
-  unreadable?: boolean;
+  retainsSnapshot?: boolean;
 }
 
 interface HistoryWrite {
@@ -140,7 +140,7 @@ function validReplyFailure(failure: NativeReplyFailure): boolean {
 function validateConversation(session: NativeConversation): boolean {
   if (!session || typeof session.id !== 'string' || !session.id || typeof session.title !== 'string' ||
     !isTimestamp(session.createdAt) || !isTimestamp(session.updatedAt) ||
-    session.unreadable !== undefined ||
+    session.unloaded !== undefined || session.unreadable !== undefined ||
     (session.archiveJson !== undefined && typeof session.archiveJson !== 'string') ||
     (session.pinnedAt !== undefined && !isTimestamp(session.pinnedAt)) || !Array.isArray(session.messages)) {
     return false;
@@ -266,11 +266,11 @@ function captureHistory(state: NativeConversationState, dirtySessionIds?: string
     }
     ids.add(session.id);
     const metadata = sessionMetadata(session);
-    if (session.unreadable) {
+    if (session.unloaded || session.unreadable) {
       if (metadata.rootMessageId !== null || metadata.messageCount !== 0 || session.archiveJson !== undefined) {
-        throw new Error('Unreadable native conversation cannot be modified');
+        throw new Error('Native conversation reference cannot be modified without loading its messages');
       }
-      return { metadata, unreadable: true };
+      return { metadata, retainsSnapshot: true };
     }
     if (dirty && !dirty.has(session.id)) {
       return { metadata };
@@ -410,9 +410,9 @@ function resolveBaseEntries(previous: SessionIndex | undefined, write: HistoryWr
   }
   for (const session of write.sessions) {
     const entry = existing.get(session.metadata.id);
-    if (session.unreadable) {
+    if (session.retainsSnapshot) {
       if (!entry || !sameSessionSummary(entry.metadata, session.metadata)) {
-        throw new Error('Unreadable native conversation does not match a committed entry');
+        throw new Error('Native conversation reference does not match a committed entry');
       }
     } else if (write.incremental &&
       (!entry || (session.snapshot === undefined && !sameMetadata(entry.metadata, session.metadata)))) {
@@ -549,15 +549,28 @@ async function readLegacySnapshot(path: string): Promise<NativeConversationState
 }
 
 export class NativeChatStorage {
-  loadConversations(context: common.UIAbilityContext): Promise<NativeConversationState> {
+  loadConversations(context: common.UIAbilityContext, summariesOnly: boolean = false): Promise<NativeConversationState> {
     const path = `${context.filesDir}/${TRANSCRIPT_FILE}`;
     const directory = `${context.filesDir}/${HISTORY_DIRECTORY}`;
     return queueStorageOperation<NativeConversationState>(async (): Promise<NativeConversationState> => {
       let index = await readIndex(directory);
       let state: NativeConversationState;
       if (index) {
-        state = await loadIndexedHistory(directory, index);
         await syncDirectory(directory);
+        if (summariesOnly) {
+          committedIndexes.set(directory, index);
+          return {
+            activeId: index.activeId,
+            sessions: index.sessions.map<NativeConversation>((entry: SessionIndexEntry): NativeConversation => {
+              const metadata = entry.metadata;
+              return {
+                id: metadata.id, title: metadata.title, createdAt: metadata.createdAt, updatedAt: metadata.updatedAt,
+                pinnedAt: metadata.pinnedAt, rootMessageId: null, messages: [], unloaded: true,
+              };
+            }),
+          };
+        }
+        state = await loadIndexedHistory(directory, index);
       } else {
         const legacy = await readLegacySnapshot(path);
         state = legacy ?? { sessions: [], activeId: null };
@@ -590,13 +603,22 @@ export class NativeChatStorage {
     });
   }
 
-  loadConversation(context: common.UIAbilityContext, id: string): Promise<NativeConversation> {
+  loadConversation(context: common.UIAbilityContext, id: string,
+    useCachedIndex: boolean = false): Promise<NativeConversation> {
+    const path = `${context.filesDir}/${TRANSCRIPT_FILE}`;
     const directory = `${context.filesDir}/${HISTORY_DIRECTORY}`;
     return queueStorageOperation<NativeConversation>(async (): Promise<NativeConversation> => {
-      const index = await readIndex(directory);
+      const cached = useCachedIndex ? committedIndexes.get(directory) : undefined;
+      const index = cached ?? await readIndex(directory);
       const entry = index?.sessions.find((row: SessionIndexEntry): boolean => row.metadata.id === id);
       if (!entry) throw new Error('Native conversation is missing from the index');
-      return readIndexedConversation(directory, entry);
+      const session = await readIndexedConversation(directory, entry);
+      if (!useCachedIndex && session.archiveJson) {
+        const retained = committedImages.get(path) ?? new Set<string>();
+        for (const id of backupImageIds(session.archiveJson)) retained.add(id);
+        committedImages.set(path, retained);
+      }
+      return session;
     });
   }
 
@@ -607,7 +629,7 @@ export class NativeChatStorage {
     const path = `${context.filesDir}/${TRANSCRIPT_FILE}`;
     const directory = `${context.filesDir}/${HISTORY_DIRECTORY}`;
     const write = captureHistory(state, dirtySessionIds);
-    const unreadable = write.sessions.some((session: SessionWrite): boolean => session.unreadable === true);
+    const unopened = write.sessions.some((session: SessionWrite): boolean => session.retainsSnapshot === true);
     const retained = retainedImageIds(path, state);
     const pending = pendingImageWrites.get(path) ?? new Set<Set<string>>();
     pending.add(retained);
@@ -627,14 +649,14 @@ export class NativeChatStorage {
           await fileIo.unlink(path).catch(() => {});
         }
         const prior = committedImages.get(path);
-        if ((write.incremental || unreadable) && prior) {
-          // Preserve known sidecars while older snapshots or unreadable conversations are retained.
+        if ((write.incremental || unopened) && prior) {
+          // Preserve known sidecars while any referenced snapshot remains outside this write.
           for (const id of prior) {
             retained.add(id);
           }
         }
         committedImages.set(path, retained);
-        if (prior && !unreadable) {
+        if (prior && !unopened) {
           for (const id of prior) {
             if (!retained.has(id) && !Array.from(pending).some((scheduled: Set<string>): boolean => scheduled.has(id))) {
               await removeBackupImage(context, id).catch(() => {});

@@ -95,30 +95,49 @@ export function visibleSidebarRowIndex(sections: NativeSidebarSection[], section
 
 export class NativeSidebarSearch {
   private timer: number = -1;
+  private generation: number = 0;
 
   cancel(): void {
     if (this.timer >= 0) clearTimeout(this.timer);
     this.timer = -1;
+    this.generation++;
   }
 
-  schedule(sessions: NativeConversation[], query: string, complete: (matches: Set<string>) => void): void {
+  schedule(sessions: NativeConversation[], query: string, complete: (matches: Set<string>) => void,
+    loadBody?: (session: NativeConversation) => Promise<NativeConversation | undefined>): void {
     this.cancel();
     if (!query) return;
+    const generation = this.generation;
     const found = new Set<string>();
     let index = 0;
-    const scan = (): void => {
+    const scan = async (): Promise<void> => {
+      if (generation !== this.generation) return;
       this.timer = -1;
       const end = Math.min(index + SEARCH_BATCH_SIZE, sessions.length);
       while (index < end) {
+        if (generation !== this.generation) return;
         const session = sessions[index++];
-        if (matchesSidebarBody(session, query)) found.add(session.id);
+        const unloaded = session.unloaded === true;
+        if (unloaded && loadBody) {
+          let loaded: NativeConversation | undefined;
+          try {
+            loaded = await loadBody(session);
+          } catch {
+            // An unreadable snapshot must not prevent searching later conversations.
+          }
+          if (generation !== this.generation) return;
+          if (loaded && matchesSidebarBody(loaded, query)) found.add(session.id);
+        } else if (!unloaded && matchesSidebarBody(session, query)) {
+          found.add(session.id);
+        }
       }
+      if (generation !== this.generation) return;
       if (index === sessions.length) {
         complete(found);
       } else {
-        this.timer = setTimeout(scan, 0);
+        this.timer = setTimeout((): void => { void scan(); }, 0);
       }
     };
-    this.timer = setTimeout(scan, SEARCH_DELAY_MS);
+    this.timer = setTimeout((): void => { void scan(); }, SEARCH_DELAY_MS);
   }
 }
