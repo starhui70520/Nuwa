@@ -1583,7 +1583,14 @@ struct NativeChat {
   }
 
   private updateSidebarRows(): void {
-    this.sidebarRows = createSidebarRows(this.filteredSidebarGroups, this.sidebarLimit);
+    const rows = createSidebarRows(this.filteredSidebarGroups, this.sidebarLimit);
+    if (this.renamingId) {
+      const previous = this.sidebarRows.find((row: NativeSidebarRow): boolean => row.session?.id === this.renamingId);
+      const editing = rows.find((row: NativeSidebarRow): boolean => row.session?.id === this.renamingId);
+      // Keep the focused input mounted if the reply updates the conversation title during editing.
+      if (previous && editing) editing.key = previous.key;
+    }
+    this.sidebarRows = rows;
     this.sidebarSections = createSidebarSections(this.sidebarRows);
   }
 
@@ -5078,6 +5085,7 @@ struct NativeChat {
     if (!id || this.renamingId !== id) return;
     this.renamingId = '';
     this.renameText = '';
+    this.updateSidebarRows();
   }
 
   private finishSidebarRename(id: string, title: string): void {
