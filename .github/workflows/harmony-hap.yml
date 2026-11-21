@@ -64,6 +64,7 @@ jobs:
           node ../harmony/scripts/stage-katex.mjs
           node ../harmony/scripts/stage-prism.mjs
           node ../harmony/scripts/stage-markdown.mjs
+          node ../harmony/scripts/stage-legacy-migration.mjs
 
       - name: Resolve app version
         id: version

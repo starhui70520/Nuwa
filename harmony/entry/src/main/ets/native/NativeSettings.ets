@@ -225,7 +225,7 @@ export class NativeSettingsController {
   }
 
   async save(context: common.UIAbilityContext, settings: NativeSettings,
-    manualPreference?: NativeManualPreference, verifiedCredential: boolean = false): Promise<void> {
+    manualPreference?: NativeManualPreference | NativeManualPreference[], verifiedCredential: boolean = false): Promise<void> {
     const operation = serializedWrites.then(async (): Promise<void> => {
       const store = await preferences.getPreferences(context, PREFERENCES_NAME);
       const currentSecondary = await store.get(API_KEY_SLOT_PREFERENCE, false) === true;
@@ -261,9 +261,12 @@ export class NativeSettingsController {
           writes.push(writeCredentialDraft(store, null));
         }
         // Changing other settings must preserve both system defaults and the saved location hierarchy.
-        if (manualPreference === 'locale') {
+        const manualPreferences: NativeManualPreference[] = manualPreference === undefined ? [] :
+          Array.isArray(manualPreference) ? manualPreference : [manualPreference];
+        if (manualPreferences.includes('locale')) {
           writes.push(store.put('locale', settings.locale));
-        } else if (manualPreference === 'location') {
+        }
+        if (manualPreferences.includes('location')) {
           writes.push(store.put('location', JSON.stringify(settings.location)));
         }
         await Promise.all(writes);
@@ -281,5 +284,14 @@ export class NativeSettingsController {
     });
     serializedWrites = operation.catch(() => {});
     return operation;
+  }
+
+  /** Detect even a stored credential whose endpoint binding no longer matches current preferences. */
+  async hasStoredCredential(context: common.UIAbilityContext): Promise<boolean> {
+    await serializedWrites;
+    const store = await preferences.getPreferences(context, PREFERENCES_NAME);
+    if (await store.get('signedOut', false) === true) return false;
+    const secondary = await store.get(API_KEY_SLOT_PREFERENCE, false) === true;
+    return (await readCredential(secondary)) !== null;
   }
 }

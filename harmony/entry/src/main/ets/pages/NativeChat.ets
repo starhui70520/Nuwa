@@ -28,7 +28,7 @@ import { NativeDeepSeekAccount, NativeDeepSeekAccountController,
 import { NativeOAuthLoopbackServer } from '../native/NativeOAuthLoopbackServer';
 import { nativeCredentialError, NativeOnboarding, NativeOnboardingView } from '../native/NativeOnboarding';
 import {
-  NativeAttachment, NativeAttachmentQuota, NativeAttachmentUploadError, NativeAttachmentValidationError,
+  attachmentMime, NativeAttachment, NativeAttachmentQuota, NativeAttachmentUploadError, NativeAttachmentValidationError,
   NativeChatAttachments,
 } from '../native/NativeChatAttachments';
 import {
@@ -72,6 +72,10 @@ import { nativeBranchControlsId, nativeBranchControlsTop, NativeBranchScrollAnch
 import { NativeMigrationPrompt } from '../native/NativeMigrationPrompt';
 import { NativeMigrationIntent } from '../native/NativeMigrationStrategy';
 import { hasPendingNativeMigration } from '../native/NativePendingMigration';
+import { migrateNativeLegacyPreferences } from '../native/NativeLegacyPreferences';
+import {
+  markNativeLegacyWebMigrationDone, nativeLegacyWebMigrationDone, NativeLegacyWebData, NativeLegacyWebMigration,
+} from '../native/NativeLegacyWebMigration';
 import {
   describeNativeReplyFailure, nativeRefusalText, NativeFailedUpload, NativeReplyNotice,
 } from '../native/NativeReplyNotice';
@@ -386,6 +390,7 @@ struct NativeChat {
   @State private migrationReloadFailed: boolean = false;
   private migrationUsed: boolean = false;
   private coldMigrationChecked: boolean = false;
+  @State private legacyWebMigrationPending: boolean = false;
   private readonly scroller = new Scroller();
   private readonly sidebarScroller = new ListScroller();
   private readonly sidebarSearch = new NativeSidebarSearch();
@@ -684,6 +689,13 @@ struct NativeChat {
       this.trimConversationCache();
       this.applyTheme();
       this.scrollToLatest();
+      try {
+        if (!await nativeLegacyWebMigrationDone(context)) {
+          this.legacyWebMigrationPending = true;
+        }
+      } catch {
+        // Retry legacy WebView upgrade detection on the next launch.
+      }
       if (!this.coldMigrationChecked) {
         this.coldMigrationChecked = true;
         if (hasPendingNativeMigration(context)) void this.openHistoryMigration();
@@ -4337,6 +4349,118 @@ struct NativeChat {
     }
   }
 
+  private async reloadMigratedSettings(context: common.UIAbilityContext): Promise<void> {
+    this.settings = await this.settingsStore.load(context);
+    if (this.updateNotice) this.presentUpdate(this.updateNotice.update);
+    if (this.settings.signedOut) {
+      this.account = null;
+      void this.balanceStore.clear(context);
+      await saveNativeAccount(null).catch(() => {});
+    } else {
+      this.account = await loadNativeAccount();
+    }
+    if (this.account && !this.settings.apiKey &&
+      !allowsKeylessNativeApi(this.settings.baseUrl, this.settings.protocol)) {
+      this.settings.authMode = 'deepseek-account';
+    }
+    this.applyTheme();
+    this.refreshSidebarHistory();
+    void this.refreshBalance();
+  }
+
+  private async applyLegacyWebMigration(data: NativeLegacyWebData): Promise<void> {
+    if (this.backupBusy || this.deletingSessions || this.migrationInProgress) {
+      throw new Error('Legacy migration deferred while another operation is running');
+    }
+    const context = this.host();
+    this.backupBusy = true;
+    const storedDocuments: NativeAttachment[] = [];
+    let committed = false;
+    try {
+      if (data.archivePath) {
+        const imported = await this.backup.importFromUri(data.archivePath, context);
+        if (data.pins.length > 0) {
+          const pinById = new Map<string, number>();
+          for (const pin of data.pins) {
+            if (pin?.id && typeof pin.pinnedAt === 'number' && Number.isFinite(pin.pinnedAt) && pin.pinnedAt > 0) {
+              pinById.set(pin.id, pin.pinnedAt);
+            }
+          }
+          for (const session of imported) {
+            const pinnedAt = pinById.get(session.id);
+            if (pinnedAt !== undefined) {
+              session.pinnedAt = pinnedAt;
+            }
+          }
+        }
+        if (data.documents > 0) {
+          const docIndexById = new Map<string, number>();
+          for (let index = 0; index < data.documents; index++) {
+            const doc = await data.document(index);
+            if (doc.id && doc.size > 0 && !docIndexById.has(doc.id)) {
+              docIndexById.set(doc.id, index);
+            }
+          }
+          for (const session of imported) {
+            for (const message of session.messages) {
+              if (!message.files?.length) continue;
+              for (let fileIndex = 0; fileIndex < message.files.length; fileIndex++) {
+                const item = message.files[fileIndex];
+                if (item.isImage || item.local) continue;
+                const docIndex = docIndexById.get(item.archiveId ?? item.id);
+                if (docIndex === undefined) continue;
+                try {
+                  const doc = await data.document(docIndex);
+                  const stored = await this.attachments.storeOriginal(context, item, doc,
+                    item.mimeType || attachmentMime(item.name));
+                  storedDocuments.push(stored);
+                  message.files[fileIndex] = stored;
+                } catch {
+                  // Keep attachment metadata if an individual legacy document cannot be copied.
+                }
+              }
+            }
+          }
+        }
+        await this.loadHistoryBodies();
+        this.committingHistoryImport = true;
+        const merged = await commitChatBackup(context, this.history, imported,
+          (state: NativeConversationState): Promise<void> => this.storage.saveConversations(context, state));
+        committed = true;
+        this.history = merged.history;
+        this.conversationCache.confirm(this.history.sessions);
+        this.committingHistoryImport = false;
+        if (storedDocuments.length > 0) {
+          const retainedIds = new Set<string>();
+          for (const session of this.history.sessions) {
+            for (const message of session.messages) {
+              for (const file of message.files ?? []) {
+                if (file.local) retainedIds.add(file.id);
+              }
+            }
+          }
+          for (const doc of storedDocuments) {
+            if (!retainedIds.has(doc.id)) {
+              await this.attachments.remove(context, doc).catch(() => {});
+            }
+          }
+        }
+      }
+      await migrateNativeLegacyPreferences(context, data.settings, this.settingsStore);
+      await this.reloadMigratedSettings(context);
+      await markNativeLegacyWebMigrationDone(context);
+    } finally {
+      if (!committed && storedDocuments.length > 0) {
+        for (const doc of storedDocuments) {
+          await this.attachments.remove(context, doc).catch(() => {});
+        }
+      }
+      this.committingHistoryImport = false;
+      this.backupBusy = false;
+      this.trimConversationCache();
+    }
+  }
+
   private async loadMigrationUsed(context: common.UIAbilityContext): Promise<void> {
     try {
       const store = await preferences.getPreferences(context, MIGRATION_PREFERENCES);
@@ -5848,6 +5972,12 @@ struct NativeChat {
       .borderRadius(this.drawerProgress() > 0 ? 24 : 0).clip(this.drawerProgress() > 0)
       .accessibilityLevel(this.chatLinkUrl ? 'no-hide-descendants' : 'auto')
       NativeMathRendererHost()
+      if (this.legacyWebMigrationPending) {
+        NativeLegacyWebMigration({
+          onImport: (data: NativeLegacyWebData): Promise<void> => this.applyLegacyWebMigration(data),
+          onComplete: (): void => { this.legacyWebMigrationPending = false; },
+        })
+      }
       if (this.sourcePanelEntry) {
         Column() { this.sourcesSheet() }
         .width(this.wide() ? this.desktopSourcesWidth() : '100%').height('100%')
