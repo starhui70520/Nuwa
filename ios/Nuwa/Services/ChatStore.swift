@@ -1281,13 +1281,16 @@ final class ChatStore: ObservableObject {
                         toAttach.append((name, fileData, AttachmentStore.isImageName(name)))
                     }
                 }
+                let readyFiles = toAttach
+                let skippedCount = skipped
+                let extractedZip = hadZip
                 await MainActor.run { [weak self] in
                     guard let self else { return }
-                    guard !toAttach.isEmpty else {
-                        self.showToast(hadZip ? "压缩包内没有可直接用于对话的文档、代码或图片" : "无法读取分享的文件")
+                    guard !readyFiles.isEmpty else {
+                        self.showToast(extractedZip ? "压缩包内没有可直接用于对话的文档、代码或图片" : "无法读取分享的文件")
                         return
                     }
-                    for item in toAttach {
+                    for item in readyFiles {
                         self.draftStore.addFile(
                             data: item.data,
                             fileName: item.name,
@@ -1297,14 +1300,14 @@ final class ChatStore: ObservableObject {
                             onToast: { self.showToast($0) }
                         )
                     }
-                    if hadZip {
-                        if skipped > 0 {
-                            self.showToast("已解压并添加 \(toAttach.count) 个文件到对话（跳过 \(skipped) 个不支持或超限项）")
+                    if extractedZip {
+                        if skippedCount > 0 {
+                            self.showToast("已解压并添加 \(readyFiles.count) 个文件到对话（跳过 \(skippedCount) 个不支持或超限项）")
                         } else {
-                            self.showToast("已解压并添加 \(toAttach.count) 个文件到对话")
+                            self.showToast("已解压并添加 \(readyFiles.count) 个文件到对话")
                         }
                     } else {
-                        self.showToast(toAttach.count == 1 ? "已将「\(toAttach[0].name)」添加到对话" : "已添加 \(toAttach.count) 个文件到对话")
+                        self.showToast(readyFiles.count == 1 ? "已将「\(readyFiles[0].name)」添加到对话" : "已添加 \(readyFiles.count) 个文件到对话")
                     }
                 }
             }

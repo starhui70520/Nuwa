@@ -54,8 +54,19 @@ struct ChatView: View {
     private let topUpURL = URL(string: "https://platform.deepseek.com/top_up")!
 
     var body: some View {
+        attachSheetsAndImporters(to: attachLifecycleObservers(to: rootStage))
+    }
+
+    private var proximityShareKey: String {
+        let sid = chatStore.activeSessionId?.uuidString ?? ""
+        let count = chatStore.activeSession?.messages.count ?? 0
+        let title = chatStore.activeSession?.title ?? ""
+        return "\(sid)|\(count)|\(title)|\(chatStore.isGenerating)|\(chatStore.importingHistory)|\(drawerOpen)|\(showSettings)|\(settings.showMigrationPrompt)|\(previewImage != nil)|\(chatStore.pendingIncomingFile != nil)"
+    }
+
+    private var rootStage: some View {
         let ignoreKeyboardLayout = drawerOpen || holdKeyboardFreeze || wideSidebarSearchFocused
-        ZStack {
+        return ZStack {
             Color.nuwaSidebarFill.ignoresSafeArea()
 
             GeometryReader { safeGeo in
@@ -185,183 +196,186 @@ struct ChatView: View {
             .ignoresSafeArea(ignoreKeyboardLayout ? .keyboard : [], edges: .bottom)
             .coordinateSpace(name: "nuwaRoot")
         }
-        .task(id: chatStore.historyLoaded) {
-            guard chatStore.historyLoaded else { return }
-            chatStore.checkPendingMigration()
-            chatStore.maybeAutoBackupToIcloud(settings: settings)
-            syncProximityShare()
-        }
-        .onChange(of: scenePhase) { _, phase in
-            if phase == .active {
+    }
+
+    private func attachLifecycleObservers<V: View>(to content: V) -> some View {
+        content
+            .task(id: chatStore.historyLoaded) {
+                guard chatStore.historyLoaded else { return }
                 chatStore.checkPendingMigration()
                 chatStore.maybeAutoBackupToIcloud(settings: settings)
                 syncProximityShare()
-            } else if phase == .background {
-                chatStore.flushPendingSave()
             }
-        }
-        .onChange(of: chatStore.activeSessionId) { _, _ in
-            speech.stopSpeaking()
-            editingMessageId = nil
-            isAtBottom = true
-            disclosureOverrides.removeAll()
-            disclosureAnchorID = nil
-            syncProximityShare()
-        }
-        .onChange(of: showSettings) { _, open in
-            if open || !sidebarSearchFocus.isFocused {
-                dismissKeyboard()
-            }
-            syncProximityShare()
-        }
-        .onChange(of: drawerOpen) { wasOpen, isOpen in
-            if wasOpen && !isOpen {
-                if sidebarSearchFocus.isFocused || sidebarSearchFocus.wasRecentlyDismissed {
-                    freezeKeyboardBriefly()
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active {
+                    chatStore.checkPendingMigration()
+                    chatStore.maybeAutoBackupToIcloud(settings: settings)
+                    syncProximityShare()
+                } else if phase == .background {
+                    chatStore.flushPendingSave()
                 }
-                sidebarSearchFocus.isFocused = false
-                dismissKeyboard()
             }
-            syncProximityShare()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
-            if !drawerOpen && !sidebarSearchFocus.isFocused && !wideSidebarSearchFocused && holdKeyboardFreeze {
-                keyboardFreezeTask?.cancel()
-                holdKeyboardFreeze = false
+            .onChange(of: chatStore.activeSessionId) { _, _ in
+                speech.stopSpeaking()
+                editingMessageId = nil
+                isAtBottom = true
+                disclosureOverrides.removeAll()
+                disclosureAnchorID = nil
             }
-        }
-        .onAppear {
-            syncProximityShare()
-        }
-        .onDisappear {
-            proximityShareCoordinator.update(session: nil, eligible: false)
-        }
-        .onChange(of: chatStore.activeSession?.messages.count) { _, _ in syncProximityShare() }
-        .onChange(of: chatStore.activeSession?.title) { _, _ in syncProximityShare() }
-        .onChange(of: chatStore.isGenerating) { _, _ in syncProximityShare() }
-        .onChange(of: chatStore.importingHistory) { _, _ in syncProximityShare() }
-        .onChange(of: settings.showMigrationPrompt) { _, _ in syncProximityShare() }
-        .onChange(of: previewImage != nil) { _, _ in syncProximityShare() }
-        .onChange(of: chatStore.pendingIncomingFile) { _, incoming in
-            syncProximityShare()
-            guard incoming != nil else { return }
-            dismissKeyboard()
-            if drawerOpen { drawerOpen = false }
-            if showSettings { showSettings = false }
-            if searchPanelResults != nil { searchPanelResults = nil }
-            if previewImage != nil { previewImage = nil }
-        }
-        .onChange(of: chatStore.shareToChatFocusToken) { _, _ in
-            dismissKeyboard()
-            if drawerOpen { drawerOpen = false }
-            if showSettings { showSettings = false }
-            if searchPanelResults != nil { searchPanelResults = nil }
-            if previewImage != nil { previewImage = nil }
-        }
-        .sheet(isPresented: $showSettings) {
-            SettingsView(settings: settings, chatStore: chatStore)
-                .environment(\.nuwaFontScale, fontScale)
-        }
-        .sheet(item: Binding(
+            .onChange(of: showSettings) { _, open in
+                if open || !sidebarSearchFocus.isFocused {
+                    dismissKeyboard()
+                }
+            }
+            .onChange(of: drawerOpen) { wasOpen, isOpen in
+                if wasOpen && !isOpen {
+                    if sidebarSearchFocus.isFocused || sidebarSearchFocus.wasRecentlyDismissed {
+                        freezeKeyboardBriefly()
+                    }
+                    sidebarSearchFocus.isFocused = false
+                    dismissKeyboard()
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+                if !drawerOpen && !sidebarSearchFocus.isFocused && !wideSidebarSearchFocused && holdKeyboardFreeze {
+                    keyboardFreezeTask?.cancel()
+                    holdKeyboardFreeze = false
+                }
+            }
+            .onAppear {
+                syncProximityShare()
+            }
+            .onDisappear {
+                proximityShareCoordinator.update(session: nil, eligible: false)
+            }
+            .onChange(of: proximityShareKey) { _, _ in
+                syncProximityShare()
+            }
+            .onChange(of: chatStore.pendingIncomingFile) { _, incoming in
+                guard incoming != nil else { return }
+                resetOverlaysForIncomingShare()
+            }
+            .onChange(of: chatStore.shareToChatFocusToken) { _, _ in
+                resetOverlaysForIncomingShare()
+            }
+    }
+
+    private func attachSheetsAndImporters<V: View>(to content: V) -> some View {
+        let incomingBinding = Binding<IncomingFileRequest?>(
             get: { (showSettings || showMigrationWeb || searchPanelResults != nil) ? nil : chatStore.pendingIncomingFile },
             set: { if $0 == nil { chatStore.dismissPendingIncomingFile() } }
-        )) { request in
-            IncomingFileActionSheet(
-                request: request,
-                locale: settings.locale,
-                onChat: {
-                    chatStore.attachIncomingFileToChat(request, settings: settings)
-                },
-                onImport: {
-                    chatStore.importPendingIncomingFile(request)
-                },
-                onCancel: {
-                    chatStore.dismissPendingIncomingFile()
-                }
-            )
-            .environment(\.nuwaFontScale, fontScale)
-        }
-        .sheet(isPresented: $showMigrationWeb) {
-            DeepSeekMigrationSheet { filePath, _ in
-                showMigrationWeb = false
-                if let filePath {
-                    chatStore.importFromFilePath(filePath)
-                }
-            }
-            .ignoresSafeArea()
-        }
-        .sheet(isPresented: Binding(
+        )
+        let searchResultsBinding = Binding<Bool>(
             get: { searchPanelResults != nil },
             set: { if !$0 { searchPanelResults = nil } }
-        )) {
-            if let results = searchPanelResults {
-                SearchSourcesPanel(items: results, locale: settings.locale) {
-                    searchPanelResults = nil
-                }
+        )
+        return content
+            .sheet(isPresented: $showSettings) {
+                SettingsView(settings: settings, chatStore: chatStore)
+                    .environment(\.nuwaFontScale, fontScale)
+            }
+            .sheet(item: incomingBinding) { request in
+                IncomingFileActionSheet(
+                    request: request,
+                    locale: settings.locale,
+                    onChat: { chatStore.attachIncomingFileToChat(request, settings: settings) },
+                    onImport: { chatStore.importPendingIncomingFile(request) },
+                    onCancel: { chatStore.dismissPendingIncomingFile() }
+                )
                 .environment(\.nuwaFontScale, fontScale)
-                .presentationDragIndicator(.visible)
-                .padding(.top, 12)
             }
-        }
-        .fileImporter(
-            isPresented: $showZipImporter,
-            allowedContentTypes: [.zip, .json, NuwaShareTypes.sessionUTType],
-            allowsMultipleSelection: false
-        ) { result in
-            switch result {
-            case .success(let urls):
-                guard let url = urls.first else { return }
-                Task {
-                    do {
-                        let outcome = try await chatStore.importFromFileWithOutcome(url)
-                        chatStore.showToast(ChatStore.importSummaryToast(for: outcome, singleShare: false))
-                    } catch {
-                        chatStore.showToast("导入失败：\(error.localizedDescription)")
+            .sheet(isPresented: $showMigrationWeb) {
+                DeepSeekMigrationSheet { filePath, _ in
+                    showMigrationWeb = false
+                    if let filePath {
+                        chatStore.importFromFilePath(filePath)
                     }
                 }
-            case .failure(let error):
-                chatStore.showToast("选择文件失败：\(error.localizedDescription)")
+                .ignoresSafeArea()
             }
+            .sheet(isPresented: searchResultsBinding) {
+                if let results = searchPanelResults {
+                    SearchSourcesPanel(items: results, locale: settings.locale) {
+                        searchPanelResults = nil
+                    }
+                    .environment(\.nuwaFontScale, fontScale)
+                    .presentationDragIndicator(.visible)
+                    .padding(.top, 12)
+                }
+            }
+            .fileImporter(
+                isPresented: $showZipImporter,
+                allowedContentTypes: [.zip, .json, NuwaShareTypes.sessionUTType],
+                allowsMultipleSelection: false,
+                onCompletion: handleZipImportResult
+            )
+            .fileImporter(
+                isPresented: $showAttachmentFilePicker,
+                allowedContentTypes: [.item],
+                allowsMultipleSelection: true,
+                onCompletion: handleAttachmentPickResult
+            )
+    }
+
+    private func resetOverlaysForIncomingShare() {
+        dismissKeyboard()
+        if drawerOpen { drawerOpen = false }
+        if showSettings { showSettings = false }
+        if searchPanelResults != nil { searchPanelResults = nil }
+        if previewImage != nil { previewImage = nil }
+    }
+
+    private func handleZipImportResult(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            Task {
+                do {
+                    let outcome = try await chatStore.importFromFileWithOutcome(url)
+                    chatStore.showToast(ChatStore.importSummaryToast(for: outcome, singleShare: false))
+                } catch {
+                    chatStore.showToast("导入失败：\(error.localizedDescription)")
+                }
+            }
+        case .failure(let error):
+            chatStore.showToast("选择文件失败：\(error.localizedDescription)")
         }
-        .fileImporter(
-            isPresented: $showAttachmentFilePicker,
-            allowedContentTypes: [.item],
-            allowsMultipleSelection: true
-        ) { result in
-            switch result {
-            case .success(let urls):
-                let targetSession = chatStore.activeSessionId
-                for url in urls {
-                    let name = url.lastPathComponent
-                    let ext = (name as NSString).pathExtension.lowercased()
-                    if ext == NuwaShareTypes.sessionExtension {
-                        chatStore.handleIncomingFileURL(url)
-                        continue
-                    }
-                    if ext == "zip" {
-                        chatStore.handlePickedAttachmentZipURL(url, settings: settings)
-                        continue
-                    }
-                    let accessed = url.startAccessingSecurityScopedResource()
-                    Task.detached(priority: .userInitiated) {
-                        defer { if accessed { url.stopAccessingSecurityScopedResource() } }
-                        if let data = try? Data(contentsOf: url) {
-                            await MainActor.run {
-                                draftStore.addFile(
-                                    data: data,
-                                    fileName: name,
-                                    isImage: AttachmentStore.isImageName(name),
-                                    for: targetSession,
-                                    settings: settings,
-                                    onToast: { chatStore.showToast($0) }
-                                )
-                            }
+    }
+
+    private func handleAttachmentPickResult(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            let targetSession = chatStore.activeSessionId
+            for url in urls {
+                let name = url.lastPathComponent
+                let ext = (name as NSString).pathExtension.lowercased()
+                if ext == NuwaShareTypes.sessionExtension {
+                    chatStore.handleIncomingFileURL(url)
+                    continue
+                }
+                if ext == "zip" {
+                    chatStore.handlePickedAttachmentZipURL(url, settings: settings)
+                    continue
+                }
+                let accessed = url.startAccessingSecurityScopedResource()
+                Task.detached(priority: .userInitiated) {
+                    defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+                    if let data = try? Data(contentsOf: url) {
+                        await MainActor.run {
+                            draftStore.addFile(
+                                data: data,
+                                fileName: name,
+                                isImage: AttachmentStore.isImageName(name),
+                                for: targetSession,
+                                settings: settings,
+                                onToast: { chatStore.showToast($0) }
+                            )
                         }
                     }
                 }
-            case .failure(let error):
-                chatStore.showToast("选择文件失败：\(error.localizedDescription)")
             }
+        case .failure(let error):
+            chatStore.showToast("选择文件失败：\(error.localizedDescription)")
         }
     }
 
