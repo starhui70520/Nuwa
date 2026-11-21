@@ -90,6 +90,64 @@ const parseUnsupportedImageError = (
   }
 }
 
+/** 服务端单次请求允许携带的最大图片数；超出时仅在请求中裁剪最早的历史图片，本地记录完整保留。 */
+const MAX_REQUEST_IMAGES = 600
+
+const parseTooManyImagesLimit = (error: unknown): number | null => {
+  if (!(error instanceof ApiError)) {
+    return null
+  }
+  const match = /Too many images:\s*max\s+(\d+)\s+images/i.exec(error.message)
+  if (!match) {
+    return null
+  }
+  const parsed = Number.parseInt(match[1], 10)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null
+}
+
+/** 从最新消息往前保留最多 maxImages 张图片，超出的更早历史图片在请求中省略（不改动本地数据）。 */
+const limitRequestImages = (
+  messages: MessageParam[],
+  maxImages = MAX_REQUEST_IMAGES
+): MessageParam[] => {
+  let remaining = Math.max(0, maxImages)
+  let changed = false
+  const result = new Array<MessageParam>(messages.length)
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]
+    if (message.role !== 'user' || typeof message.content === 'string') {
+      result[i] = message
+      continue
+    }
+    const kept: typeof message.content = []
+    let droppedInMessage = false
+    for (let j = message.content.length - 1; j >= 0; j--) {
+      const block = message.content[j]
+      if (block.type === 'image') {
+        if (remaining > 0) {
+          remaining -= 1
+          kept.push(block)
+        } else {
+          droppedInMessage = true
+          changed = true
+        }
+      } else {
+        kept.push(block)
+      }
+    }
+    if (!droppedInMessage) {
+      result[i] = message
+    } else {
+      kept.reverse()
+      result[i] = {
+        ...message,
+        content: kept.length > 0 ? kept : [{ type: 'text', text: '[图片]' }],
+      }
+    }
+  }
+  return changed ? result : messages
+}
+
 const stripRejectedImages = (
   messages: MessageParam[],
   rejectedIds: ReadonlySet<string>
@@ -1152,8 +1210,18 @@ const prepareFiles = async (sessionId: string, request: Request, signal: AbortSi
   }
 
   const pending = new Map<string, FileAttachment>()
+  let imageBudget = Math.max(
+    0,
+    MAX_REQUEST_IMAGES - request.question.files.filter((file) => file.isImage).length
+  )
   for (const [user] of getContextRounds(request.history).toReversed()) {
-    for (const file of user.files) {
+    for (const file of user.files.toReversed()) {
+      if (file.isImage) {
+        if (imageBudget <= 0) {
+          continue
+        }
+        imageBudget -= 1
+      }
       if (!file.serverId && !serverIds.has(file.id) && !pending.has(file.id)) {
         pending.set(file.id, file)
       }
@@ -1277,6 +1345,7 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
   let frame = 0
   let dropExtendedFor1M = false
   let skippedBadImages = 0
+  let imageCap = MAX_REQUEST_IMAGES
   let sentMessages: MessageParam[] = []
   const flush = () => {
     cancelAnimationFrame(frame)
@@ -1300,15 +1369,18 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
         reply = { ...reply, latestReminder }
         updateReply(sessionId, reply)
         persist(sessionId)
-        const messages = stripRejectedImages(
-          toRequestMessages(
-            prepared.history,
-            prepared.question,
-            prepared.prefix,
-            initial.thinking ?? false,
-            latestReminder
+        const messages = limitRequestImages(
+          stripRejectedImages(
+            toRequestMessages(
+              prepared.history,
+              prepared.question,
+              prepared.prefix,
+              initial.thinking ?? false,
+              latestReminder
+            ),
+            rejectedHistoryImageIds
           ),
-          rejectedHistoryImageIds
+          imageCap
         )
         sentMessages = messages
         const configuredModel = useSettings.getState().apiModel.trim()
@@ -1377,6 +1449,12 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
         // 扩展参数（tools / title）触发服务端 32K 限流时，自动剥离并重试一次以使用 1M 上下文。
         if (!receivedContent && !dropExtendedFor1M && is32kInputLimitError(error)) {
           dropExtendedFor1M = true
+          continue
+        }
+        // 若服务端返回更严格的图片数上限（如 Too many images: max N images），按上限裁剪历史旧图后自动重试。
+        const reportedImageCap = !receivedContent ? parseTooManyImagesLimit(error) : null
+        if (reportedImageCap !== null && reportedImageCap < imageCap) {
+          imageCap = reportedImageCap
           continue
         }
         // 历史消息夹带不支持/已损坏的图片时，跳过该坏图并重试，避免整段长对话永久卡死。
