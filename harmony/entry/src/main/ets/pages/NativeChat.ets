@@ -18,9 +18,10 @@ import {
 } from '@kit.ServiceCollaborationKit';
 import { NUWA_MAIN_WINDOW_ID_KEY } from '../entryability/EntryAbility';
 import {
-  ImmersiveComposerModifier, ImmersiveGlassCapsuleModifier, ImmersiveSurfaceModifier, NATIVE_ICON_CLICK_EFFECT,
-  NATIVE_PILL_CLICK_EFFECT, nativeDialogTransition, nativeDrawerSpringCurve, nativeFloatingBarTransition,
-  nativeSheetSpringCurve, nativeSideSheetTransition, nativeSpringCurve, triggerNativeHaptic,
+  ImmersiveComposerModifier, ImmersiveGlassCapsuleModifier, ImmersiveGlassControlModifier, ImmersiveSurfaceModifier,
+  isImmersiveMaterialAvailable, NATIVE_ICON_CLICK_EFFECT, NATIVE_PILL_CLICK_EFFECT, nativeDialogTransition,
+  nativeDrawerSpringCurve, nativeFloatingBarTransition, nativeSheetSpringCurve, nativeSideSheetTransition,
+  nativeSpringCurve, triggerNativeHaptic,
 } from '../native/NativeImmersiveUI';
 import {
   NativeIncomingSharePayload, NativeProximityShareCoordinator, NUWA_INCOMING_SHARE_SEQ_KEY,
@@ -413,6 +414,7 @@ struct NativeChat {
   @State private composerHeight: number = 112;
   private readonly navPathStack: NavPathStack = new NavPathStack();
   private readonly headerCapsuleModifier = new ImmersiveGlassCapsuleModifier(true);
+  private readonly glassControlModifier = new ImmersiveGlassControlModifier();
   private readonly composerElevatedModifier = new ImmersiveComposerModifier(true);
   private readonly surfaceModifier = new ImmersiveSurfaceModifier();
   private readonly proximityShare = new NativeProximityShareCoordinator(this.backup, {
@@ -4304,7 +4306,9 @@ struct NativeChat {
   private returnToSettings(): void {
     if (this.signingOut || this.deletingSessions) return;
     if (this.settingsSection === 'account') this.finishCredentialSettings();
-    this.settingsSection = 'root';
+    this.getUIContext().animateTo({ curve: nativeSpringCurve(0.28, 0.88) }, () => {
+      this.settingsSection = 'root';
+    });
   }
 
   private closeSettings(): void {
@@ -4362,7 +4366,7 @@ struct NativeChat {
         Math.max(1, mobileHeight - this.settingsDragOffset),
       maskColor: wide ? undefined : Math.round(92 * opacity) * 0x1000000,
       blurStyle: BlurStyle.Thick,
-      backgroundColor: $r('app.color.native_chat_sidebar'),
+      backgroundColor: isImmersiveMaterialAvailable() ? Color.Transparent : $r('app.color.native_chat_sidebar'),
       dragBar: false,
       showClose: false,
       title: (): void => { this.settingsHeader(); },
@@ -5439,42 +5443,69 @@ struct NativeChat {
 
   @Builder
   private accountSettings() {
-    Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween, alignItems: ItemAlign.Center,
-      space: { main: LengthMetrics.vp(10), cross: LengthMetrics.vp(10) } }) {
-      Column({ space: 6 }) {
-        Text(this.label('DeepSeek API 账号', 'DeepSeek API Account')).fontSize(this.appFontSize(14))
-          .fontWeight(FontWeight.Medium).fontColor($r('app.color.native_chat_primary'))
-        if (this.account) {
-          Text(this.accountToken() ? this.label(`当前生效：${this.account.label}`, `Active: ${this.account.label}`) :
-            this.label(`已登录：${this.account.label}（当前使用自定义 API Key）`,
-              `Signed in: ${this.account.label} (using custom API Key)`))
-            .fontSize(this.appFontSize(12)).fontColor($r('app.color.native_chat_secondary'))
-        } else {
+    if (!this.account && !this.compact()) {
+      Row({ space: 12 }) {
+        Column({ space: 4 }) {
+          Text(this.label('DeepSeek API 账号', 'DeepSeek API Account')).fontSize(this.appFontSize(14))
+            .fontWeight(FontWeight.Medium).fontColor($r('app.color.native_chat_primary'))
           Text(this.label('通过 DeepSeek 开放平台授权登录，免手动复制 API Key',
             'Authorize via DeepSeek Platform without pasting an API Key'))
             .fontSize(this.appFontSize(12)).fontColor($r('app.color.native_chat_secondary'))
         }
+        .layoutWeight(1).alignItems(HorizontalAlign.Start)
+        Button(this.label('账号登录', 'Sign In'), { type: ButtonType.Capsule })
+          .height(34).padding({ left: 14, right: 14 }).fontSize(this.appFontSize(13)).fontWeight(FontWeight.Medium)
+          .backgroundColor($r('app.color.native_chat_blue')).fontColor(Color.White)
+          .clickEffect(NATIVE_PILL_CLICK_EFFECT)
+          .enabled(!this.authorizing && !this.settingsVerifying && !this.backupBusy)
+          .onClick(() => {
+            triggerNativeHaptic('light');
+            void this.startAuthorization();
+          })
       }
-      .constraintSize({ maxWidth: this.compact() ? '100%' : '70%' }).alignItems(HorizontalAlign.Start)
-      Row({ space: 6 }) {
-        if (this.account) {
-          if (!this.accountToken()) {
-            Button(this.label('切换为此账号', 'Use Account'), { buttonStyle: ButtonStyleMode.TEXTUAL })
-              .height(34).fontSize(this.appFontSize(13)).fontColor($r('app.color.native_chat_blue_text'))
-              .enabled(!this.settingsVerifying).onClick(() => { void this.enableAccount(); })
+      .width('100%').padding(14).borderRadius(16).alignItems(VerticalAlign.Center)
+      .backgroundColor($r('app.color.native_chat_surface'))
+    } else {
+      Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween, alignItems: ItemAlign.Center,
+        space: { main: LengthMetrics.vp(10), cross: LengthMetrics.vp(10) } }) {
+        Column({ space: 6 }) {
+          Text(this.label('DeepSeek API 账号', 'DeepSeek API Account')).fontSize(this.appFontSize(14))
+            .fontWeight(FontWeight.Medium).fontColor($r('app.color.native_chat_primary'))
+          if (this.account) {
+            Text(this.accountToken() ? this.label(`当前生效：${this.account.label}`, `Active: ${this.account.label}`) :
+              this.label(`已登录：${this.account.label}（当前使用自定义 API Key）`,
+                `Signed in: ${this.account.label} (using custom API Key)`))
+              .fontSize(this.appFontSize(12)).fontColor($r('app.color.native_chat_secondary'))
+          } else {
+            Text(this.label('通过 DeepSeek 开放平台授权登录，免手动复制 API Key',
+              'Authorize via DeepSeek Platform without pasting an API Key'))
+              .fontSize(this.appFontSize(12)).fontColor($r('app.color.native_chat_secondary'))
           }
-          Button(this.label('退出登录', 'Sign Out'), { buttonStyle: ButtonStyleMode.TEXTUAL })
-            .height(34).fontSize(this.appFontSize(13)).fontColor($r('app.color.native_chat_error'))
-            .enabled(!this.settingsVerifying).onClick(() => { void this.logoutAccount(); })
-        } else {
-          Button(this.label('账号登录', 'Sign In'), { type: ButtonType.Capsule })
-            .height(34).fontSize(this.appFontSize(13)).backgroundColor($r('app.color.native_chat_blue'))
-            .enabled(!this.authorizing && !this.settingsVerifying && !this.backupBusy)
-            .onClick(() => { void this.startAuthorization(); })
+        }
+        .constraintSize({ maxWidth: this.compact() ? '100%' : '70%' }).alignItems(HorizontalAlign.Start)
+        Row({ space: 6 }) {
+          if (this.account) {
+            if (!this.accountToken()) {
+              Button(this.label('切换为此账号', 'Use Account'), { buttonStyle: ButtonStyleMode.TEXTUAL })
+                .height(34).fontSize(this.appFontSize(13)).fontColor($r('app.color.native_chat_blue_text'))
+                .clickEffect(NATIVE_PILL_CLICK_EFFECT)
+                .enabled(!this.settingsVerifying).onClick(() => { void this.enableAccount(); })
+            }
+            Button(this.label('退出登录', 'Sign Out'), { buttonStyle: ButtonStyleMode.TEXTUAL })
+              .height(34).fontSize(this.appFontSize(13)).fontColor($r('app.color.native_chat_error'))
+              .clickEffect(NATIVE_PILL_CLICK_EFFECT)
+              .enabled(!this.settingsVerifying).onClick(() => { void this.logoutAccount(); })
+          } else {
+            Button(this.label('账号登录', 'Sign In'), { type: ButtonType.Capsule })
+              .height(34).fontSize(this.appFontSize(13)).backgroundColor($r('app.color.native_chat_blue'))
+              .clickEffect(NATIVE_PILL_CLICK_EFFECT)
+              .enabled(!this.authorizing && !this.settingsVerifying && !this.backupBusy)
+              .onClick(() => { void this.startAuthorization(); })
+          }
         }
       }
+      .width('100%').padding(14).borderRadius(16).backgroundColor($r('app.color.native_chat_surface'))
     }
-    .width('100%').padding(14).borderRadius(16).backgroundColor($r('app.color.native_chat_surface'))
     Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween, alignItems: ItemAlign.Center,
       space: { main: LengthMetrics.vp(10), cross: LengthMetrics.vp(8) } }) {
       Text(this.label('接口协议', 'API Protocol')).fontSize(this.appFontSize(14)).fontWeight(FontWeight.Medium)
@@ -5509,10 +5540,16 @@ struct NativeChat {
       InputType.Normal, (value: string) => { this.settingsModel = value; this.settingsError = ''; })
     this.apiKeySettings()
     if (!this.wide() && this.canVerifySettings()) {
-      Button(this.settingsVerifying ? this.label('正在验证...', 'Verifying...') : this.label('确定', 'Confirm'))
-        .width('100%').height(42).fontSize(this.appFontSize(14))
-        .backgroundColor($r('app.color.native_chat_blue')).enabled(!this.settingsVerifying)
-        .onClick(() => { void this.verifySettingsKey(); })
+      Button(this.settingsVerifying ? this.label('正在验证...', 'Verifying...') : this.label('确定', 'Confirm'),
+        { type: ButtonType.Capsule })
+        .width('100%').height(44).margin({ top: 4 }).fontSize(this.appFontSize(15)).fontWeight(FontWeight.Medium)
+        .backgroundColor($r('app.color.native_chat_blue')).fontColor(Color.White)
+        .clickEffect(NATIVE_PILL_CLICK_EFFECT)
+        .enabled(!this.settingsVerifying)
+        .onClick(() => {
+          triggerNativeHaptic('light');
+          void this.verifySettingsKey();
+        })
     }
   }
 
@@ -5585,16 +5622,22 @@ struct NativeChat {
         if (this.settingsSection === 'root') {
           Blank().width(this.compact() ? 30 : 36)
         } else {
-          this.iconButton($r('app.media.native_chevron_left'), this.label('返回', "Back"),
-            () => { this.returnToSettings(); }, this.compact() ? 30 : 36, 18,
-            $r('app.color.native_chat_primary'), $r('app.color.native_chat_surface'))
+          Row() {
+            this.iconButton($r('app.media.native_chevron_left'), this.label('返回', "Back"),
+              () => { this.returnToSettings(); }, this.compact() ? 30 : 36, 18,
+              $r('app.color.native_chat_primary'), Color.Transparent)
+          }
+          .borderRadius(999).attributeModifier(this.glassControlModifier)
         }
         Text(this.settingsTitle()).layoutWeight(1).textAlign(TextAlign.Center)
           .fontSize(this.appFontSize(this.compact() ? 15 : 17)).lineHeight(this.compact() ? 20 : 24).fontWeight(600)
           .fontColor($r('app.color.native_chat_primary'))
-        this.iconButton($r('app.media.native_close'), this.label('关闭', "Close"),
-          () => { this.closeSettings(); }, this.compact() ? 30 : 36, 16,
-          $r('app.color.native_chat_primary'), $r('app.color.native_chat_surface'))
+        Row() {
+          this.iconButton($r('app.media.native_close'), this.label('关闭', "Close"),
+            () => { this.closeSettings(); }, this.compact() ? 30 : 36, 16,
+            $r('app.color.native_chat_primary'), Color.Transparent)
+        }
+        .borderRadius(999).attributeModifier(this.glassControlModifier)
       }
       .width('100%').padding({
         left: this.compact() ? 10 : 16, right: this.compact() ? 10 : 16,
@@ -5644,7 +5687,7 @@ struct NativeChat {
       }
       .width('100%').padding({
         left: this.compact() ? 10 : 16, right: this.compact() ? 10 : 16,
-        top: 4, bottom: this.compact() ? 16 : 24,
+        top: 4, bottom: this.compact() ? 20 : 36,
       }).alignItems(HorizontalAlign.Start)
     }
     .width('100%').height('100%').scrollBar(BarState.Off)
@@ -5871,20 +5914,18 @@ struct NativeChat {
   }
 
   @Builder
-  private sidebarMenuTrigger(session: NativeSidebarSession, inset: number) {
-    // Widen the menu anchor while preserving the icon position and touch target.
-    Blank().width(SIDEBAR_MENU_TRIGGER_SIZE + 4)
-    Button('⋯', { buttonStyle: ButtonStyleMode.TEXTUAL }).fontSize(18)
-      .width(SIDEBAR_MENU_TRIGGER_SIZE + inset).height(SIDEBAR_MENU_TRIGGER_SIZE)
-      .padding({ left: inset, right: 0, top: 0, bottom: 0 })
-      .position({ right: 0, top: this.wide() ? 4 : 6 })
-      .responseRegion({ x: inset, y: 0, width: SIDEBAR_MENU_TRIGGER_SIZE, height: SIDEBAR_MENU_TRIGGER_SIZE })
-      .fontColor($r('app.color.native_chat_secondary')).accessibilityText(this.label('对话选项', "Chat options"))
-      .bindMenu(this.sessionMenu(session), {
-        placement: Placement.BottomLeft,
-        borderRadius: 12,
-        targetSpace: LengthMetrics.vp(4),
-      })
+  private sidebarMenuTrigger(session: NativeSidebarSession, _inset: number) {
+    Button({ type: ButtonType.Circle, buttonStyle: ButtonStyleMode.TEXTUAL }) {
+      Text('⋯').fontSize(18).fontColor($r('app.color.native_chat_secondary'))
+    }
+    .width(SIDEBAR_MENU_TRIGGER_SIZE).height(SIDEBAR_MENU_TRIGGER_SIZE).padding(0)
+    .clickEffect(NATIVE_ICON_CLICK_EFFECT)
+    .accessibilityText(this.label('对话选项', "Chat options"))
+    .bindMenu(this.sessionMenu(session), {
+      placement: Placement.BottomRight,
+      borderRadius: 14,
+      targetSpace: LengthMetrics.vp(4),
+    })
   }
 
   @Builder

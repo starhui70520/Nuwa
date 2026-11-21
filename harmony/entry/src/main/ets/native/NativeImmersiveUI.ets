@@ -191,6 +191,26 @@ export class ImmersiveComposerModifier implements AttributeModifier<CommonAttrib
 }
 
 /**
+ * Luminous floating glass button modifier for sheet/modal circular controls (e.g. Back / Close)
+ * outside Navigation title bar, matching HarmonyOS 7.0 Immersive Light depth & specular rim.
+ */
+export class ImmersiveGlassControlModifier implements AttributeModifier<CommonAttribute> {
+  applyNormalAttribute(instance: CommonAttribute): void {
+    instance
+      .backgroundColor(Color.Transparent)
+      .backgroundEffect({
+        radius: 28,
+        saturation: 1.5,
+        brightness: 1.1,
+        color: $r('app.color.native_immersive_composer_tint'),
+      })
+      .border({ width: 0.75, color: $r('app.color.native_glass_rim') })
+      .shadow({ radius: 10, offsetY: 2, color: $r('app.color.native_glass_shadow') });
+    applyHdsGlassLight(instance, true);
+  }
+}
+
+/**
  * Thick frosted glass surface for floating modal dialogs & action sheets.
  */
 export class ImmersiveSurfaceModifier implements AttributeModifier<CommonAttribute> {
