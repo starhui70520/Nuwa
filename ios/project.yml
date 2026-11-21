@@ -31,6 +31,36 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         ITSAppUsesNonExemptEncryption: false
         LSRequiresIPhoneOS: true
+        LSSupportsOpeningDocumentsInPlace: true
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Nuwa Chat Session
+            CFBundleTypeRole: Editor
+            LSHandlerRank: Owner
+            LSItemContentTypes:
+              - com.rankchord.nuwa.session
+          - CFBundleTypeName: ZIP Archive
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - public.zip-archive
+              - com.pkware.zip-archive
+          - CFBundleTypeName: JSON Document
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - public.json
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: com.rankchord.nuwa.session
+            UTTypeDescription: Nuwa Chat Session
+            UTTypeConformsTo:
+              - public.zip-archive
+              - public.data
+              - public.archive
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - nuwa
+              public.mime-type:
+                - application/vnd.nuwa.session+zip
         NSMicrophoneUsageDescription: 用于语音输入，将语音转写为文字发送给助手
         NSSpeechRecognitionUsageDescription: 用于语音输入，在设备上进行语音识别
         UILaunchStoryboardName: LaunchScreen

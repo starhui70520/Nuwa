@@ -19,6 +19,7 @@ struct SessionDrawerView: View {
     let onTogglePin: (UUID) -> Void
     let onSetSessionsPinned: (Set<UUID>, Bool) -> Void
     let onRenameSession: (UUID, String) -> Void
+    let onShareSession: (UUID) -> Void
     let onDeleteSession: (UUID) -> Void
     let onDeleteSessions: (Set<UUID>) -> Void
     let onSearch: (String) async -> Set<UUID>
@@ -575,6 +576,12 @@ struct SessionDrawerView: View {
             renamingSession = session
         } label: {
             Label(L10n.t("rename", locale: loc), systemImage: "pencil")
+        }
+        Button {
+            dismissSearchFocus()
+            onShareSession(session.id)
+        } label: {
+            Label(loc == .enUS ? "Share (AirDrop / Tap)" : "分享对话（支持碰一碰）", systemImage: "square.and.arrow.up")
         }
         Button(role: .destructive) {
             deletingSession = session

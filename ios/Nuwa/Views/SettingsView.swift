@@ -288,7 +288,7 @@ struct SettingsView: View {
         }
         .fileImporter(
             isPresented: $isImporting,
-            allowedContentTypes: [.zip, .json],
+            allowedContentTypes: [.zip, .json, NuwaShareTypes.sessionUTType],
             allowsMultipleSelection: false
         ) { result in
             switch result {
@@ -296,12 +296,8 @@ struct SettingsView: View {
                 guard let url = urls.first else { return }
                 Task {
                     do {
-                        let count = try await chatStore.importFromFile(url)
-                        if count == 0 {
-                            chatStore.showToast("本地已是最新记录，未覆盖任何对话")
-                        } else {
-                            chatStore.showToast(count == 1 ? "已导入 1 个对话" : "已导入 \(count) 个对话")
-                        }
+                        let outcome = try await chatStore.importFromFileWithOutcome(url)
+                        chatStore.showToast(ChatStore.importSummaryToast(for: outcome, singleShare: false))
                     } catch {
                         chatStore.showToast("导入失败：\(error.localizedDescription)")
                     }

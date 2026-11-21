@@ -27,22 +27,218 @@ enum DeepSeekZipError: LocalizedError {
 enum DeepSeekZipImporter {
     struct ZipEntry {
         let path: String
+        let rawNameData: Data
         let compressionMethod: UInt16
-    let compressedSize: Int
-    let uncompressedSize: Int
-    let crc32: UInt32
+        let compressedSize: Int
+        let uncompressedSize: Int
+        let crc32: UInt32
         let localHeaderOffset: Int
+    }
+
+    struct ZipInspection: Equatable {
+        let isNuwaOrDeepSeekBackup: Bool
+        let backupSessionCount: Int
+        let extractableFileCount: Int
+    }
+
+    struct ExtractedChatFile {
+        let fileName: String
+        let data: Data
+        let isImage: Bool
+    }
+
+    struct ExtractedChatFiles {
+        let files: [ExtractedChatFile]
+        let skippedUnsupported: Int
+        let skippedOversized: Int
+        let truncatedByLimit: Int
+    }
+
+    static func isZipData(_ data: Data) -> Bool {
+        data.count >= 4 && data[0] == 0x50 && data[1] == 0x4B && data[2] == 0x03 && data[3] == 0x04
+    }
+
+    /// Fast central-directory scan used by incoming file action sheet to detect whether a ZIP
+    /// is a Nuwa/DeepSeek conversation backup vs a general archive for chat attachment.
+    static func inspectZipData(_ data: Data) -> ZipInspection {
+        guard isZipData(data), let rawEntries = try? readCentralDirectory(from: data) else {
+            return ZipInspection(isNuwaOrDeepSeekBackup: false, backupSessionCount: 0, extractableFileCount: 0)
+        }
+        let entries = normalizeBackupRootPrefix(rawEntries)
+        var hasValidManifest = false
+        if let manifestEntry = entries.first(where: { $0.path == "manifest.json" }),
+           let mData = try? extractEntry(manifestEntry, from: data),
+           let obj = try? JSONSerialization.jsonObject(with: mData) as? [String: Any] {
+            if (obj["export_format_version"] as? Int) == 3 || (obj["format_version"] as? Int) == 2 {
+                hasValidManifest = true
+            }
+        }
+        var backupSessions = 0
+        var hasLegacyConversations = false
+        var extractableFiles = 0
+        for entry in entries {
+            if isIgnoredArchiveJunk(entry.path) || entry.path.hasSuffix("/") { continue }
+            if entry.uncompressedSize > 0 {
+                extractableFiles += 1
+            }
+            let lower = entry.path.lowercased()
+            if lower.hasPrefix("chat_sessions/") && lower.hasSuffix(".json") && !lower.contains("_files/") {
+                backupSessions += 1
+            } else if lower == "conversations.json" || lower.hasSuffix("/conversations.json") {
+                hasLegacyConversations = true
+            }
+        }
+        let isBackup = (hasValidManifest && backupSessions > 0) || backupSessions > 0 || hasLegacyConversations
+        return ZipInspection(
+            isNuwaOrDeepSeekBackup: isBackup,
+            backupSessionCount: backupSessions,
+            extractableFileCount: extractableFiles
+        )
+    }
+
+    /// Unpacks readable documents/code/images from a general ZIP archive for attaching directly to a chat draft.
+    static func extractFilesForChat(
+        _ data: Data,
+        maxFiles: Int,
+        maxTotalBytes: Int = 64 * 1024 * 1024
+    ) throws -> ExtractedChatFiles {
+        let rawEntries = try readCentralDirectory(from: data)
+        let candidateEntries = rawEntries
+            .filter { entry in
+                let path = entry.path
+                guard !path.isEmpty, !path.hasSuffix("/"), !isIgnoredArchiveJunk(path), entry.uncompressedSize > 0 else {
+                    return false
+                }
+                let components = path.split(separator: "/")
+                if components.contains(where: { $0 == ".git" || $0 == ".svn" || $0 == "__MACOSX" || $0 == "node_modules" }) {
+                    return false
+                }
+                let base = String(components.last ?? "")
+                if base.hasPrefix(".") || base.hasPrefix("._") {
+                    return false
+                }
+                return true
+            }
+            .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+
+        var results: [ExtractedChatFile] = []
+        var usedNames = Set<String>()
+        var totalBytes = 0
+        var skippedUnsupported = 0
+        var skippedOversized = 0
+        var truncatedByLimit = 0
+
+        for entry in candidateEntries {
+            guard results.count < maxFiles else {
+                truncatedByLimit += 1
+                continue
+            }
+            let baseName = (entry.path as NSString).lastPathComponent
+            let ext = AttachmentStore.fileExtension(of: baseName)
+            let isImgGuess = AttachmentStore.isImageName(baseName)
+            let perFileLimitMB = AttachmentStore.uploadPurpose(fileName: baseName, isImage: isImgGuess) == "user_data"
+                ? AttachmentStore.maxUserDataSizeMB
+                : AttachmentStore.maxSizeMB
+            if entry.uncompressedSize > perFileLimitMB * 1024 * 1024 || totalBytes + entry.uncompressedSize > maxTotalBytes {
+                skippedOversized += 1
+                continue
+            }
+            if !ext.isEmpty && AttachmentStore.normalizedChatFileForZipEntry(name: baseName, data: Data([0x20])) == nil {
+                // Fast pre-skip known binary extensions without inflating them.
+                skippedUnsupported += 1
+                continue
+            }
+            guard let extracted = try? extractEntry(entry, from: data), !extracted.isEmpty else {
+                skippedUnsupported += 1
+                continue
+            }
+            guard let normalized = AttachmentStore.normalizedChatFileForZipEntry(name: baseName, data: extracted) else {
+                skippedUnsupported += 1
+                continue
+            }
+            var finalName = normalized.fileName
+            let lowerKey = finalName.lowercased()
+            if usedNames.contains(lowerKey) {
+                let flattened = entry.path.replacingOccurrences(of: "/", with: "_")
+                let stem = (flattened as NSString).deletingPathExtension
+                let finalExt = AttachmentStore.fileExtension(of: finalName)
+                let candidate = finalExt.isEmpty ? flattened : "\(stem).\(finalExt)"
+                if !usedNames.contains(candidate.lowercased()) {
+                    finalName = candidate
+                } else {
+                    var suffix = 2
+                    while usedNames.contains("\(suffix)_\(finalName)".lowercased()) {
+                        suffix += 1
+                    }
+                    finalName = "\(suffix)_\(finalName)"
+                }
+            }
+            usedNames.insert(finalName.lowercased())
+            totalBytes += extracted.count
+            results.append(ExtractedChatFile(fileName: finalName, data: extracted, isImage: normalized.isImage))
+        }
+
+        return ExtractedChatFiles(
+            files: results,
+            skippedUnsupported: skippedUnsupported,
+            skippedOversized: skippedOversized,
+            truncatedByLimit: truncatedByLimit
+        )
+    }
+
+    private static func isIgnoredArchiveJunk(_ path: String) -> Bool {
+        let lower = path.lowercased()
+        if path == "yejian_meta.json" || path.hasPrefix("yejian/") || path.hasPrefix("__MACOSX/") || lower.contains("/__macosx/") {
+            return true
+        }
+        let base = (path as NSString).lastPathComponent
+        return base == ".DS_Store" || base.hasPrefix("._")
+    }
+
+    /// If someone re-zipped a DeepSeek/Nuwa backup inside a single wrapper folder (e.g. `backup/manifest.json`),
+    /// transparently strip that shared top-level folder prefix while preserving raw ZIP entry headers.
+    private static func normalizeBackupRootPrefix(_ entries: [ZipEntry]) -> [ZipEntry] {
+        if entries.contains(where: { $0.path == "manifest.json" || $0.path.lowercased().hasPrefix("chat_sessions/") }) {
+            return entries
+        }
+        let meaningful = entries.filter { !isIgnoredArchiveJunk($0.path) && !$0.path.hasSuffix("/") }
+        guard let firstSlash = meaningful.first?.path.firstIndex(of: "/") else {
+            return entries
+        }
+        let prefix = String(meaningful[0].path[...firstSlash])
+        guard meaningful.allSatisfy({ $0.path.hasPrefix(prefix) }) else {
+            return entries
+        }
+        let stripped = entries.compactMap { entry -> ZipEntry? in
+            if isIgnoredArchiveJunk(entry.path) { return nil }
+            guard entry.path.hasPrefix(prefix) else { return nil }
+            let trimmed = String(entry.path.dropFirst(prefix.count))
+            guard !trimmed.isEmpty else { return nil }
+            return ZipEntry(
+                path: trimmed,
+                rawNameData: entry.rawNameData,
+                compressionMethod: entry.compressionMethod,
+                compressedSize: entry.compressedSize,
+                uncompressedSize: entry.uncompressedSize,
+                crc32: entry.crc32,
+                localHeaderOffset: entry.localHeaderOffset
+            )
+        }
+        let looksLikeBackup = stripped.contains {
+            $0.path == "manifest.json" || $0.path.lowercased().hasPrefix("chat_sessions/")
+        }
+        return looksLikeBackup ? stripped : entries
     }
 
     static func parseZipData(
         _ data: Data,
         onProgress: ((_ sessions: Int, _ images: Int) -> Void)? = nil
     ) throws -> [ChatSession] {
-        let entries = try readCentralDirectory(from: data)
+        let entries = normalizeBackupRootPrefix(try readCentralDirectory(from: data))
         let manifest = entries.filter { $0.path == "manifest.json" }
         var isV3 = false
         if !manifest.isEmpty {
-            guard manifest.count == 1, let first = manifest.first, first.localHeaderOffset == 0,
+            guard manifest.count == 1, let first = manifest.first,
                   let object = try JSONSerialization.jsonObject(with: extractEntry(first, from: data)) as? [String: Any]
             else { throw DeepSeekZipError.invalidArchive }
             if let version = object["export_format_version"] {
@@ -56,7 +252,7 @@ enum DeepSeekZipImporter {
         for entry in entries {
             let path = entry.path.precomposedStringWithCanonicalMapping
             // Skip third-party derivative metadata (e.g. yejian / macOS resource forks) per Android 520f6e2
-            if path == "yejian_meta.json" || path.hasPrefix("yejian/") || path.hasPrefix("__MACOSX/") {
+            if isIgnoredArchiveJunk(path) || path.hasSuffix("/") {
                 continue
             }
             if entriesByNFCPath.updateValue(entry, forKey: path) != nil, isV3 {
@@ -76,7 +272,7 @@ enum DeepSeekZipImporter {
 
         for entry in entries {
             let path = entry.path
-            if path == "yejian_meta.json" || path.hasPrefix("yejian/") || path.hasPrefix("__MACOSX/") {
+            if isIgnoredArchiveJunk(path) || path.hasSuffix("/") {
                 continue
             }
             let lower = path.lowercased()
@@ -135,6 +331,18 @@ enum DeepSeekZipImporter {
 
     // MARK: - Minimal Central Directory ZIP Reader (Store=0, Deflate=8)
 
+    private static let gb18030Encoding = String.Encoding(
+        rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue))
+    )
+
+    private static func decodeZipFileName(_ raw: Data) -> String {
+        let decoded = String(data: raw, encoding: .utf8)
+            ?? String(data: raw, encoding: gb18030Encoding)
+            ?? String(data: raw, encoding: .isoLatin1)
+            ?? ""
+        return decoded.replacingOccurrences(of: "\\", with: "/")
+    }
+
     private static func readCentralDirectory(from data: Data) throws -> [ZipEntry] {
         let count = data.count
         guard count >= 22 else { throw DeepSeekZipError.invalidArchive }
@@ -169,10 +377,12 @@ enum DeepSeekZipImporter {
             let nameStart = cursor + 46
             let nameEnd = nameStart + nameLen
             guard nameEnd <= count else { break }
-            let name = String(data: data[nameStart..<nameEnd], encoding: .utf8) ?? ""
+            let rawName = data.subdata(in: nameStart..<nameEnd)
+            let name = decodeZipFileName(rawName)
             entries.append(
                 ZipEntry(
                     path: name,
+                    rawNameData: rawName,
                     compressionMethod: method,
                     compressedSize: compSize,
                     uncompressedSize: uncompSize,
@@ -195,11 +405,15 @@ enum DeepSeekZipImporter {
         let extraLen = Int(readUInt16(data, at: base + 28))
         let nameStart = base + 30
         let nameEnd = nameStart + nameLen
-        guard nameEnd <= data.count, String(data: data[nameStart..<nameEnd], encoding: .utf8) == entry.path
+        guard nameEnd <= data.count, data.subdata(in: nameStart..<nameEnd) == entry.rawNameData
         else { throw DeepSeekZipError.invalidArchive }
         let payloadStart = base + 30 + nameLen + extraLen
         let payloadEnd = payloadStart + entry.compressedSize
         guard payloadEnd <= data.count else { throw DeepSeekZipError.invalidArchive }
+        if entry.uncompressedSize == 0 {
+            guard entry.crc32 == 0 else { throw DeepSeekZipError.invalidArchive }
+            return Data()
+        }
 
         let compressed = data.subdata(in: payloadStart..<payloadEnd)
         let decoded: Data
@@ -455,7 +669,7 @@ enum DeepSeekZipImporter {
                     id: localId,
                     parentId: parentUUID,
                     role: .user,
-                    content: contentParts.joined(separator: "\n"),
+                    content: contentParts.joined(),
                     files: files,
                     status: .done,
                     createdAt: insertedAt

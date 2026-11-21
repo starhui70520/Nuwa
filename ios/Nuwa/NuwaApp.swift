@@ -34,6 +34,9 @@ struct NuwaApp: App {
             .task {
                 updateMonitor.start()
             }
+            .onOpenURL { url in
+                chatStore.handleIncomingFileURL(url)
+            }
             .onChange(of: scenePhase) { _, phase in
                 if phase == .active {
                     updateMonitor.handleForegroundActive()

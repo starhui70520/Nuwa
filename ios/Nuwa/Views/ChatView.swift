@@ -40,6 +40,7 @@ struct ChatView: View {
     @State private var wideSidebarSearchFocused = false
     @State private var holdKeyboardFreeze = false
     @State private var keyboardFreezeTask: Task<Void, Never>?
+    @State private var proximityShareCoordinator = ProximitySessionShareCoordinator()
 
     private var usesSystemSafeAreaBars: Bool {
         #if compiler(>=6.2)
@@ -108,6 +109,11 @@ struct ChatView: View {
                                 onTogglePin: { chatStore.togglePin($0) },
                                 onSetSessionsPinned: { chatStore.setSessionsPinned($0, pinned: $1) },
                                 onRenameSession: { chatStore.renameSession($0, title: $1) },
+                                onShareSession: { id in
+                                    if let session = chatStore.session(byId: id) {
+                                        ProximitySessionShareCoordinator.presentShareSheet(for: session)
+                                    }
+                                },
                                 onDeleteSession: { chatStore.deleteSession($0) },
                                 onDeleteSessions: { chatStore.deleteSessions($0) },
                                 onSearch: { await chatStore.matchingSessionIDs(query: $0) },
@@ -183,11 +189,13 @@ struct ChatView: View {
             guard chatStore.historyLoaded else { return }
             chatStore.checkPendingMigration()
             chatStore.maybeAutoBackupToIcloud(settings: settings)
+            syncProximityShare()
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 chatStore.checkPendingMigration()
                 chatStore.maybeAutoBackupToIcloud(settings: settings)
+                syncProximityShare()
             } else if phase == .background {
                 chatStore.flushPendingSave()
             }
@@ -198,11 +206,13 @@ struct ChatView: View {
             isAtBottom = true
             disclosureOverrides.removeAll()
             disclosureAnchorID = nil
+            syncProximityShare()
         }
         .onChange(of: showSettings) { _, open in
             if open || !sidebarSearchFocus.isFocused {
                 dismissKeyboard()
             }
+            syncProximityShare()
         }
         .onChange(of: drawerOpen) { wasOpen, isOpen in
             if wasOpen && !isOpen {
@@ -212,6 +222,7 @@ struct ChatView: View {
                 sidebarSearchFocus.isFocused = false
                 dismissKeyboard()
             }
+            syncProximityShare()
         }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
             if !drawerOpen && !sidebarSearchFocus.isFocused && !wideSidebarSearchFocused && holdKeyboardFreeze {
@@ -219,9 +230,49 @@ struct ChatView: View {
                 holdKeyboardFreeze = false
             }
         }
+        .onAppear {
+            syncProximityShare()
+        }
+        .onDisappear {
+            proximityShareCoordinator.update(session: nil, eligible: false)
+        }
+        .onChange(of: chatStore.activeSession?.messages.count) { _, _ in syncProximityShare() }
+        .onChange(of: chatStore.activeSession?.title) { _, _ in syncProximityShare() }
+        .onChange(of: chatStore.isGenerating) { _, _ in syncProximityShare() }
+        .onChange(of: chatStore.importingHistory) { _, _ in syncProximityShare() }
+        .onChange(of: settings.showMigrationPrompt) { _, _ in syncProximityShare() }
+        .onChange(of: previewImage != nil) { _, _ in syncProximityShare() }
+        .onChange(of: chatStore.pendingIncomingFile) { _, incoming in
+            syncProximityShare()
+            guard incoming != nil else { return }
+            dismissKeyboard()
+            if drawerOpen { drawerOpen = false }
+            if showSettings { showSettings = false }
+            if searchPanelResults != nil { searchPanelResults = nil }
+            if previewImage != nil { previewImage = nil }
+        }
         .sheet(isPresented: $showSettings) {
             SettingsView(settings: settings, chatStore: chatStore)
                 .environment(\.nuwaFontScale, fontScale)
+        }
+        .sheet(item: Binding(
+            get: { (showSettings || showMigrationWeb || searchPanelResults != nil) ? nil : chatStore.pendingIncomingFile },
+            set: { if $0 == nil { chatStore.dismissPendingIncomingFile() } }
+        )) { request in
+            IncomingFileActionSheet(
+                request: request,
+                locale: settings.locale,
+                onChat: {
+                    chatStore.attachIncomingFileToChat(request, settings: settings)
+                },
+                onImport: {
+                    chatStore.importPendingIncomingFile(request)
+                },
+                onCancel: {
+                    chatStore.dismissPendingIncomingFile()
+                }
+            )
+            .environment(\.nuwaFontScale, fontScale)
         }
         .sheet(isPresented: $showMigrationWeb) {
             DeepSeekMigrationSheet { filePath, _ in
@@ -247,7 +298,7 @@ struct ChatView: View {
         }
         .fileImporter(
             isPresented: $showZipImporter,
-            allowedContentTypes: [.zip, .json],
+            allowedContentTypes: [.zip, .json, NuwaShareTypes.sessionUTType],
             allowsMultipleSelection: false
         ) { result in
             switch result {
@@ -255,12 +306,8 @@ struct ChatView: View {
                 guard let url = urls.first else { return }
                 Task {
                     do {
-                        let count = try await chatStore.importFromFile(url)
-                        if count == 0 {
-                            chatStore.showToast("本地已是最新记录，未覆盖任何对话")
-                        } else {
-                            chatStore.showToast(count == 1 ? "已导入 1 个对话" : "已导入 \(count) 个对话")
-                        }
+                        let outcome = try await chatStore.importFromFileWithOutcome(url)
+                        chatStore.showToast(ChatStore.importSummaryToast(for: outcome, singleShare: false))
                     } catch {
                         chatStore.showToast("导入失败：\(error.localizedDescription)")
                     }
@@ -278,8 +325,17 @@ struct ChatView: View {
             case .success(let urls):
                 let targetSession = chatStore.activeSessionId
                 for url in urls {
-                    let accessed = url.startAccessingSecurityScopedResource()
                     let name = url.lastPathComponent
+                    let ext = (name as NSString).pathExtension.lowercased()
+                    if ext == NuwaShareTypes.sessionExtension {
+                        chatStore.handleIncomingFileURL(url)
+                        continue
+                    }
+                    if ext == "zip" {
+                        chatStore.handlePickedAttachmentZipURL(url, settings: settings)
+                        continue
+                    }
+                    let accessed = url.startAccessingSecurityScopedResource()
                     Task.detached(priority: .userInitiated) {
                         defer { if accessed { url.stopAccessingSecurityScopedResource() } }
                         if let data = try? Data(contentsOf: url) {
@@ -1067,6 +1123,17 @@ struct ChatView: View {
         } else {
             showSettings = true
         }
+    }
+
+    private func syncProximityShare() {
+        let eligible = !drawerOpen
+            && !showSettings
+            && !settings.showMigrationPrompt
+            && previewImage == nil
+            && chatStore.pendingIncomingFile == nil
+            && !chatStore.isGenerating
+            && !chatStore.importingHistory
+        proximityShareCoordinator.update(session: chatStore.activeSession, eligible: eligible)
     }
 
     private func sendMessage() {

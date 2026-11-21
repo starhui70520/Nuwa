@@ -11,7 +11,58 @@ enum AttachmentStore {
     static let maxCount = 50
 
     private static let layoutRecognitionExts: Set<String> = ["pdf", "doc", "docx", "ppt", "pptx"]
-    private static let imageExts: Set<String> = ["jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "bmp"]
+    private static let imageExts: Set<String> = ["jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "bmp", "tif", "tiff", "avif"]
+    private static let supportedDocumentAndCodeExts: Set<String> = [
+        // Documents & Office & E-books
+        "pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "rtf", "epub", "csv", "tsv",
+        // Images (HEIC/HEIF/BMP/TIFF/AVIF are normalized to JPEG before upload)
+        "jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "bmp", "tif", "tiff", "avif", "svg",
+        // Text, Markdown, Config, Data
+        "txt", "md", "markdown", "json", "jsonl", "json5", "jsonc", "xml", "yaml", "yml",
+        "toml", "ini", "conf", "cfg", "env", "log", "html", "htm", "css", "scss", "less",
+        "sass", "sql", "graphql", "gql", "proto", "plist", "xcconfig", "pbxproj", "tex", "bib",
+        // Source Code
+        "swift", "m", "mm", "h", "hh", "hpp", "hxx", "c", "cc", "cpp", "cxx", "cs", "csx",
+        "java", "kt", "kts", "scala", "groovy", "gradle", "go", "rs", "py", "py3", "pyi",
+        "rb", "php", "js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts", "vue", "svelte",
+        "dart", "ets", "wxml", "wxss", "wxs", "sh", "bash", "zsh", "fish", "ps1", "bat", "cmd",
+        "lua", "r", "pl", "pm", "ex", "exs", "erl", "hs", "clj", "cljs", "lisp", "el",
+        "cmake", "dockerfile", "makefile", "diff", "patch", "asm", "s", "v", "sv", "vhd", "zig",
+    ]
+    private static let unsupportedBinaryExts: Set<String> = [
+        "zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz", "dmg", "iso", "pkg", "deb", "rpm",
+        "exe", "dll", "so", "dylib", "a", "o", "bin", "class", "jar", "war", "apk", "ipa", "hap",
+        "mp3", "wav", "m4a", "aac", "flac", "ogg", "mp4", "mov", "avi", "mkv", "webm", "wmv",
+        "ttf", "otf", "woff", "woff2", "eot", "sqlite", "db", "psd", "ai", "sketch", "fig",
+    ]
+
+    static func isLikelyUTF8Text(_ data: Data) -> Bool {
+        guard !data.isEmpty, data.count <= 2 * 1024 * 1024 else { return false }
+        let sample = data.prefix(4096)
+        if sample.contains(0) { return false }
+        return String(data: sample, encoding: .utf8) != nil
+    }
+
+    static func normalizedChatFileForZipEntry(name: String, data: Data) -> (fileName: String, isImage: Bool)? {
+        let ext = fileExtension(of: name)
+        if !ext.isEmpty {
+            if unsupportedBinaryExts.contains(ext) {
+                return nil
+            }
+            if supportedDocumentAndCodeExts.contains(ext) {
+                return (name, isImageName(name))
+            }
+            if isLikelyUTF8Text(data) {
+                return (name, false)
+            }
+            return nil
+        }
+        // Extensionless UTF-8 text files (e.g., README, LICENSE, Makefile, Dockerfile)
+        if isLikelyUTF8Text(data) {
+            return ("\(name).txt", false)
+        }
+        return nil
+    }
 
     private static let thumbnailCache: NSCache<NSString, UIImage> = {
         let cache = NSCache<NSString, UIImage>()

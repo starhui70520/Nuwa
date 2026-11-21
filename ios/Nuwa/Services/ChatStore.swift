@@ -208,6 +208,16 @@ struct ImportProgress: Equatable {
     let images: Int
 }
 
+struct SessionImportOutcome: Equatable {
+    let addedCount: Int
+    let updatedCount: Int
+    let branchedCount: Int
+    let skippedCount: Int
+    let focusSessionId: UUID?
+
+    var importedCount: Int { addedCount + updatedCount + branchedCount }
+}
+
 @MainActor
 final class ChatStore: ObservableObject {
     @Published private(set) var sessions: [ChatSession] = [] {
@@ -220,6 +230,7 @@ final class ChatStore: ObservableObject {
     @Published private(set) var importingHistory = false
     @Published private(set) var importProgress: ImportProgress?
     @Published var toastMessage: String?
+    @Published var pendingIncomingFile: IncomingFileRequest?
     @Published private(set) var historyLoaded = false
     @Published private(set) var historyLoadFailed = false
 
@@ -236,6 +247,7 @@ final class ChatStore: ObservableObject {
     private var manuallyRenamedSessions: Set<UUID> = []
     private var rejectedHistoryImageIds: Set<String> = []
     private var consumingPendingMigration = false
+    private var pendingAutoImports: [IncomingFileRequest] = []
     private var committingImport = false
     private var saveDeferredByImport = false
     private var activeTimelineCache: ActiveTimeline?
@@ -256,6 +268,10 @@ final class ChatStore: ObservableObject {
     var activeSession: ChatSession? {
         guard let activeSessionId else { return nil }
         return sessions.first { $0.id == activeSessionId }
+    }
+
+    func session(byId id: UUID) -> ChatSession? {
+        sessions.first { $0.id == id }
     }
 
     struct ActiveTimeline {
@@ -1019,6 +1035,10 @@ final class ChatStore: ObservableObject {
     }
 
     func importFromFile(_ url: URL) async throws -> Int {
+        try await importFromFileWithOutcome(url).importedCount
+    }
+
+    func importFromFileWithOutcome(_ url: URL) async throws -> SessionImportOutcome {
         guard historyLoaded else { throw HistoryUnavailable() }
         guard !importingHistory else { throw HistoryImportInProgress() }
         importingHistory = true
@@ -1031,7 +1051,7 @@ final class ChatStore: ObservableObject {
             let accessed = url.startAccessingSecurityScopedResource()
             defer { if accessed { url.stopAccessingSecurityScopedResource() } }
             let data = try Data(contentsOf: url, options: .mappedIfSafe)
-            if data.count >= 4 && data[0] == 0x50 && data[1] == 0x4B && data[2] == 0x03 && data[3] == 0x04 {
+            if DeepSeekZipImporter.isZipData(data) {
                 return try DeepSeekZipImporter.parseZipData(data) { sessionsCount, imagesCount in
                     Task { @MainActor [weak self] in
                         self?.importProgress = ImportProgress(phase: .reading, sessions: sessionsCount, images: imagesCount)
@@ -1061,22 +1081,312 @@ final class ChatStore: ObservableObject {
             var succeeded = false
             defer { onFinished?(succeeded) }
             do {
-                let count = try await importFromFile(URL(fileURLWithPath: path))
+                let outcome = try await importFromFileWithOutcome(URL(fileURLWithPath: path))
                 if UserDefaults.standard.string(forKey: MigrationWebViewController.keyPendingPath) == path {
                     UserDefaults.standard.removeObject(forKey: MigrationWebViewController.keyPendingPath)
                     UserDefaults.standard.removeObject(forKey: MigrationWebViewController.keyPendingName)
                 }
-                if count == 0 {
-                    showToast("本地已是最新记录，未覆盖任何对话")
-                } else {
-                    showToast(count == 1 ? "已导入 1 个对话" : "已导入 \(count) 个对话")
-                }
+                showToast(Self.importSummaryToast(for: outcome, singleShare: false))
                 succeeded = true
             } catch {
                 AppLogStore.shared.record(.error, source: "migration.import", message: error.localizedDescription)
                 showToast("导入失败：\(error.localizedDescription)")
             }
         }
+    }
+
+    // MARK: - Incoming External Files (WeChat "Open In", Files, iOS Proximity AirDrop .nuwa)
+
+    /// Handles files opened into Nuwa via iOS `onOpenURL` (e.g. WeChat "用其他应用打开" `.zip`/`.json`,
+    /// or iOS proximity AirDrop / 碰一碰 `.nuwa` session share).
+    func handleIncomingFileURL(_ url: URL) {
+        guard url.isFileURL else { return }
+        let fileName = url.lastPathComponent.isEmpty ? "file.zip" : url.lastPathComponent
+        let ext = (fileName as NSString).pathExtension.lowercased()
+
+        // Copy synchronously while iOS grants temporary security-scoped access.
+        let accessed = url.startAccessingSecurityScopedResource()
+        let tempDir = NuwaShareTypes.incomingTempRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let stagedURL = tempDir.appendingPathComponent(fileName)
+        let copySucceeded: Bool
+        do {
+            try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+            if FileManager.default.fileExists(atPath: stagedURL.path) {
+                try FileManager.default.removeItem(at: stagedURL)
+            }
+            try FileManager.default.copyItem(at: url, to: stagedURL)
+            copySucceeded = true
+        } catch {
+            AppLogStore.shared.record(.error, source: "incoming.copy", message: error.localizedDescription)
+            try? FileManager.default.removeItem(at: tempDir)
+            copySucceeded = false
+        }
+        if accessed {
+            url.stopAccessingSecurityScopedResource()
+        }
+        if copySucceeded && url.path.contains("/Documents/Inbox/") {
+            try? FileManager.default.removeItem(at: url)
+        }
+        guard copySucceeded else {
+            showToast("无法读取外部传入的文件")
+            return
+        }
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let data = (try? Data(contentsOf: stagedURL, options: .mappedIfSafe)) ?? Data()
+            let fileSize = data.count
+            let isZipMagic = DeepSeekZipImporter.isZipData(data)
+
+            let kind: IncomingFileRequest.Kind
+            if ext == NuwaShareTypes.sessionExtension {
+                kind = .nuwaSession
+            } else if ext == "zip" || isZipMagic {
+                kind = .zipArchive
+            } else {
+                kind = .jsonDocument
+            }
+
+            var isLikelyBackup = false
+            var backupSessionCount = 0
+            var extractableFileCount = 1
+
+            if kind == .nuwaSession || kind == .zipArchive {
+                let inspection = DeepSeekZipImporter.inspectZipData(data)
+                isLikelyBackup = inspection.isNuwaOrDeepSeekBackup
+                backupSessionCount = inspection.backupSessionCount
+                extractableFileCount = inspection.extractableFileCount
+            } else if kind == .jsonDocument {
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                if let archive = try? decoder.decode(NuwaBackupArchive.self, from: data), !archive.sessions.isEmpty {
+                    isLikelyBackup = true
+                    backupSessionCount = archive.sessions.count
+                }
+            }
+
+            let request = IncomingFileRequest(
+                localURL: stagedURL,
+                tempDirectory: tempDir,
+                fileName: fileName,
+                fileSize: fileSize,
+                kind: kind,
+                isLikelyBackup: isLikelyBackup,
+                backupSessionCount: backupSessionCount,
+                extractableFileCount: extractableFileCount
+            )
+
+            await MainActor.run { [weak self] in
+                guard let self else {
+                    request.cleanup()
+                    return
+                }
+                if request.kind == .nuwaSession {
+                    if self.historyLoaded {
+                        self.runIncomingArchiveImport(request, autoSwitch: true)
+                    } else {
+                        self.pendingAutoImports.append(request)
+                    }
+                } else {
+                    self.pendingIncomingFile?.cleanup()
+                    self.pendingIncomingFile = request
+                }
+            }
+        }
+    }
+
+    func consumePendingAutoImports() {
+        guard historyLoaded, !pendingAutoImports.isEmpty else { return }
+        let queued = pendingAutoImports
+        pendingAutoImports.removeAll()
+        Task {
+            for request in queued {
+                await executeIncomingArchiveImport(request, autoSwitch: true)
+            }
+        }
+    }
+
+    func dismissPendingIncomingFile() {
+        pendingIncomingFile?.cleanup()
+        pendingIncomingFile = nil
+    }
+
+    func importPendingIncomingFile(_ request: IncomingFileRequest) {
+        if pendingIncomingFile?.id == request.id {
+            pendingIncomingFile = nil
+        }
+        runIncomingArchiveImport(request, autoSwitch: request.backupSessionCount == 1)
+    }
+
+    /// Handles the "对话" choice on an incoming `.zip` or `.json` file (unpacking readable files from ZIP
+    /// or attaching JSON directly into the current chat composer draft).
+    func attachIncomingFileToChat(_ request: IncomingFileRequest, settings: SettingsStore) {
+        if pendingIncomingFile?.id == request.id {
+            pendingIncomingFile = nil
+        }
+        guard settings.hasActiveCredential else {
+            request.cleanup()
+            showToast("请先登录 DeepSeek 账号或配置 API Key 后再添加到对话")
+            return
+        }
+        let targetSession = activeSessionId
+        let currentCount = draftStore.draft(for: targetSession).attachments.count
+        let remainingSlots = max(0, AttachmentStore.maxCount - currentCount)
+
+        if request.kind == .jsonDocument {
+            Task.detached(priority: .userInitiated) { [weak self] in
+                defer { request.cleanup() }
+                guard let data = try? Data(contentsOf: request.localURL), !data.isEmpty else {
+                    await MainActor.run { self?.showToast("无法读取文件：\(request.fileName)") }
+                    return
+                }
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    self.draftStore.addFile(
+                        data: data,
+                        fileName: request.fileName,
+                        isImage: false,
+                        for: targetSession,
+                        settings: settings,
+                        onToast: { self.showToast($0) }
+                    )
+                    self.showToast("已将「\(request.fileName)」添加到当前对话")
+                }
+            }
+            return
+        }
+
+        guard remainingSlots > 0 else {
+            request.cleanup()
+            showToast("上传文件最多支持 \(AttachmentStore.maxCount) 个")
+            return
+        }
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            defer { request.cleanup() }
+            do {
+                let data = try Data(contentsOf: request.localURL, options: .mappedIfSafe)
+                let extracted = try DeepSeekZipImporter.extractFilesForChat(data, maxFiles: remainingSlots)
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    guard !extracted.files.isEmpty else {
+                        self.showToast("压缩包内没有可直接用于对话的文档、代码或图片")
+                        return
+                    }
+                    for item in extracted.files {
+                        self.draftStore.addFile(
+                            data: item.data,
+                            fileName: item.fileName,
+                            isImage: item.isImage,
+                            for: targetSession,
+                            settings: settings,
+                            onToast: { self.showToast($0) }
+                        )
+                    }
+                    let skipped = extracted.skippedUnsupported + extracted.skippedOversized + extracted.truncatedByLimit
+                    if skipped > 0 {
+                        self.showToast("已解压并添加 \(extracted.files.count) 个文件到对话（跳过 \(skipped) 个不支持或超限项）")
+                    } else {
+                        self.showToast("已解压并添加 \(extracted.files.count) 个文件到对话")
+                    }
+                }
+            } catch {
+                await MainActor.run { [weak self] in
+                    AppLogStore.shared.record(.error, source: "zip.chatExtract", message: error.localizedDescription)
+                    self?.showToast("无法解压该压缩包（可能已加密或已损坏）")
+                }
+            }
+        }
+    }
+
+    private func runIncomingArchiveImport(_ request: IncomingFileRequest, autoSwitch: Bool) {
+        Task {
+            await executeIncomingArchiveImport(request, autoSwitch: autoSwitch)
+        }
+    }
+
+    private func executeIncomingArchiveImport(_ request: IncomingFileRequest, autoSwitch: Bool) async {
+        defer { request.cleanup() }
+        if !historyLoaded {
+            for _ in 0..<40 where !historyLoaded {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+        do {
+            let outcome = try await importFromFileWithOutcome(request.localURL)
+            if autoSwitch, let focusId = outcome.focusSessionId {
+                activeSessionId = focusId
+            }
+            showToast(Self.importSummaryToast(for: outcome, singleShare: request.kind == .nuwaSession || autoSwitch))
+        } catch {
+            AppLogStore.shared.record(.error, source: "incoming.import", message: error.localizedDescription)
+            showToast("导入失败：\(error.localizedDescription)")
+        }
+    }
+
+    func handlePickedAttachmentZipURL(_ url: URL, settings: SettingsStore) {
+        let fileName = url.lastPathComponent.isEmpty ? "archive.zip" : url.lastPathComponent
+        let accessed = url.startAccessingSecurityScopedResource()
+        let tempDir = NuwaShareTypes.incomingTempRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let stagedURL = tempDir.appendingPathComponent(fileName)
+        let copied: Bool
+        do {
+            try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+            try FileManager.default.copyItem(at: url, to: stagedURL)
+            copied = true
+        } catch {
+            try? FileManager.default.removeItem(at: tempDir)
+            copied = false
+        }
+        if accessed { url.stopAccessingSecurityScopedResource() }
+        guard copied else {
+            showToast("无法读取压缩包：\(fileName)")
+            return
+        }
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let data = (try? Data(contentsOf: stagedURL, options: .mappedIfSafe)) ?? Data()
+            let inspection = DeepSeekZipImporter.inspectZipData(data)
+            let request = IncomingFileRequest(
+                localURL: stagedURL,
+                tempDirectory: tempDir,
+                fileName: fileName,
+                fileSize: data.count,
+                kind: .zipArchive,
+                isLikelyBackup: inspection.isNuwaOrDeepSeekBackup,
+                backupSessionCount: inspection.backupSessionCount,
+                extractableFileCount: inspection.extractableFileCount
+            )
+            await MainActor.run { [weak self] in
+                guard let self else {
+                    request.cleanup()
+                    return
+                }
+                if request.isLikelyBackup {
+                    self.pendingIncomingFile?.cleanup()
+                    self.pendingIncomingFile = request
+                } else {
+                    self.attachIncomingFileToChat(request, settings: settings)
+                }
+            }
+        }
+    }
+
+    static func importSummaryToast(for outcome: SessionImportOutcome, singleShare: Bool) -> String {
+        if outcome.importedCount == 0 {
+            return "本地已是最新记录，未覆盖任何对话"
+        }
+        if singleShare && outcome.importedCount == 1 {
+            if outcome.branchedCount > 0 {
+                return "存在历史分叉，已保留「N分支·」与「D分支·」"
+            }
+            if outcome.updatedCount > 0 {
+                return "已同步更新该对话的新增记录"
+            }
+            return "已接收并导入分享对话"
+        }
+        if outcome.branchedCount > 0 {
+            return "已导入 \(outcome.importedCount) 个对话（含 \(outcome.branchedCount) 个分叉分支）"
+        }
+        return outcome.importedCount == 1 ? "已导入 1 个对话" : "已导入 \(outcome.importedCount) 个对话"
     }
 
     func importFromShareLink(_ input: String) async throws -> ChatSession {
@@ -1087,8 +1397,8 @@ final class ChatStore: ObservableObject {
         do {
             let session = try await ShareLinkImporter.fetchSharedSession(input: input)
             stopGenerating()
-            _ = try await commitImportedSessions([session])
-            activeSessionId = session.id
+            let outcome = try await commitImportedSessions([session])
+            activeSessionId = outcome.focusSessionId ?? session.id
             return session
         } catch {
             AppLogStore.shared.record(.error, source: "shareLink.import", message: error.localizedDescription)
@@ -1111,10 +1421,10 @@ final class ChatStore: ObservableObject {
         }
     }
 
-    private func commitImportedSessions(_ incoming: [ChatSession]) async throws -> Int {
+    private func commitImportedSessions(_ incoming: [ChatSession]) async throws -> SessionImportOutcome {
         if isGenerating, incoming.contains(where: { $0.id == activeSessionId }) { stopGenerating() }
         let merged = mergeSessions(incoming)
-        guard merged.changed else { return merged.count }
+        guard merged.changed else { return merged.outcome }
 
         // Keep delayed snapshots from overwriting the import while SQLite commits it.
         committingImport = true
@@ -1141,7 +1451,7 @@ final class ChatStore: ObservableObject {
         // An unrelated reply can finish while the disk write runs.
         sessions = saveDeferredByImport ? mergeSessions(incoming).sessions : snapshot
         listStore.sync(from: sessions)
-        return merged.count
+        return merged.outcome
     }
 
     private static func messageSignature(_ message: ChatMessage) -> String {
@@ -1157,32 +1467,53 @@ final class ChatStore: ObservableObject {
         return "A:\(text)"
     }
 
-    /// Computes root-to-node path signatures for every message in a session tree (`7d41c2b`),
-    /// accurately detecting whether local and imported sessions diverged.
+    /// Dual 32-bit FNV-1a rolling hash matching Android `db.ts` (`hashStep`) bit-for-bit,
+    /// compressing arbitrary-length histories into 16-hex-char digests in O(N) time & memory.
+    private static func hashStep(seed: String, text: String) -> String {
+        var h1: UInt32 = 0x811c9dc5
+        var h2: UInt32 = 0x01000193
+        for unit in seed.utf16 {
+            let c = UInt32(unit)
+            h1 = (h1 ^ c) &* 0x01000193
+            h2 = (h2 ^ (c &+ 17)) &* 0x85ebca6b
+        }
+        h1 = (h1 ^ 0x3e) &* 0x01000193
+        h2 = (h2 ^ 0x3e) &* 0x85ebca6b
+        for unit in text.utf16 {
+            let c = UInt32(unit)
+            h1 = (h1 ^ c) &* 0x01000193
+            h2 = (h2 ^ (c &+ 31)) &* 0x85ebca6b
+        }
+        return String(format: "%08x%08x", h1, h2)
+    }
+
+    /// Iterative O(N) root-to-node path hash set matching Android `db.ts` (`buildSessionPathSignatures`),
+    /// avoiding recursion stack overflow and O(N^2) string memory on long conversations.
     private static func buildSessionPathSignatures(_ session: ChatSession) -> Set<String> {
         var normalized = session
         normalized.ensureTreeNormalized()
         let byId = Dictionary(uniqueKeysWithValues: normalized.messages.map { ($0.id, $0) })
-        var memo: [UUID: String] = [:]
-        let maxDepth = normalized.messages.count
-
-        func resolve(_ message: ChatMessage, depth: Int) -> String {
-            if let cached = memo[message.id] { return cached }
-            let parentPath: String
-            if let pid = message.parentId, depth < maxDepth, let parent = byId[pid] {
-                parentPath = resolve(parent, depth: depth + 1)
-            } else {
-                parentPath = ""
-            }
-            let path = "\(parentPath)>\(messageSignature(message))"
-            memo[message.id] = path
-            return path
-        }
-
+        var memo = [UUID: String](minimumCapacity: normalized.messages.count)
         var paths = Set<String>()
         paths.reserveCapacity(normalized.messages.count)
-        for message in normalized.messages {
-            paths.insert(resolve(message, depth: 0))
+
+        for start in normalized.messages {
+            if memo[start.id] != nil { continue }
+            var chain: [ChatMessage] = []
+            var seen = Set<UUID>()
+            var cur: ChatMessage? = start
+            while let node = cur, memo[node.id] == nil, !seen.contains(node.id) {
+                seen.insert(node.id)
+                chain.append(node)
+                cur = node.parentId.flatMap { byId[$0] }
+            }
+            var parentHash = cur.flatMap { memo[$0.id] } ?? ""
+            for node in chain.reversed() {
+                let digest = hashStep(seed: parentHash, text: messageSignature(node))
+                memo[node.id] = digest
+                paths.insert(digest)
+                parentHash = digest
+            }
         }
         return paths
     }
@@ -1196,21 +1527,57 @@ final class ChatStore: ObservableObject {
         return "\(prefix)\(clean.isEmpty ? "未命名对话" : clean)"
     }
 
-    /// Protected incremental merge matching Android `v0.1.21` (`7d41c2b`):
-    /// 1. Incoming behind or equal to local -> skip without overwriting local.
-    /// 2. Incoming strictly ahead and local has no unique messages -> overwrite with incoming (preserving pin).
-    /// 3. Both local and incoming added distinct messages -> branch into `N分支·` (local) and `D分支·` (new ID).
-    private func mergeSessions(_ incoming: [ChatSession]) -> (sessions: [ChatSession], count: Int, changed: Bool) {
+    /// Preserves local attachment file references / serverIds on messages carried over when updating a session.
+    private static func carryOverLocalAttachments(from existing: ChatSession, into incomingMessages: [ChatMessage]) -> [ChatMessage] {
+        var localById: [String: FileAttachment] = [:]
+        var localByNameSize: [String: FileAttachment] = [:]
+        for msg in existing.messages where msg.role == .user {
+            for file in msg.files where file.localFileName != nil || file.serverId != nil {
+                localById[file.id] = file
+                localByNameSize["\(file.name):\(file.size)"] = file
+            }
+        }
+        guard !localById.isEmpty else { return incomingMessages }
+        return incomingMessages.map { msg in
+            guard msg.role == .user, !msg.files.isEmpty else { return msg }
+            var updated = msg
+            updated.files = msg.files.map { file in
+                guard let prev = localById[file.id] ?? localByNameSize["\(file.name):\(file.size)"] else {
+                    return file
+                }
+                var copy = file
+                if copy.localFileName == nil { copy.localFileName = prev.localFileName }
+                if copy.serverId == nil { copy.serverId = prev.serverId }
+                if copy.mimeType.isEmpty { copy.mimeType = prev.mimeType }
+                return copy
+            }
+            return updated
+        }
+    }
+
+    /// Protected incremental merge with 1:1 parity to Android `db.ts` (`mergeStaging`):
+    /// Given identical session ID:
+    /// 1. Local == Incoming -> skip without overwriting.
+    /// 2. Local newer than Incoming (local strictly ahead, incoming has no extra) -> skip without overwriting.
+    /// 3. Local behind Incoming (incoming has extra and local has no unique branch) -> import the extra messages.
+    /// 4. Partially overlapping / diverged (both sides have distinct messages) -> do NOT merge; preserve local as
+    ///    `N分支·` and create independent incoming branch with new ID as `D分支·`.
+    private func mergeSessions(_ incoming: [ChatSession]) -> (sessions: [ChatSession], outcome: SessionImportOutcome, changed: Bool) {
         var merged = sessions
         var existingById = Dictionary(uniqueKeysWithValues: merged.enumerated().map { ($1.id, $0) })
-        var importedCount = 0
+        var addedCount = 0
+        var updatedCount = 0
+        var branchedCount = 0
+        var skippedCount = 0
+        var focusSessionId: UUID?
         var changed = false
 
         for item in incoming {
             guard let idx = existingById[item.id] else {
                 existingById[item.id] = merged.count
                 merged.append(item)
-                importedCount += 1
+                addedCount += 1
+                focusSessionId = item.id
                 changed = true
                 continue
             }
@@ -1222,26 +1589,39 @@ final class ChatStore: ObservableObject {
             let incomingHasExtra = incomingPaths.contains { !localPaths.contains($0) }
 
             if !incomingHasExtra {
-                // Rule 1: Imported record is behind or equal to local -> skip.
+                // Rules 1 & 2: Local is identical to or newer than imported data -> skip without overwriting.
+                skippedCount += 1
+                focusSessionId = focusSessionId ?? existing.id
                 continue
             }
 
             if !localHasExtra {
-                // Rule 2: Imported record strictly has more than local -> overwrite cleanly, preserving pin state.
-                merged[idx].title = item.title
+                // Rule 3: Local is behind imported data -> update with incoming messages (preserving local attachments & pin).
+                let nextTitle = item.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? existing.title : item.title
+                merged[idx].title = nextTitle
                 merged[idx].rootMessageId = item.rootMessageId
-                merged[idx].messages = item.messages
+                merged[idx].messages = Self.carryOverLocalAttachments(from: existing, into: item.messages)
                 merged[idx].updatedAt = max(existing.updatedAt, item.updatedAt)
                 if existing.isPinned || item.isPinned {
                     merged[idx].isPinned = true
                     merged[idx].pinnedAt = existing.pinnedAt ?? item.pinnedAt ?? item.updatedAt
                 }
-                importedCount += 1
+                updatedCount += 1
+                focusSessionId = existing.id
                 changed = true
                 continue
             }
 
-            // Rule 3: Diverged -> preserve both as independent N/D branches.
+            // Rule 4: Both sides diverged -> do NOT merge; preserve local (`N分支·`) and incoming (`D分支·`) as 2 branches.
+            // Guard against accidental duplicate re-import of the exact same already-branched `D分支·` conversation.
+            if let existingDuplicateBranch = merged.first(where: {
+                $0.title.hasPrefix("D分支·") && Self.buildSessionPathSignatures($0) == incomingPaths
+            }) {
+                skippedCount += 1
+                focusSessionId = focusSessionId ?? existingDuplicateBranch.id
+                continue
+            }
+
             merged[idx].title = Self.withBranchPrefix(existing.title, prefix: "N分支·")
             let incomingBranched = ChatSession(
                 id: UUID(),
@@ -1255,10 +1635,18 @@ final class ChatStore: ObservableObject {
             )
             existingById[incomingBranched.id] = merged.count
             merged.append(incomingBranched)
-            importedCount += 1
+            branchedCount += 1
+            focusSessionId = incomingBranched.id
             changed = true
         }
-        return (merged, importedCount, changed)
+        let outcome = SessionImportOutcome(
+            addedCount: addedCount,
+            updatedCount: updatedCount,
+            branchedCount: branchedCount,
+            skippedCount: skippedCount,
+            focusSessionId: focusSessionId
+        )
+        return (merged, outcome, changed)
     }
 
     // MARK: - Background Serial Disk Persistence (Never Blocks Main Thread!)
@@ -1310,6 +1698,7 @@ final class ChatStore: ObservableObject {
                     self.sessions = readySessions
                     self.listStore.sync(from: readySessions)
                     self.historyLoaded = true
+                    self.consumePendingAutoImports()
                 case .failure(let error):
                     AppLogStore.shared.record(.error, source: "chatStore.load", message: error.localizedDescription)
                     self.historyLoadFailed = true

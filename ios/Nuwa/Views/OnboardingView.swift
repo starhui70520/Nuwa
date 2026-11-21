@@ -257,6 +257,38 @@ struct OnboardingScreenView: View {
             }
             .ignoresSafeArea()
         }
+        .sheet(item: Binding(
+            get: { showDeepSeekAuth ? nil : chatStore.pendingIncomingFile },
+            set: { if $0 == nil { chatStore.dismissPendingIncomingFile() } }
+        )) { request in
+            IncomingFileActionSheet(
+                request: request,
+                locale: settings.locale,
+                onChat: {
+                    chatStore.attachIncomingFileToChat(request, settings: settings)
+                },
+                onImport: {
+                    chatStore.importPendingIncomingFile(request)
+                },
+                onCancel: {
+                    chatStore.dismissPendingIncomingFile()
+                }
+            )
+            .environment(\.nuwaFontScale, fontScale)
+        }
+        .overlay(alignment: .top) {
+            if let toast = chatStore.toastMessage {
+                Text(toast)
+                    .font(NuwaFont.pill(fontScale))
+                    .foregroundStyle(Color.nuwaLabelPrimary)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 9)
+                    .nuwaGlass(in: Capsule())
+                    .padding(.top, 12)
+                    .allowsHitTesting(false)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
     }
 
     @ViewBuilder
