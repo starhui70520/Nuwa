@@ -1,14 +1,59 @@
 import { abilityAccessCtrl, common, Permissions } from '@kit.AbilityKit';
+import { audio } from '@kit.AudioKit';
 import { speechRecognizer } from '@kit.CoreSpeechKit';
+import { HarmonyCloudSpeech, describeHarmonySpeechError } from './HarmonyCloudSpeech';
+import { HarmonyOfflineEnglish } from './HarmonyOfflineEnglish';
+import { HarmonySpeechError, HarmonySpeechOptions, HarmonySpeechRoute, resolveHarmonySpeechRoute } from './HarmonySpeechOptions';
+import { encodeHarmonySpeechWav, HARMONY_ASR_MAX_BYTES, HARMONY_ASR_MAX_SECONDS, HARMONY_ASR_SAMPLE_RATE } from './HarmonySpeechWav';
 
 const MIC_PERMISSION: Permissions = 'ohos.permission.MICROPHONE';
 const MIC_PERMISSION_DENIED = 1002200012;
+const DEVICE_AUDIO_TOO_LONG = 1002200003;
+const DEVICE_START_GRACE_MS = 7000;
+const SHORT_LIMIT_MS = 60000;
+const SHORT_RESTART_DELAY_MS = 120;
+const DEVICE_FINISH_GRACE_MS = 5000;
+const RECORDING_LIMIT_MS = HARMONY_ASR_MAX_SECONDS * 1000;
+const LEVEL_INTERVAL_MS = 40;
+const DEVICE_AUDIO_FRAME_BYTES = 640;
+
+export function harmonySpeechInputLevel(pcm: ArrayBuffer): number {
+  const samples = new DataView(pcm);
+  const count = Math.floor(samples.byteLength / 2);
+  if (!count) return 0;
+  let squares = 0;
+  for (let offset = 0; offset < count * 2; offset += 2) {
+    const sample = samples.getInt16(offset, true) / 32768;
+    squares += sample * sample;
+  }
+  const db = 10 * Math.log10(squares / count);
+  return Math.max(0, Math.min(1, (db + 55) / 37));
+}
 
 class RecognitionSession {
   readonly id: string;
   engine?: speechRecognizer.SpeechRecognitionEngine;
+  capturer?: audio.AudioCapturer;
+  cloud?: HarmonyCloudSpeech;
+  english?: HarmonyOfflineEnglish;
+  route?: HarmonySpeechRoute;
+  pcm?: Uint8Array;
+  byteCount: number = 0;
+  lastLevelAt: number = 0;
   text: string = '';
+  devicePartial: string = '';
+  deviceId: string = '';
+  deviceSegments: number = 0;
+  deviceLong: boolean = true;
+  deviceExternal: boolean = false;
+  deviceFrame?: Uint8Array;
+  deviceFrameSize: number = 0;
+  deviceReady: boolean = false;
   finishing: boolean = false;
+  started: boolean = false;
+  captureStarting: boolean = false;
+  timer: number = -1;
+  limitTimer: number = -1;
 
   constructor(id: string) {
     this.id = id;
@@ -18,34 +63,71 @@ class RecognitionSession {
 export class HarmonySpeechRecognition {
   private active?: RecognitionSession;
   private opening: Promise<void> = Promise.resolve();
-  private readonly emit: (id: string, state: string, text?: string, code?: string) => void;
+  private releasing: Promise<void> = Promise.resolve();
+  private readonly emit: (id: string, state: string, text?: string, code?: HarmonySpeechError) => void;
+  private readonly onInputLevel?: (id: string, level: number) => void;
 
-  constructor(emit: (id: string, state: string, text?: string, code?: string) => void) {
+  constructor(emit: (id: string, state: string, text?: string, code?: HarmonySpeechError) => void,
+    onInputLevel?: (id: string, level: number) => void) {
     this.emit = emit;
+    this.onInputLevel = onInputLevel;
   }
 
-  start(id: string, context: common.UIAbilityContext): void {
+  start(id: string, context: common.UIAbilityContext, options?: HarmonySpeechOptions): void {
     this.cancel();
     const session = new RecognitionSession(id);
     this.active = session;
-    // The service allows only one engine. Let a cancelled pending initialization release its engine first.
-    this.opening = this.opening.then(() => this.open(session, context));
+    // Wait for cancelled initialization and device shutdown before reacquiring the microphone.
+    this.opening = this.opening.then(async (): Promise<void> => {
+      try {
+        await this.releasing;
+        await this.open(session, context, options);
+      } catch {
+        this.fail(session, 'unavailable');
+      }
+    });
   }
 
   finish(id: string): void {
     const session = this.active;
-    if (!session || session.id !== id || session.finishing) {
+    if (!session || session.id !== id) {
       return;
     }
-    if (!session.engine) {
-      this.complete(session);
+    if (session.finishing || !session.started) {
+      this.cancel(id);
+      this.emit(id, 'cancelled');
       return;
     }
     session.finishing = true;
+    this.clearTimer(session);
+    this.clearLimitTimer(session);
+    this.emit(id, 'transcribing');
+    if (session.english) {
+      void this.transcribeEnglish(session, session.english);
+      return;
+    }
+    if (session.capturer && !session.deviceExternal) {
+      void this.transcribe(session);
+      return;
+    }
+    if (!session.deviceId) {
+      this.complete(session);
+      return;
+    }
     try {
-      session.engine.finish(id);
+      if (session.deviceExternal) {
+        void this.releaseCapturer(session);
+        const frame = session.deviceFrame;
+        if (frame && session.deviceFrameSize > 0) {
+          frame.fill(0, session.deviceFrameSize);
+          session.engine?.writeAudio(session.deviceId, frame.slice());
+          session.deviceFrameSize = 0;
+        }
+      }
+      session.timer = setTimeout((): void => { this.complete(session); }, DEVICE_FINISH_GRACE_MS);
+      session.engine?.finish(session.deviceId);
     } catch {
-      this.fail(session, 'failed');
+      this.complete(session);
     }
   }
 
@@ -55,26 +137,29 @@ export class HarmonySpeechRecognition {
       return;
     }
     this.active = undefined;
-    const engine = session.engine;
-    if (engine) {
-      try {
-        engine.cancel(session.id);
-      } catch {
-        // The service may have already ended the session.
-      }
-      this.shutdown(engine);
-    }
+    this.clearTimer(session);
+    this.clearLimitTimer(session);
+    session.cloud?.cancel();
+    session.english?.cancel();
+    session.pcm = undefined;
+    this.releaseDevice(session);
+    void this.releaseCapturer(session);
   }
 
-  private async open(session: RecognitionSession, context: common.UIAbilityContext): Promise<void> {
+  private async open(session: RecognitionSession, context: common.UIAbilityContext,
+    options: HarmonySpeechOptions | undefined): Promise<void> {
     if (this.active !== session) {
       return;
     }
-    if (!canIUse('SystemCapability.AI.SpeechRecognizer')) {
+    const engine = options?.engine ?? 'native';
+    const english = (options?.locale ?? '').toLowerCase().startsWith('en');
+    session.route = engine === 'native' ? undefined : resolveHarmonySpeechRoute(options, false);
+    const nativeAvailable = canIUse('SystemCapability.AI.SpeechRecognizer');
+    const offlineEnglish = english && !session.route;
+    if (!offlineEnglish && !nativeAvailable && !session.route) {
       this.fail(session, 'unavailable');
       return;
     }
-
     try {
       const permission = await abilityAccessCtrl.createAtManager().requestPermissionsFromUser(context, [MIC_PERMISSION]);
       if (this.active !== session) {
@@ -89,13 +174,28 @@ export class HarmonySpeechRecognition {
       return;
     }
 
+    if (offlineEnglish) {
+      await this.openEnglishRecorder(session, context);
+    } else if (session.route && (engine === 'cloud' || english || !nativeAvailable)) {
+      await this.openCloudRecorder(session);
+    } else {
+      await this.openDevice(session);
+    }
+  }
+
+  private async openDevice(session: RecognitionSession, longSpeech: boolean = true,
+    external: boolean = longSpeech && !!this.onInputLevel && canIUse('SystemCapability.Multimedia.Audio.Capturer')): Promise<void> {
+    session.deviceLong = longSpeech;
+    session.deviceExternal = external;
+    session.deviceFrame = external ? new Uint8Array(DEVICE_AUDIO_FRAME_BYTES) : undefined;
+    session.deviceFrameSize = 0;
     let engine: speechRecognizer.SpeechRecognitionEngine;
     try {
-      // Core Speech Kit's on-device recognizer supports Mandarin on the compatible SDK.
-      const engineParams: speechRecognizer.CreateEngineParams = { language: 'zh-CN', online: 1 };
-      engine = await speechRecognizer.createEngine(engineParams);
+      const extraParams: Record<string, Object> = { 'recognizerMode': longSpeech ? 'long' : 'short' };
+      const params: speechRecognizer.CreateEngineParams = { language: 'zh-CN', online: 1, extraParams: extraParams };
+      engine = await speechRecognizer.createEngine(params);
     } catch {
-      this.fail(session, 'unavailable');
+      await this.fallbackOrFail(session, 'unavailable');
       return;
     }
     if (this.active !== session) {
@@ -105,39 +205,363 @@ export class HarmonySpeechRecognition {
     session.engine = engine;
     const listener: speechRecognizer.RecognitionListener = {
       onStart: (id: string, _message: string): void => {
-        if (this.active === session && id === session.id) {
-          this.emit(id, 'started');
+        if (this.currentDevice(session, engine, id) && !session.finishing) {
+          session.deviceReady = true;
+          this.clearTimer(session);
+          if (session.deviceExternal) {
+            this.opening = this.opening.then(async (): Promise<void> => {
+              if (!this.currentDevice(session, engine, id) || session.finishing) return;
+              try {
+                await this.startCapturer(session, (data: ArrayBuffer): void => {
+                  this.appendDeviceAudio(session, engine, id, data);
+                });
+              } catch {
+                await this.fallbackOrFail(session, 'unavailable');
+              }
+            });
+          } else {
+            this.beginRecording(session);
+          }
         }
       },
       onEvent: (_id: string, _event: number, _message: string): void => {},
       onResult: (id: string, result: speechRecognizer.SpeechRecognitionResult): void => {
-        if (this.active === session && id === session.id && result.isFinal) {
-          session.text += result.result;
+        if (!this.currentDevice(session, engine, id)) return;
+        if (result.isFinal) {
+          session.text += result.result || session.devicePartial;
+          session.devicePartial = '';
+        } else if (result.result) {
+          session.devicePartial = result.result;
         }
       },
       onComplete: (id: string, _message: string): void => {
-        if (id === session.id) {
-          this.complete(session);
+        if (this.currentDevice(session, engine, id)) {
+          this.finishDeviceSegment(session, engine);
         }
       },
       onError: (id: string, errorCode: number, _message: string): void => {
-        if (id === session.id) {
-          this.fail(session, errorCode === MIC_PERMISSION_DENIED ? 'permission-denied' : 'failed');
+        if (!this.currentDevice(session, engine, id)) return;
+        if (errorCode === DEVICE_AUDIO_TOO_LONG) {
+          if (session.deviceLong && session.started && !session.finishing) {
+            this.emit(session.id, 'limit');
+            this.emit(session.id, 'transcribing');
+          }
+          this.finishDeviceSegment(session, engine);
+        } else {
+          this.queueDeviceFallback(session, engine, id, errorCode === MIC_PERMISSION_DENIED ? 'permission-denied' : 'failed');
         }
       }
     };
-    // Mode 0 lets the system service record from the mic without passing audio to the WebView.
-    const extraParams: Record<string, Object> = { 'recognitionMode': 0, 'vadEnd': 2000, 'maxAudioDuration': 60000 };
-    const startParams: speechRecognizer.StartParams = {
-      sessionId: session.id,
-      audioInfo: { audioType: 'pcm', sampleRate: 16000, soundChannel: 1, sampleBit: 16 },
-      extraParams
-    };
     try {
       engine.setListener(listener);
-      engine.startListening(startParams);
+      this.startDeviceSegment(session, engine);
+    } catch {
+      await this.fallbackOrFail(session, 'failed');
+    }
+  }
+
+  private currentDevice(session: RecognitionSession, engine: speechRecognizer.SpeechRecognitionEngine, id: string): boolean {
+    return this.active === session && session.engine === engine && !!id && session.deviceId === id;
+  }
+
+  private startDeviceSegment(session: RecognitionSession, engine: speechRecognizer.SpeechRecognitionEngine): void {
+    const sequence = session.deviceSegments++;
+    const id = sequence === 0 ? session.id : session.id + '-' + sequence.toString();
+    session.deviceId = id;
+    session.deviceReady = false;
+    const extraParams: Record<string, Object> = {
+      'recognitionMode': session.deviceExternal ? 1 : 0,
+      'maxAudioDuration': session.deviceLong ? RECORDING_LIMIT_MS : SHORT_LIMIT_MS,
+    };
+    if (!session.deviceLong) extraParams['vadEnd'] = 2000;
+    const params: speechRecognizer.StartParams = {
+      sessionId: id,
+      audioInfo: { audioType: 'pcm', sampleRate: HARMONY_ASR_SAMPLE_RATE, soundChannel: 1, sampleBit: 16 },
+      extraParams: extraParams,
+    };
+    session.timer = setTimeout((): void => {
+      this.queueDeviceFallback(session, engine, id, 'unavailable', true);
+    }, DEVICE_START_GRACE_MS);
+    engine.startListening(params);
+  }
+
+  private finishDeviceSegment(session: RecognitionSession, engine: speechRecognizer.SpeechRecognitionEngine): void {
+    this.clearTimer(session);
+    session.deviceId = '';
+    if (session.finishing || session.deviceLong || !session.started) {
+      this.complete(session);
+    } else {
+      session.text += session.devicePartial;
+      session.devicePartial = '';
+      session.timer = setTimeout((): void => { this.restartShortSegment(session, engine); }, SHORT_RESTART_DELAY_MS);
+    }
+  }
+
+  private restartShortSegment(session: RecognitionSession, engine: speechRecognizer.SpeechRecognitionEngine): void {
+    this.opening = this.opening.then(async (): Promise<void> => {
+      if (this.active !== session || session.finishing || session.engine !== engine) return;
+      this.clearTimer(session);
+      try {
+        this.startDeviceSegment(session, engine);
+      } catch {
+        await this.fallbackOrFail(session, 'failed');
+      }
+    });
+  }
+
+  private queueDeviceFallback(session: RecognitionSession, engine: speechRecognizer.SpeechRecognitionEngine,
+    id: string, code: HarmonySpeechError, awaitingStart: boolean = false): void {
+    this.opening = this.opening.then(async (): Promise<void> => {
+      if (this.currentDevice(session, engine, id) && (!awaitingStart || !session.deviceReady)) {
+        try {
+          await this.fallbackOrFail(session, code);
+        } catch {
+          this.fail(session, code);
+        }
+      }
+    });
+  }
+
+  private async fallbackOrFail(session: RecognitionSession, code: HarmonySpeechError): Promise<void> {
+    if (this.active !== session) {
+      return;
+    }
+    this.clearTimer(session);
+    if (session.finishing || (session.started && code !== 'permission-denied' && (session.text || session.devicePartial))) {
+      this.complete(session);
+      return;
+    }
+    if (code !== 'permission-denied' && !session.started) {
+      this.releaseDevice(session);
+      await this.releaseCapturer(session);
+      if (this.active !== session) return;
+      if (session.deviceExternal) {
+        await this.openDevice(session, true, false);
+        return;
+      }
+      if (session.deviceLong) {
+        await this.openDevice(session, false);
+        return;
+      }
+      if (session.route) {
+        await this.openCloudRecorder(session);
+        return;
+      }
+    }
+    this.fail(session, code);
+  }
+
+  private beginRecording(session: RecognitionSession): void {
+    if (session.started) return;
+    session.started = true;
+    session.limitTimer = setTimeout((): void => { this.finishAtLimit(session); }, RECORDING_LIMIT_MS);
+    this.emit(session.id, 'started');
+  }
+
+  private finishAtLimit(session: RecognitionSession): void {
+    if (this.active !== session || !session.started || session.finishing) return;
+    this.emit(session.id, 'limit');
+    this.finish(session.id);
+  }
+
+  private async openCloudRecorder(session: RecognitionSession): Promise<void> {
+    if (this.active !== session || session.captureStarting || session.capturer) {
+      return;
+    }
+    if (!canIUse('SystemCapability.Multimedia.Audio.Capturer') ||
+      !canIUse('SystemCapability.Collaboration.RemoteCommunication')) {
+      this.fail(session, 'unavailable');
+      return;
+    }
+    session.pcm = new Uint8Array(HARMONY_ASR_MAX_BYTES);
+    try {
+      await this.startCapturer(session, (data: ArrayBuffer): void => { this.appendRecording(session, data); });
+    } catch {
+      this.fail(session, 'unavailable');
+    }
+  }
+
+  private async openEnglishRecorder(session: RecognitionSession, context: common.UIAbilityContext): Promise<void> {
+    if (!canIUse('SystemCapability.Multimedia.Audio.Capturer')) {
+      this.fail(session, 'unavailable');
+      return;
+    }
+    const recognizer = new HarmonyOfflineEnglish();
+    session.english = recognizer;
+    await recognizer.open(context);
+    if (this.active !== session) return;
+    await this.startCapturer(session, (data: ArrayBuffer): void => {
+      if (this.active !== session || session.finishing) return;
+      try {
+        this.updateLevel(session, data);
+        recognizer.write(data);
+      } catch {
+        this.fail(session, 'failed');
+      }
+    });
+  }
+
+  private async transcribeEnglish(session: RecognitionSession, recognizer: HarmonyOfflineEnglish): Promise<void> {
+    await this.releaseCapturer(session);
+    if (this.active !== session) return;
+    try {
+      session.text = await recognizer.finish();
+      this.complete(session);
     } catch {
       this.fail(session, 'failed');
+    }
+  }
+
+  private async startCapturer(session: RecognitionSession, onData: (data: ArrayBuffer) => void): Promise<void> {
+    session.captureStarting = true;
+    try {
+      const options: audio.AudioCapturerOptions = {
+        streamInfo: {
+          samplingRate: audio.AudioSamplingRate.SAMPLE_RATE_16000,
+          channels: audio.AudioChannel.CHANNEL_1,
+          sampleFormat: audio.AudioSampleFormat.SAMPLE_FORMAT_S16LE,
+          encodingType: audio.AudioEncodingType.ENCODING_TYPE_RAW,
+        },
+        capturerInfo: {
+          source: session.deviceExternal || session.english ?
+            audio.SourceType.SOURCE_TYPE_VOICE_RECOGNITION : audio.SourceType.SOURCE_TYPE_MIC,
+          capturerFlags: 0,
+        },
+      };
+      const capturer = await audio.createAudioCapturer(options);
+      session.capturer = capturer;
+      if (this.active !== session) {
+        return;
+      }
+      capturer.on('readData', onData);
+      capturer.on('audioInterrupt', (event: audio.InterruptEvent): void => {
+        if (this.active === session && session.started && !session.finishing &&
+          event.eventType === audio.InterruptType.INTERRUPT_TYPE_BEGIN &&
+          event.forceType === audio.InterruptForceType.INTERRUPT_FORCE &&
+          (event.hintType === audio.InterruptHint.INTERRUPT_HINT_STOP || event.hintType === audio.InterruptHint.INTERRUPT_HINT_PAUSE)) {
+          this.finish(session.id);
+        }
+      });
+      await capturer.start();
+      if (this.active === session) {
+        this.beginRecording(session);
+      }
+    } finally {
+      session.captureStarting = false;
+      if (this.active !== session) {
+        await this.releaseCapturer(session);
+      }
+    }
+  }
+
+  private appendDeviceAudio(session: RecognitionSession, engine: speechRecognizer.SpeechRecognitionEngine,
+    id: string, data: ArrayBuffer): void {
+    const frame = session.deviceFrame;
+    if (!frame || !this.currentDevice(session, engine, id) || session.finishing) return;
+    this.updateLevel(session, data);
+    const bytes = new Uint8Array(data);
+    let position = 0;
+    while (position < bytes.length && this.currentDevice(session, engine, id) && !session.finishing) {
+      const count = Math.min(bytes.length - position, frame.length - session.deviceFrameSize);
+      frame.set(bytes.subarray(position, position + count), session.deviceFrameSize);
+      session.deviceFrameSize += count;
+      position += count;
+      if (session.deviceFrameSize === frame.length) {
+        session.deviceFrameSize = 0;
+        try {
+          engine.writeAudio(id, frame.slice());
+        } catch {
+          this.queueDeviceFallback(session, engine, id, 'failed');
+          return;
+        }
+      }
+    }
+  }
+
+  private appendRecording(session: RecognitionSession, data: ArrayBuffer): void {
+    const pcm = session.pcm;
+    if (this.active !== session || session.finishing || !pcm) {
+      return;
+    }
+    const length = Math.min(data.byteLength, pcm.length - session.byteCount);
+    pcm.set(new Uint8Array(data, 0, length), session.byteCount);
+    session.byteCount += length;
+    this.updateLevel(session, data);
+    if (session.byteCount === pcm.length) {
+      this.finishAtLimit(session);
+    }
+  }
+
+  private updateLevel(session: RecognitionSession, data: ArrayBuffer): void {
+    const now = Date.now();
+    if (this.onInputLevel && now - session.lastLevelAt >= LEVEL_INTERVAL_MS) {
+      session.lastLevelAt = now;
+      this.onInputLevel(session.id, harmonySpeechInputLevel(data));
+    }
+  }
+
+  private async transcribe(session: RecognitionSession): Promise<void> {
+    const pcm = session.pcm;
+    const route = session.route;
+    session.pcm = undefined;
+    await this.releaseCapturer(session);
+    if (this.active !== session) {
+      return;
+    }
+    if (!pcm || !route || session.byteCount < 2) {
+      this.complete(session);
+      return;
+    }
+    try {
+      const cloud = new HarmonyCloudSpeech();
+      session.cloud = cloud;
+      session.text = await cloud.transcribe(route, encodeHarmonySpeechWav(pcm.subarray(0, session.byteCount)));
+      this.complete(session);
+    } catch (error) {
+      this.fail(session, describeHarmonySpeechError(error as Object));
+    }
+  }
+
+  private releaseCapturer(session: RecognitionSession): Promise<void> {
+    const capturer = session.capturer;
+    if (!capturer || session.captureStarting) {
+      return this.releasing;
+    }
+    session.capturer = undefined;
+    this.releasing = this.releasing.then(async (): Promise<void> => {
+      try {
+        capturer.off('readData');
+        capturer.off('audioInterrupt');
+      } catch {
+        // The audio service may already have removed the listeners.
+      }
+      try {
+        if (capturer.state === audio.AudioState.STATE_RUNNING) {
+          await capturer.stop();
+        }
+      } catch {
+        // System interruptions can stop capture first.
+      }
+      try {
+        await capturer.release();
+      } catch {
+        // Release can race with an audio service reset.
+      }
+    });
+    return this.releasing;
+  }
+
+  private clearTimer(session: RecognitionSession): void {
+    if (session.timer >= 0) {
+      clearTimeout(session.timer);
+      session.timer = -1;
+    }
+  }
+
+  private clearLimitTimer(session: RecognitionSession): void {
+    if (session.limitTimer >= 0) {
+      clearTimeout(session.limitTimer);
+      session.limitTimer = -1;
     }
   }
 
@@ -145,25 +569,38 @@ export class HarmonySpeechRecognition {
     if (this.active !== session) {
       return;
     }
-    this.active = undefined;
-    this.shutdown(session.engine);
-    this.emit(session.id, 'done', session.text.trim());
+    const transcript = (session.text + session.devicePartial).trim();
+    this.cancel(session.id);
+    this.emit(session.id, 'done', transcript);
   }
 
-  private fail(session: RecognitionSession, code: string): void {
+  private fail(session: RecognitionSession, code: HarmonySpeechError): void {
     if (this.active !== session) {
       return;
     }
-    this.active = undefined;
-    this.shutdown(session.engine);
+    this.cancel(session.id);
     this.emit(session.id, 'error', undefined, code);
   }
 
-  private shutdown(engine?: speechRecognizer.SpeechRecognitionEngine): void {
+  private releaseDevice(session: RecognitionSession): void {
+    const engine = session.engine;
+    const id = session.deviceId;
+    session.engine = undefined;
+    session.deviceId = '';
+    if (!engine) return;
     try {
-      engine?.shutdown();
+      if (id) engine.cancel(id);
     } catch {
-      // Closing an engine again after a service error is harmless.
+      // The device may have ended the session already.
+    }
+    this.shutdown(engine);
+  }
+
+  private shutdown(engine: speechRecognizer.SpeechRecognitionEngine): void {
+    try {
+      engine.shutdown();
+    } catch {
+      // The device may have released the engine after a service error.
     }
   }
 }

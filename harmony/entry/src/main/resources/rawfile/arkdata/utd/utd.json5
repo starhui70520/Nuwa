@@ -1,0 +1,18 @@
+{
+  "UniformDataTypeDeclarations": [
+    {
+      "TypeId": "com.rankchord.nuwa.session",
+      "BelongingToTypes": [
+        "general.zip-archive"
+      ],
+      "FilenameExtensions": [
+        ".nuwa"
+      ],
+      "MIMETypes": [
+        "application/vnd.rankchord.nuwa-session+zip"
+      ],
+      "Description": "Nuwa Chat Session Archive",
+      "ReferenceURL": "https://rankchord.com/nuwa"
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "name": "libnuwa_avif.so",
+  "types": "./index.d.ts",
+  "version": "1.0.0",
+  "description": "Nuwa native AVIF decoder"
+}

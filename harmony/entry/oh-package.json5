@@ -5,5 +5,8 @@
   "main": "",
   "author": "",
   "license": "MIT",
-  "dependencies": {}
+  "dependencies": {
+    "libnuwa_avif.so": "file:./src/main/cpp/types/libnuwa_avif",
+    "sherpa_onnx": "file:../vendor/sherpa_onnx-2.0.2.har"
+  }
 }

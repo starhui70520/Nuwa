@@ -1,8 +1,188 @@
 {
   "color": [
     {
+      "name": "native_composer_tooltip_bg",
+      "value": "#2C2C2E"
+    },
+    {
+      "name": "native_composer_tooltip_text",
+      "value": "#FFFFFF"
+    },
+    {
+      "name": "native_settings_balance",
+      "value": "#4D6BFE"
+    },
+    {
+      "name": "native_settings_balance_bg",
+      "value": "#1A4D6BFE"
+    },
+    {
+      "name": "native_settings_balance_low",
+      "value": "#DC2626"
+    },
+    {
+      "name": "native_settings_balance_low_bg",
+      "value": "#1ADC2626"
+    },
+    {
       "name": "start_window_background",
       "value": "#FFFFFF"
+    },
+    {
+      "name": "native_chat_bg",
+      "value": "#FFFFFF"
+    },
+    {
+      "name": "native_chat_bg_fade",
+      "value": "#D9FFFFFF"
+    },
+    {
+      "name": "native_chat_bg_clear",
+      "value": "#00FFFFFF"
+    },
+    {
+      "name": "native_chat_sidebar",
+      "value": "#F9FAFB"
+    },
+    {
+      "name": "native_chat_sidebar_clear",
+      "value": "#00F9FAFB"
+    },
+    {
+      "name": "native_chat_surface",
+      "value": "#FFFFFF"
+    },
+    {
+      "name": "native_chat_primary",
+      "value": "#0F1115"
+    },
+    {
+      "name": "native_chat_secondary",
+      "value": "#61666B"
+    },
+    {
+      "name": "native_chat_action",
+      "value": "#81858C"
+    },
+    {
+      "name": "native_read_aloud_loading",
+      "value": "#D4D4D4"
+    },
+    {
+      "name": "native_read_aloud_playing",
+      "value": "#3964FE"
+    },
+    {
+      "name": "native_chat_caption",
+      "value": "#ADB2B8"
+    },
+    {
+      "name": "native_chat_bubble",
+      "value": "#EDF3FE"
+    },
+    {
+      "name": "native_chat_blue",
+      "value": "#3964FE"
+    },
+    {
+      "name": "native_chat_blue_text",
+      "value": "#3964FE"
+    },
+    {
+      "name": "native_chat_selected",
+      "value": "#1A3964FE"
+    },
+    {
+      "name": "native_chat_active_session",
+      "value": "#E4EDFD"
+    },
+    {
+      "name": "native_chat_field",
+      "value": "#F1F3F5"
+    },
+    {
+      "name": "native_chat_stroke",
+      "value": "#14000000"
+    },
+    {
+      "name": "native_attachment_border",
+      "value": "#1A000000"
+    },
+    {
+      "name": "native_chat_editor_button_border",
+      "value": "#1A000000"
+    },
+    {
+      "name": "native_chat_table_header_border",
+      "value": "#1F000000"
+    },
+    {
+      "name": "native_chat_inline_code",
+      "value": "#EBEEF2"
+    },
+    {
+      "name": "native_chat_code_banner",
+      "value": "#F9FAFB"
+    },
+    {
+      "name": "native_chat_code_surface",
+      "value": "#F9FAFB"
+    },
+    {
+      "name": "native_chat_citation_bg",
+      "value": "#F5F6F7"
+    },
+    {
+      "name": "native_chat_citation_text",
+      "value": "#81858C"
+    },
+    {
+      "name": "native_chat_glass_stroke",
+      "value": "#99FFFFFF"
+    },
+    {
+      "name": "native_chat_glass",
+      "value": "#8CFFFFFF"
+    },
+    {
+      "name": "native_immersive_tint",
+      "value": "#26FFFFFF"
+    },
+    {
+      "name": "native_immersive_composer_tint",
+      "value": "#A6FFFFFF"
+    },
+    {
+      "name": "native_glass_rim",
+      "value": "#1A000000"
+    },
+    {
+      "name": "native_glass_focus_rim",
+      "value": "#733964FE"
+    },
+    {
+      "name": "native_glass_sheen",
+      "value": "#33FFFFFF"
+    },
+    {
+      "name": "native_glass_shadow",
+      "value": "#12000000"
+    },
+    {
+      "name": "native_glass_composer_shadow",
+      "value": "#14000000"
+    },
+    {
+      "name": "native_chat_drag_mask",
+      "value": "#B3FFFFFF"
+    },
+    {
+      "name": "native_chat_toast",
+      "value": "#353638"
+    },
+    {
+      "name": "native_chat_error",
+      "value": "#EC1313"
     }
   ]
 }
