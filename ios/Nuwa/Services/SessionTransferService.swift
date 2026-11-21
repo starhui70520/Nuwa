@@ -115,9 +115,11 @@ final class ProximitySessionShareCoordinator: NSObject, UIActivityItemsConfigura
     private var cachedKey: String?
     private var cachedConfiguration: UIActivityItemsConfiguration?
 
-    var activityItemsConfiguration: (any UIActivityItemsConfigurationReading)? {
-        guard let session = snapshotBox.currentShareableSession() else { return nil }
-        return cachedConfiguration ?? Self.makeConfiguration(for: session, snapshotBox: snapshotBox)
+    nonisolated var activityItemsConfiguration: (any UIActivityItemsConfigurationReading)? {
+        MainActor.assumeIsolated {
+            guard let session = snapshotBox.currentShareableSession() else { return nil }
+            return cachedConfiguration ?? Self.makeConfiguration(for: session, snapshotBox: snapshotBox)
+        }
     }
 
     func update(session: ChatSession?, eligible: Bool) {

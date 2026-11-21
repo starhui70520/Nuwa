@@ -1236,7 +1236,9 @@ final class ChatStore: ObservableObject {
             Task.detached(priority: .userInitiated) { [weak self] in
                 defer { request.cleanup() }
                 guard let data = try? Data(contentsOf: request.localURL), !data.isEmpty else {
-                    await MainActor.run { self?.showToast("无法读取文件：\(request.fileName)") }
+                    await MainActor.run { [weak self] in
+                        self?.showToast("无法读取文件：\(request.fileName)")
+                    }
                     return
                 }
                 await MainActor.run { [weak self] in
