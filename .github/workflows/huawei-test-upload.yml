@@ -37,6 +37,11 @@ on:
         required: false
         default: ''
         type: string
+      submit_version_id:
+        description: 'Optional existing Huawei invite-test versionId to submit directly (skips build & upload)'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -95,6 +100,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up pnpm
+        if: inputs.submit_version_id == ''
         uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 12.6.0
@@ -103,10 +109,17 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
-          cache: pnpm
-          cache-dependency-path: chat-demo/pnpm-lock.yaml
+
+      - name: Submit existing Huawei invite-test version
+        if: inputs.submit_version_id != ''
+        env:
+          HUAWEI_APP_ID: ${{ vars.HUAWEI_APP_ID }}
+          HUAWEI_SERVICE_ACCOUNT_JSON: ${{ secrets.HUAWEI_SERVICE_ACCOUNT_JSON }}
+          HUAWEI_SUBMIT_VERSION_ID: ${{ inputs.submit_version_id }}
+        run: node .github/scripts/upload-huawei-test-package.mjs
 
       - name: Configure version code and unsigned APP build
+        if: inputs.submit_version_id == ''
         id: build-config
         run: |
           echo "node=$(command -v node)" >> "$GITHUB_OUTPUT"
@@ -163,6 +176,7 @@ jobs:
           NODE
 
       - name: Check dependencies and stage native Markdown runtimes
+        if: inputs.submit_version_id == ''
         working-directory: chat-demo
         run: |
           pnpm install --frozen-lockfile
@@ -175,23 +189,27 @@ jobs:
           node ../harmony/scripts/stage-legacy-migration.mjs
 
       - name: Set up Java 17
+        if: inputs.submit_version_id == ''
         uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Install HarmonyOS build dependencies
+        if: inputs.submit_version_id == ''
         run: |
           sudo apt-get update
           sudo apt-get install -y libgl1-mesa-dev jq
 
       - name: Set up HarmonyOS CLI tools
+        if: inputs.submit_version_id == ''
         uses: ErBWs/setup-ohos@4dbb63025116eb6165ceac58a4bf47cbdc5ac721 # v2
         with:
           version: 26.0.0.821
           cache: true
 
       - name: Build release APP pack
+        if: inputs.submit_version_id == ''
         working-directory: harmony
         env:
           NODE_24: ${{ steps.build-config.outputs.node }}
@@ -201,6 +219,7 @@ jobs:
           hvigorw assembleApp --mode project -p product=default -p buildMode=release --no-daemon
 
       - name: Sign and verify release APP pack
+        if: inputs.submit_version_id == ''
         env:
           HUAWEI_RELEASE_P12_BASE64: ${{ secrets.HUAWEI_RELEASE_P12_BASE64 }}
           HUAWEI_RELEASE_CER_BASE64: ${{ secrets.HUAWEI_RELEASE_CER_BASE64 }}
@@ -265,6 +284,7 @@ jobs:
           verified=true
 
       - name: Upload to the Huawei testing area
+        if: inputs.submit_version_id == ''
         env:
           NODE_24: ${{ steps.build-config.outputs.node }}
           HUAWEI_APP_ID: ${{ vars.HUAWEI_APP_ID }}

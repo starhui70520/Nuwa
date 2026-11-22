@@ -97,8 +97,24 @@ async function requestApi(fetchImpl, token, label, path, query, body, { method, 
   if (!response.ok) {
     const errText = await response.text().catch(() => '')
     const detail = safeMessage(errText)
+    const diagHeaders = []
+    for (const [k, v] of response.headers.entries()) {
+      const lower = k.toLowerCase()
+      if (
+        lower.startsWith('x-') ||
+        lower === 'www-authenticate' ||
+        lower === 'content-type' ||
+        lower === 'retcode' ||
+        lower === 'errcode'
+      ) {
+        if (!lower.includes('token') && !lower.includes('auth-key') && !lower.includes('secret')) {
+          diagHeaders.push(`${k}=${safeMessage(v)}`)
+        }
+      }
+    }
+    const headerNote = diagHeaders.length > 0 ? ` [${diagHeaders.join('; ')}]` : ''
     throw new UploadError(
-      `${label} failed with HTTP ${response.status}${detail ? `: ${detail}` : ''}.`,
+      `${label} failed with HTTP ${response.status}${detail ? `: ${detail}` : ''}${headerNote}.`,
       response.status === 408 || response.status === 429 || response.status >= 500,
     )
   }
@@ -334,18 +350,41 @@ async function resolveHuaweiTestGroups(fetchImpl, token, appId, requestedFilter)
     return internalGroups
   }
 
-  let matched = externalGroups.filter((g) => wanted.has(String(g?.groupName ?? '').trim().toLowerCase()))
+  const internalGroups = await listHuaweiTestGroups(fetchImpl, token, appId, 1).catch(() => [])
+  const seenIds = new Set()
+  const allGroups = [...externalGroups, ...internalGroups].filter((g) => {
+    const id = String(g?.groupId ?? '')
+    if (!id || seenIds.has(id)) return false
+    seenIds.add(id)
+    return true
+  })
+  const matched = allGroups.filter((g) => wanted.has(String(g?.groupName ?? '').trim().toLowerCase()))
   if (matched.length === 0) {
-    const internalGroups = await listHuaweiTestGroups(fetchImpl, token, appId, 1).catch(() => [])
-    matched = internalGroups.filter((g) => wanted.has(String(g?.groupName ?? '').trim().toLowerCase()))
-  }
-  if (matched.length === 0) {
-    const available = externalGroups.map((g) => g?.groupName).filter(Boolean).join(', ') || '(none)'
+    const available = allGroups.map((g) => g?.groupName).filter(Boolean).join(', ') || '(none)'
     throw new UploadError(
-      `Requested Huawei test group "${requestedFilter}" was not found. Available external groups: ${available}.`,
+      `Requested Huawei test group "${requestedFilter}" was not found. Available groups: ${available}.`,
     )
   }
   return matched
+}
+
+export async function submitExistingInviteTestVersion({
+  appId,
+  versionId,
+  token,
+  fetchImpl = fetch,
+  progress = console.log,
+}) {
+  await requestApi(
+    fetchImpl,
+    token,
+    'Submitting Huawei invite-test version for review',
+    '/api/publish/v2/test/app/version/submit',
+    { appId },
+    { versionId },
+  )
+  progress(`Submitted Huawei invite-test version ${versionId} for review.`)
+  return { versionId }
 }
 
 export async function submitInviteTestVersion({
@@ -430,36 +469,59 @@ export async function submitInviteTestVersion({
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    if (process.argv.length !== 3) {
-      throw new UploadError('Usage: node .github/scripts/upload-huawei-test-package.mjs <signed.app>')
-    }
-    const packageId = await uploadTestPackage(process.argv[2])
-    console.log(`Huawei test package ${packageId} passed analysis and is ready in the testing package inventory.`)
-    if (process.env.HUAWEI_SUBMIT_INVITE_TEST === 'true') {
+    const existingVersionId = process.env.HUAWEI_SUBMIT_VERSION_ID?.trim()
+    if (existingVersionId) {
       const appId = process.env.HUAWEI_APP_ID?.trim()
+      if (!/^\d{1,32}$/.test(appId ?? '')) {
+        throw new UploadError('Set HUAWEI_APP_ID to the numeric App ID from HarmonyOS Developer Center.')
+      }
       const token = createServiceToken(process.env.HUAWEI_SERVICE_ACCOUNT_JSON)
-      const selfDetect = process.env.HUAWEI_ONSHELF_SELF_DETECT === '1' || process.env.HUAWEI_ONSHELF_SELF_DETECT === 'true' ? 1 : 0
-      const submitted = await submitInviteTestVersion({
-        appId,
-        packageId,
-        token,
-        testDesc: process.env.HUAWEI_TEST_DESC || '',
-        groupFilter: process.env.HUAWEI_TEST_GROUP || '',
-        onshelfSelfDetect: selfDetect,
-      })
+      await submitExistingInviteTestVersion({ appId, versionId: existingVersionId, token })
       if (process.env.GITHUB_STEP_SUMMARY) {
         const { appendFileSync } = await import('node:fs')
         appendFileSync(
           process.env.GITHUB_STEP_SUMMARY,
           [
-            `- Invite-test versionId: \`${submitted.versionId}\``,
-            `- Package ID: \`${packageId}\``,
-            `- Test group(s): \`${submitted.groupNames}\``,
-            `- On-shelf self-detect: \`${submitted.onshelfSelfDetect}\``,
-            `- Status: submitted for Huawei invite-test review`,
+            '### Huawei testing area',
+            '',
+            `- Invite-test versionId: \`${existingVersionId}\``,
+            '- Status: submitted for Huawei invite-test review',
             '',
           ].join('\n'),
         )
+      }
+    } else {
+      if (process.argv.length !== 3) {
+        throw new UploadError('Usage: node .github/scripts/upload-huawei-test-package.mjs <signed.app>')
+      }
+      const packageId = await uploadTestPackage(process.argv[2])
+      console.log(`Huawei test package ${packageId} passed analysis and is ready in the testing package inventory.`)
+      if (process.env.HUAWEI_SUBMIT_INVITE_TEST === 'true') {
+        const appId = process.env.HUAWEI_APP_ID?.trim()
+        const token = createServiceToken(process.env.HUAWEI_SERVICE_ACCOUNT_JSON)
+        const selfDetect = process.env.HUAWEI_ONSHELF_SELF_DETECT === '1' || process.env.HUAWEI_ONSHELF_SELF_DETECT === 'true' ? 1 : 0
+        const submitted = await submitInviteTestVersion({
+          appId,
+          packageId,
+          token,
+          testDesc: process.env.HUAWEI_TEST_DESC || '',
+          groupFilter: process.env.HUAWEI_TEST_GROUP || '',
+          onshelfSelfDetect: selfDetect,
+        })
+        if (process.env.GITHUB_STEP_SUMMARY) {
+          const { appendFileSync } = await import('node:fs')
+          appendFileSync(
+            process.env.GITHUB_STEP_SUMMARY,
+            [
+              `- Invite-test versionId: \`${submitted.versionId}\``,
+              `- Package ID: \`${packageId}\``,
+              `- Test group(s): \`${submitted.groupNames}\``,
+              `- On-shelf self-detect: \`${submitted.onshelfSelfDetect}\``,
+              `- Status: submitted for Huawei invite-test review`,
+              '',
+            ].join('\n'),
+          )
+        }
       }
     }
   } catch (error) {
