@@ -32,6 +32,7 @@ struct ChatTimeline<Row: View>: View {
     let streamingCoordinator: TimelineStreamingCoordinator
     let animateBoundaryJumps: Bool
     let latestLabel: String
+    let onBackgroundTap: () -> Void
     @ViewBuilder let row: (ChatMessage) -> Row
 
     @State private var latestCommand = 0
@@ -81,6 +82,7 @@ struct ChatTimeline<Row: View>: View {
             disclosureAnchorToken: disclosureAnchorToken,
             streamingCoordinator: streamingCoordinator,
             animateBoundaryJumps: animateBoundaryJumps && !reduceMotion,
+            onBackgroundTap: onBackgroundTap,
             row: row
         )
         #if compiler(>=6.2)
@@ -112,6 +114,7 @@ private struct TimelineCollection<Row: View>: UIViewRepresentable {
     let disclosureAnchorToken: Int
     let streamingCoordinator: TimelineStreamingCoordinator
     let animateBoundaryJumps: Bool
+    let onBackgroundTap: () -> Void
     let row: (ChatMessage) -> Row
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -164,7 +167,7 @@ private struct TimelineCollection<Row: View>: UIViewRepresentable {
     }
 
     @MainActor
-    final class Coordinator: NSObject, UICollectionViewDelegate {
+    final class Coordinator: NSObject, UICollectionViewDelegate, UIGestureRecognizerDelegate {
         private var input: TimelineCollection
         private var renderedMessages: [ChatMessage] = []
         private var indices: [UUID: Int] = [:]
@@ -178,6 +181,10 @@ private struct TimelineCollection<Row: View>: UIViewRepresentable {
 
         func connect(_ view: TimelineCollectionView) {
             view.delegate = self
+            let backgroundTap = UITapGestureRecognizer(target: self, action: #selector(didTapBackground))
+            backgroundTap.cancelsTouchesInView = false
+            backgroundTap.delegate = self
+            view.addGestureRecognizer(backgroundTap)
             view.onDisclosureSettled = { [weak self, weak view] following in
                 guard let self, let view else { return }
                 self.publish(following, from: view)
@@ -188,6 +195,19 @@ private struct TimelineCollection<Row: View>: UIViewRepresentable {
             dataSource = UICollectionViewDiffableDataSource(collectionView: view) { view, indexPath, id in
                 view.dequeueConfiguredReusableCell(using: registration, for: indexPath, item: id)
             }
+        }
+
+        @objc private func didTapBackground() {
+            input.onBackgroundTap()
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            var hitView = touch.view
+            while let view = hitView, view !== gestureRecognizer.view {
+                if view is UICollectionViewCell { return false }
+                hitView = view.superview
+            }
+            return true
         }
 
         func update(_ updated: TimelineCollection, view: TimelineCollectionView) {

@@ -66,6 +66,15 @@ struct ChatComposerView: View {
                         .frame(minHeight: max(38, 22 + 16 * fontScale), alignment: .topLeading)
                         .padding(.horizontal, 6)
                         .padding(.top, 4)
+                        .background {
+                            ComposerTouchProbeOverlay(
+                                isEnabled: allowPressEffect,
+                                onPressChange: { pressing = $0 },
+                                onTapFocus: {
+                                    if !isFocused { isFocused = true }
+                                }
+                            )
+                        }
                 }
 
                 // Bottom action row — lightweight crisp native controls inside ONE Liquid Glass card
@@ -116,36 +125,23 @@ struct ChatComposerView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 12)
             .background {
-                ComposerTouchProbeOverlay(
-                    isEnabled: allowPressEffect && !isFocused && !isRecording,
-                    hasAttachments: !attachments.isEmpty,
-                    onPressChange: { active in
-                        if pressing != active {
-                            pressing = active
-                        }
-                    },
-                    onTapFocus: {
-                        if !isFocused {
-                            isFocused = true
-                        }
+                // Keep the text editor's hit area and selection geometry stationary.
+                Color.clear
+                    .nuwaGlassCard(cornerRadius: 28, tint: colorScheme == .dark ? .white.opacity(0.08) : nil)
+                    .animation(pressing ? .easeOut(duration: 0.065) : .spring(duration: 0.34, bounce: 0.34)) { card in
+                        card
+                            .brightness(pressing ? (colorScheme == .dark ? 0.035 : -0.015) : 0)
+                            .scaleEffect(pressing && !reduceMotion ? 0.96 : 1)
                     }
-                )
-            }
-            .nuwaGlassCard(cornerRadius: 28, tint: colorScheme == .dark ? .white.opacity(0.08) : nil)
-            .animation(pressing ? .easeOut(duration: 0.075) : .spring(duration: 0.38, bounce: 0.36)) { card in
-                card
-                    .brightness(pressing ? (colorScheme == .dark ? 0.035 : -0.015) : 0)
-                    .scaleEffect(pressing && !reduceMotion ? 0.97 : 1)
+                    .allowsHitTesting(false)
             }
             .contentShape(RoundedRectangle(cornerRadius: 28))
         }
         .padding(.horizontal, 22)
         .padding(.top, 6)
         .padding(.bottom, 10)
-        .onChange(of: isRecording) { _, recording in
-            if recording && pressing {
-                pressing = false
-            }
+        .onChange(of: allowPressEffect && !isRecording) { _, enabled in
+            if !enabled { pressing = false }
         }
         .photosPicker(
             isPresented: $showPhotoPicker,
@@ -379,12 +375,9 @@ private struct VoiceSpectrumBar: View {
     }
 }
 
-/// Observes touches on the unfocused composer text zone via a non-interfering window gesture recognizer
-/// so tapping directly on the UITextView triggers an instant tactile press-down bounce on unfocused -> focused,
-/// while long-pressing or selecting text in a focused composer NEVER triggers the press shrink.
+/// Observes the text area without intercepting the editor's native touch gestures.
 private struct ComposerTouchProbeOverlay: UIViewRepresentable {
     let isEnabled: Bool
-    let hasAttachments: Bool
     let onPressChange: (Bool) -> Void
     let onTapFocus: () -> Void
 
@@ -394,7 +387,6 @@ private struct ComposerTouchProbeOverlay: UIViewRepresentable {
         view.isUserInteractionEnabled = false
         view.update(
             isEnabled: isEnabled,
-            hasAttachments: hasAttachments,
             onPressChange: onPressChange,
             onTapFocus: onTapFocus
         )
@@ -404,7 +396,6 @@ private struct ComposerTouchProbeOverlay: UIViewRepresentable {
     func updateUIView(_ uiView: ComposerTouchProbeView, context: Context) {
         uiView.update(
             isEnabled: isEnabled,
-            hasAttachments: hasAttachments,
             onPressChange: onPressChange,
             onTapFocus: onTapFocus
         )
@@ -429,13 +420,10 @@ private final class ComposerTouchProbeView: UIView {
 
     func update(
         isEnabled: Bool,
-        hasAttachments: Bool,
         onPressChange: @escaping (Bool) -> Void,
         onTapFocus: @escaping () -> Void
     ) {
-        recognizer.targetView = self
         recognizer.isProbeEnabled = isEnabled
-        recognizer.hasAttachments = hasAttachments
         recognizer.onPressChange = onPressChange
         recognizer.onTapFocus = onTapFocus
     }
@@ -447,7 +435,7 @@ private final class ComposerTouchProbeView: UIView {
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        recognizer.view?.removeGestureRecognizer(recognizer)
+        detachRecognizer()
         if let window {
             window.addGestureRecognizer(recognizer)
         }
@@ -457,13 +445,12 @@ private final class ComposerTouchProbeView: UIView {
 private final class ComposerPressRecognizer: UIGestureRecognizer, UIGestureRecognizerDelegate {
     weak var targetView: UIView?
     var isProbeEnabled = true
-    var hasAttachments = false
     var onPressChange: ((Bool) -> Void)?
     var onTapFocus: (() -> Void)?
 
     private var startWindowPoint: CGPoint = .zero
     private var pressStartTime: CFTimeInterval = 0
-    private var isPressing = false
+    private var activeTouch: UITouch?
     private var releaseWorkItem: DispatchWorkItem?
 
     init() {
@@ -495,93 +482,57 @@ private final class ComposerPressRecognizer: UIGestureRecognizer, UIGestureRecog
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard activeTouch == nil else { return }
         guard isProbeEnabled,
               let targetView,
               targetView.window != nil,
               !targetView.isHidden,
               targetView.alpha > 0.01,
               touches.count == 1,
-              let touch = touches.first
+              let touch = touches.first,
+              targetView.bounds.contains(touch.location(in: targetView))
         else {
             state = .failed
             return
         }
 
-        let localPoint = touch.location(in: targetView)
-        guard targetView.bounds.contains(localPoint) else {
-            state = .failed
-            return
-        }
-
-        // Exclude bottom action bar (thinking/search/attach/voice/send buttons have their own tactile feedback)
-        if localPoint.y >= targetView.bounds.height - 54 {
-            state = .failed
-            return
-        }
-
-        // Exclude top draft attachment strip when attachments are visible
-        if hasAttachments && localPoint.y < 72 {
-            state = .failed
-            return
-        }
-
-        // Exclude any UIControl or non-text UIScrollView
-        var current = touch.view
-        while let v = current {
-            if v is UIControl {
-                state = .failed
-                return
-            }
-            if v is UIScrollView && !(v is UITextView) {
-                state = .failed
-                return
-            }
-            if v === targetView.window { break }
-            current = v.superview
-        }
-
         cancelPendingRelease()
+        activeTouch = touch
         startWindowPoint = touch.location(in: nil)
         pressStartTime = CACurrentMediaTime()
-        isPressing = true
-        state = .began
         onPressChange?(true)
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
-        guard isPressing, let touch = touches.first else { return }
+        guard let touch = activeTouch, touches.contains(touch) else { return }
         let current = touch.location(in: nil)
         if hypot(current.x - startWindowPoint.x, current.y - startWindowPoint.y) > 16 {
             endPress(immediately: true, focus: false)
-            state = .cancelled
+            state = .failed
         }
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
-        guard isPressing else {
-            state = .failed
-            return
-        }
-        endPress(immediately: false, focus: true)
-        state = .ended
+        guard let touch = activeTouch, touches.contains(touch) else { return }
+        endPress(immediately: false, focus: isProbeEnabled)
+        state = .failed
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
-        guard isPressing else {
-            state = .failed
-            return
-        }
-        endPress(immediately: false, focus: false)
-        state = .cancelled
+        guard let touch = activeTouch, touches.contains(touch) else { return }
+        endPress(immediately: true, focus: false)
+        state = .failed
     }
 
     override func reset() {
         super.reset()
-        isPressing = false
+        if activeTouch != nil {
+            endPress(immediately: true, focus: false)
+        }
     }
 
     private func endPress(immediately: Bool, focus: Bool) {
-        isPressing = false
+        activeTouch = nil
         cancelPendingRelease()
 
         if focus {
@@ -594,11 +545,12 @@ private final class ComposerPressRecognizer: UIGestureRecognizer, UIGestureRecog
         }
 
         let elapsed = CACurrentMediaTime() - pressStartTime
-        let remaining = max(0, 0.068 - elapsed)
+        let remaining = max(0, 0.085 - elapsed)
         if remaining <= 0.004 {
             onPressChange?(false)
         } else {
             let item = DispatchWorkItem { [weak self] in
+                self?.releaseWorkItem = nil
                 self?.onPressChange?(false)
             }
             releaseWorkItem = item

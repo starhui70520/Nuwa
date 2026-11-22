@@ -749,9 +749,7 @@ struct ChatView: View {
         .padding(.bottom, usesSystemSafeAreaBars ? 0 : bottomSafe + composerHeight)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
-        .onTapGesture {
-            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-        }
+        .onTapGesture(perform: dismissKeyboard)
     }
 
     private func messageList(_ timeline: ChatStore.ActiveTimeline, topSafe: CGFloat, bottomSafe: CGFloat) -> some View {
@@ -780,7 +778,8 @@ struct ChatView: View {
             disclosureAnchorToken: disclosureAnchorToken,
             streamingCoordinator: streamingCoordinator,
             animateBoundaryJumps: messages.count <= 240,
-            latestLabel: settings.locale == .enUS ? "Scroll to latest" : "跳到最新消息"
+            latestLabel: settings.locale == .enUS ? "Scroll to latest" : "跳到最新消息",
+            onBackgroundTap: dismissKeyboard
         ) { message in
             Group {
                 if message.id == last?.id && message.isStreaming && chatStore.isGenerating {
@@ -798,6 +797,12 @@ struct ChatView: View {
             .frame(maxWidth: 748)
             .frame(maxWidth: .infinity)
             .padding(.horizontal, 24)
+            .background {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture(perform: dismissKeyboard)
+                    .accessibilityHidden(true)
+            }
         }
     }
 
