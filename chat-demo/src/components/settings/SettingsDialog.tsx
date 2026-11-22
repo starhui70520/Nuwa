@@ -950,7 +950,19 @@ const ApiProviderSettings = () => {
               { value: 'openai', label: t('apiProtocolOpenAI') },
               { value: 'anthropic', label: t('apiProtocolAnthropic') },
             ]}
-            onChange={(value) => setApiProtocol(value as ApiProtocol)}
+            onChange={(value) => {
+              const nextProtocol = value as ApiProtocol
+              setApiProtocol(nextProtocol)
+              const base = apiBaseUrl.trim().toLowerCase()
+              const model = apiModel.trim()
+              if (
+                nextProtocol === 'anthropic' &&
+                (!base || base.includes('api.deepseek.com')) &&
+                (!model || model === 'deepseek-chat')
+              ) {
+                setApiModel('deepseek-flash')
+              }
+            }}
           />
         }
       />

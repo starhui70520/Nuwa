@@ -248,6 +248,22 @@ export const en = {
   uploadParseFailed: 'Parsing failed',
   uploadFileCountLimit: 'Uploaded file limit reached ({limit} files). ',
   uploadStorageLimit: 'Uploaded file storage limit reached ({limit} GB). ',
+  uploadFileCountLimitReply:
+    'Upload failed: uploaded file limit reached ({limit} files). Delete old files and try again.',
+  uploadStorageLimitReply:
+    'Upload failed: uploaded file storage limit reached ({limit} GB). Delete old files and try again.',
+  uploadParseFailedDetail:
+    'Upload failed: the server could not parse this file. Check its format or size and try again.',
+  uploadTooLargeDetail:
+    'Upload failed: file exceeds the server size limit (HTTP 413). Compress and try again.',
+  uploadRateLimitedDetail: 'Upload failed: too many requests (HTTP 429). Please try again later.',
+  uploadServerBusyDetail: 'Upload failed: server busy (HTTP {status}). Please try again later.',
+  uploadNetworkErrorDetail:
+    'Upload failed: network error. Check your connection or API Base URL and try again.',
+  uploadFailedWithStatus: 'Upload failed (HTTP {status}): {detail}',
+  uploadFailedWithStatusOnly: 'Upload failed (HTTP {status})',
+  uploadFailedWithDetail: 'Upload failed: {detail}',
+  replyHttpFailed: 'Request failed (HTTP {status})',
   uploadDeleteFiles: 'Delete files',
   dragFileToUpload: 'Drop files here to upload',
   dragFileDesc: 'Up to {count} files, {size} MB each',

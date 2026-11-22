@@ -15,12 +15,25 @@ enum AIClientError: LocalizedError {
     case missingConfiguration
     case invalidURL
     case httpError(Int, String)
+    case uploadFailed(String)
     case streamError(String)
     case interruptedStream
     case unsupportedImage(historyFileIds: [String], message: String)
     case tooManyImages(maxImages: Int, message: String)
     case invalidatedFiles(Set<String>, message: String)
     case decodingError
+
+    private static func firstRegexCapture(_ text: String, pattern: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return nil
+        }
+        let range = NSRange(text.startIndex..., in: text)
+        guard let match = regex.firstMatch(in: text, range: range),
+              match.numberOfRanges >= 2,
+              let captureRange = Range(match.range(at: 1), in: text)
+        else { return nil }
+        return String(text[captureRange])
+    }
 
     var errorDescription: String? {
         switch self {
@@ -29,11 +42,37 @@ enum AIClientError: LocalizedError {
         case .invalidURL:
             return "API 地址格式无效，请检查设置。"
         case .httpError(let code, let message):
-            let clean = message.trimmingCharacters(in: .whitespacesAndNewlines)
+            let clean = message
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
             if code == 401 { return "API Key 无效或已过期，请检查后重试" }
             if code == 402 { return "账户余额不足，请充值后重试" }
-            if code == 429 { return "请求过于频繁，请稍后再试" }
+            if code == 413 {
+                return clean.isEmpty
+                    ? "文件体积超过服务端限制（HTTP 413），请压缩后重试"
+                    : "文件体积超过服务端限制（HTTP 413）：\(clean)"
+            }
+            if code == 429 { return "请求过于频繁（HTTP 429），请稍后再试" }
+            if code >= 500 { return "服务器繁忙（HTTP \(code)），请稍后再试" }
+            if code == 400 {
+                if let limit = Self.firstRegexCapture(clean, pattern: #"User file count limit exceeded.*?limit (\d+)"#) {
+                    return "已上传文件数达到上限（\(limit) 个），请清理历史文件后重试"
+                }
+                if let limit = Self.firstRegexCapture(clean, pattern: #"User storage quota exceeded.*?limit ([\d.]+) GB"#) {
+                    return "已上传文件占用空间达到上限（\(limit)GB），请清理历史文件后重试"
+                }
+                if clean.range(
+                    of: #"You have uploaded an (unsupported|invalid) (file|image)|The image is too large to process|password-protected|Failed to recognize the file"#,
+                    options: [.regularExpression, .caseInsensitive]
+                ) != nil {
+                    return "服务端无法解析该文件（HTTP 400）：\(clean)"
+                }
+            }
             return clean.isEmpty ? "请求失败（HTTP \(code)）" : "请求失败（HTTP \(code)）：\(clean)"
+        case .uploadFailed(let detail):
+            let clean = detail.trimmingCharacters(in: .whitespacesAndNewlines)
+            if clean.isEmpty { return "附件上传失败" }
+            return clean.hasPrefix("附件上传失败") || clean.hasPrefix("上传失败") ? clean : "附件上传失败：\(clean)"
         case .streamError(let message):
             return message
         case .interruptedStream:
@@ -238,7 +277,17 @@ enum AIClient {
         }
         request.httpBody = body
 
-        let (respData, response) = try await URLSession.shared.data(for: request)
+        let respData: Data
+        let response: URLResponse
+        do {
+            (respData, response) = try await URLSession.shared.data(for: request)
+        } catch {
+            if error is CancellationError || (error as? URLError)?.code == .cancelled {
+                throw error
+            }
+            await AppLogStore.shared.record(.error, source: "api.upload", message: "POST /files network error", detail: error.localizedDescription)
+            throw AIClientError.uploadFailed("网络连接异常（\(error.localizedDescription)）")
+        }
         guard let http = response as? HTTPURLResponse else {
             throw AIClientError.decodingError
         }

@@ -31,8 +31,16 @@ export function describeNativeReplyFailure(failure: NativeReplyFailure, locale: 
   switch (failure.kind) {
     case 'network':
       return { text: english ? 'Network Error. Please check your network status.' : '网络异常，请检查你的网络状况' };
-    case 'upload':
-      return { text: failure.detail || (english ? 'Upload failed' : '上传失败') };
+    case 'upload': {
+      const text = failure.detail || (english ? 'Upload failed' : '上传失败');
+      if (failure.status === 401) {
+        return { text, action: 'api-key' };
+      }
+      if (failure.status === 402) {
+        return { text, action: 'top-up' };
+      }
+      return { text };
+    }
     case 'unsupported-image':
       return {
         text: english ? 'Unsupported or corrupted image format. Use JPG, PNG, or WebP and try again.' :

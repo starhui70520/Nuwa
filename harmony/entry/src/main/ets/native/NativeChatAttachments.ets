@@ -10,6 +10,7 @@ import { ensureBackupSpace, withBackupInput } from './NativeBackupFiles';
 import { NativeChatConfig } from './NativeChatClient';
 import { NativeBackupZipInput } from './NativeBackupZip';
 import type { NativeClipboardAttachments } from './NativeAttachmentClipboard';
+import { recordNativeFeedbackLog } from './NativeFeedbackService';
 import { ensureNativeDirectory } from './NativeFileSystem';
 
 export interface NativeAttachment {
@@ -72,6 +73,53 @@ function attachmentQuota(result: string): NativeAttachmentQuota | undefined {
 function rejectedAttachmentContents(result: string): boolean {
   const message = result.slice(0, 8192);
   return /You have uploaded an (unsupported|invalid) (file|image)|The image is too large to process|password-protected|Failed to recognize the file/i.test(message);
+}
+
+interface UploadErrorDetail {
+  message?: string;
+}
+
+interface UploadErrorPayload {
+  error?: UploadErrorDetail;
+  message?: string;
+}
+
+function extractUploadErrorMessage(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
+  try {
+    const parsed = JSON.parse(trimmed) as UploadErrorPayload;
+    const candidate = parsed?.error?.message ?? parsed?.message ?? '';
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate.replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
+    }
+  } catch {
+    // Non-JSON response body: keep sanitized plain snippet.
+  }
+  return trimmed.replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
+}
+
+function formatUploadHttpError(status: number, serverMessage: string, contentRejected: boolean,
+  quota?: NativeAttachmentQuota): string {
+  if (quota?.kind === 'count') {
+    return '上传失败：已上传文件数达到上限（' + quota.limit + ' 个），请清理历史文件后重试';
+  }
+  if (quota?.kind === 'storage') {
+    return '上传失败：已上传文件占用空间达到上限（' + quota.limit + 'GB），请清理历史文件后重试';
+  }
+  if (contentRejected) {
+    return serverMessage ? '上传失败：服务端无法解析该文件（' + serverMessage + '）' : '上传失败：服务端无法解析该文件';
+  }
+  if (status === 401) return '上传失败：API Key 无效或已过期（HTTP 401）';
+  if (status === 402) return '上传失败：账户余额不足（HTTP 402）';
+  if (status === 413) {
+    return serverMessage ? '上传失败：文件体积超过服务端限制（HTTP 413）：' + serverMessage :
+      '上传失败：文件体积超过服务端限制（HTTP 413）';
+  }
+  if (status === 429) return '上传失败：请求过于频繁（HTTP 429），请稍后再试';
+  if (status >= 500) return '上传失败：服务器繁忙（HTTP ' + status.toString() + '），请稍后再试';
+  return serverMessage ? '上传失败（HTTP ' + status.toString() + '）：' + serverMessage :
+    '上传失败（HTTP ' + status.toString() + '）';
 }
 
 interface UploadFile {
@@ -876,11 +924,16 @@ export class NativeChatAttachments {
       rejectCanceled(transfer);
       const status = response.responseCode;
       if (status < 200 || status >= 300) {
-        const message = status === 400 && typeof response.result === 'string' ? response.result : '';
-        const contentRejected = !!message && rejectedAttachmentContents(message);
-        throw new NativeAttachmentUploadError('附件上传失败（HTTP ' + status.toString() + '）。',
+        const rawBody = typeof response.result === 'string' ? response.result : '';
+        const serverMessage = extractUploadErrorMessage(rawBody);
+        const contentRejected = status === 400 && !!rawBody && rejectedAttachmentContents(rawBody);
+        const quota = status === 400 && rawBody ? attachmentQuota(rawBody) : undefined;
+        const detail = formatUploadHttpError(status, serverMessage, contentRejected, quota);
+        void recordNativeFeedbackLog(context, 'error', 'api.upload',
+          'POST /files -> HTTP ' + status.toString(), serverMessage || rawBody.slice(0, 400));
+        throw new NativeAttachmentUploadError(detail,
           status === 429 || status >= 500, status >= 100 && status <= 599 ? status : undefined, contentRejected,
-          message ? attachmentQuota(message) : undefined);
+          quota);
       }
       let payload: UploadData;
       try {
@@ -894,6 +947,11 @@ export class NativeChatAttachments {
       return payload.id;
     } catch (error) {
       rejectCanceled(transfer);
+      if (!(error instanceof NativeAttachmentUploadError)) {
+        const errMsg = error instanceof Error ? error.message : String(error);
+        void recordNativeFeedbackLog(context, 'error', 'api.upload',
+          'POST /files failed (' + file.name + ')', errMsg);
+      }
       throw error as Error;
     } finally {
       transfer.request?.destroy();

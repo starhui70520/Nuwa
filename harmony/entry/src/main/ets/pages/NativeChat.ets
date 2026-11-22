@@ -2286,9 +2286,14 @@ struct NativeChat {
       const message = failure?.contentRejected ? this.label('解析失败', 'Parsing failed') :
         (failure?.status ?? 0) >= 500 ? this.label('服务器繁忙', 'Server busy') : this.label('上传失败', 'Upload failed');
       this.replaceDraftFile(draftId, item, 'failed', message, failure?.retryable ?? true);
-      if (failure?.quota && this.visible &&
+      if (this.visible &&
         this.draftItems(draftId).some((file: NativeDraftAttachment): boolean => file.item.id === item.id)) {
-        this.showUploadQuota(failure.quota);
+        if (failure?.quota) {
+          this.showUploadQuota(failure.quota);
+        } else {
+          const toastDetail = (failure?.message || (error instanceof Error ? error.message : '')).trim();
+          this.toast(toastDetail || message);
+        }
       }
     }
   }
@@ -5837,6 +5842,13 @@ struct NativeChat {
         .enabled(!this.settingsVerifying)
         .onSelect((index: number) => {
           this.settingsProtocol = index === 1 ? 'anthropic' : 'openai';
+          const base = this.settingsBase.trim().toLowerCase();
+          const model = this.settingsModel.trim();
+          if (this.settingsProtocol === 'anthropic' &&
+            (!base || base.includes('api.deepseek.com')) &&
+            (!model || model === 'deepseek-chat')) {
+            this.settingsModel = 'deepseek-flash';
+          }
           this.settingsError = '';
           this.commitSettingsModel();
         })

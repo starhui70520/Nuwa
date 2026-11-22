@@ -26,7 +26,22 @@ export const describeReply = (reply: AssistantMessage): Notice | null => {
         : reply.error.message
     // 历史补传错误刷新后仍需说明原因，恢复沿用附件卡片或重新生成。
     if (kind === 'upload') {
-      return { text: message || translate('uploadFileStatusFailed') }
+      const condition = classifyStatus(status)
+      if (condition === 'unauthorized') {
+        return { text: message || translate('replyInvalidApiKey'), action: 'apiKey' }
+      }
+      if (condition === 'insufficientBalance') {
+        return { text: message || translate('replyInsufficientBalance'), action: 'topUp' }
+      }
+      if (message) {
+        return { text: message }
+      }
+      return {
+        text:
+          status !== undefined
+            ? translate('uploadFailedWithStatusOnly', { status: String(status) })
+            : translate('uploadFileStatusFailed'),
+      }
     }
     if (kind === 'network') {
       return { text: translate('commonNetworkErrorToast') }
@@ -41,7 +56,12 @@ export const describeReply = (reply: AssistantMessage): Notice | null => {
       case 'serverBusy':
         return { text: translate('completionServerBusyToast') }
       default:
-        return message ? { text: message } : null
+        if (message) {
+          return { text: message }
+        }
+        return status !== undefined
+          ? { text: translate('replyHttpFailed', { status: String(status) }) }
+          : null
     }
   }
   const template = getTemplateText(reply)

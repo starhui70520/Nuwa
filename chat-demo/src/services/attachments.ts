@@ -1,8 +1,9 @@
 import { create } from 'zustand'
 import type { LinkedMessage, TranslationMessage } from '../i18n/index.js'
-import { uploadFile } from './api/client.js'
+import { ApiError, uploadFile } from './api/client.js'
 import { classifyApiError, getUploadErrorInfo, isRetryableApiError } from './api/errors.js'
 import type { FilePurpose } from './api/types.js'
+import { recordAppLog } from './errorLog.js'
 import { ACCEPT_FILE_EXTS } from './uploadExts.js'
 
 /** 允许上传的扩展名，按扩展名白名单过滤，清单见 uploadExts.ts */
@@ -67,6 +68,65 @@ export const describeUploadError = (error: unknown): TranslationMessage => {
   }
   if (getUploadErrorInfo(error)?.code === 'parseFailed') {
     return { key: 'uploadParseFailed' }
+  }
+  return { key: 'uploadFileStatusFailed' }
+}
+
+const sanitizeUploadDetail = (raw: string): string =>
+  raw
+    .replace(/sk-[a-zA-Z0-9_-]{8,}/g, 'sk-***')
+    .replace(/Bearer\s+[a-zA-Z0-9._-]{8,}/gi, 'Bearer ***')
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 200)
+
+/**
+ * 回复提示与草稿 toast 使用的详细上传错误文案：
+ * 保留配额上限、401/402/413/429/5xx、网络异常以及其他 HTTP 状态码与服务端精简原文，不再全部折叠为「上传失败」。
+ */
+export const describeUploadFailure = (error: unknown): TranslationMessage => {
+  const info = getUploadErrorInfo(error)
+  if (info?.code === 'fileCountLimit') {
+    return { key: 'uploadFileCountLimitReply', params: { limit: info.limit ?? '' } }
+  }
+  if (info?.code === 'storageLimit') {
+    return { key: 'uploadStorageLimitReply', params: { limit: info.limit ?? '' } }
+  }
+  if (info?.code === 'parseFailed') {
+    return { key: 'uploadParseFailedDetail' }
+  }
+  const condition = classifyApiError(error)
+  if (condition === 'unauthorized') {
+    return { key: 'replyInvalidApiKey' }
+  }
+  if (condition === 'insufficientBalance') {
+    return { key: 'replyInsufficientBalance' }
+  }
+  if (condition === 'tooLarge') {
+    return { key: 'uploadTooLargeDetail' }
+  }
+  if (condition === 'rateLimited') {
+    return { key: 'uploadRateLimitedDetail' }
+  }
+  if (condition === 'serverBusy') {
+    const status = error instanceof ApiError && error.status ? String(error.status) : '500'
+    return { key: 'uploadServerBusyDetail', params: { status } }
+  }
+  if (condition === 'network') {
+    return { key: 'uploadNetworkErrorDetail' }
+  }
+  if (error instanceof ApiError && error.status !== undefined) {
+    const detail = sanitizeUploadDetail(error.message)
+    return detail
+      ? { key: 'uploadFailedWithStatus', params: { status: String(error.status), detail } }
+      : { key: 'uploadFailedWithStatusOnly', params: { status: String(error.status) } }
+  }
+  if (error instanceof Error) {
+    const detail = sanitizeUploadDetail(error.message)
+    if (detail) {
+      return { key: 'uploadFailedWithDetail', params: { detail } }
+    }
   }
   return { key: 'uploadFileStatusFailed' }
 }
@@ -292,6 +352,10 @@ export const uploadAttachment = (
       if (controller.signal.aborted) {
         setTask(id, null)
       } else {
+        if (!(error instanceof ApiError)) {
+          const msg = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+          recordAppLog('error', 'attachment.upload', `Upload failed (${name})`, msg)
+        }
         setTask(id, {
           status: 'error',
           error: describeUploadError(error),

@@ -5,7 +5,7 @@ import { refreshBalanceAfterReply } from '../api/balance.js'
 import { ApiError, streamMessage } from '../api/client.js'
 import type { ChatModel, CreateMessageRequest, MessageParam } from '../api/types.js'
 import { extractFileIds, getFileErrorCode, isRetryableApiError } from '../api/errors.js'
-import { cancelUpload, describeUploadError, uploadAttachment, useUploads } from '../attachments.js'
+import { cancelUpload, describeUploadFailure, uploadAttachment, useUploads } from '../attachments.js'
 import { getActiveSecret, isUsingDeepSeekAccount, useSettings } from '../settings.js'
 import { appendBranch, getVisibleMessages, normalizeSession, selectVersion } from './branches.js'
 import * as db from './db.js'
@@ -1544,10 +1544,16 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
           break
         }
         if (preparing) {
+          const status = error instanceof ApiError ? error.status : undefined
+          const rawMessage =
+            error instanceof Error
+              ? error.message.trim().slice(0, 300)
+              : String(error).trim().slice(0, 300)
           reply = settleReply(reply, 'error', Date.now(), {
             kind: 'upload',
-            message: '',
-            localMessage: describeUploadError(error),
+            message: rawMessage,
+            ...(status === undefined ? {} : { status }),
+            localMessage: describeUploadFailure(error),
             retryable: isRetryableApiError(error),
           })
           break

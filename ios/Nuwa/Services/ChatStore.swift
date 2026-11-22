@@ -150,8 +150,9 @@ final class DraftStore: ObservableObject {
                 else { return }
                 entry.attachments[idx].status = .failed(error.localizedDescription)
                 drafts[k] = entry
-                AppLogStore.shared.record(.error, source: "attachment.upload", message: error.localizedDescription)
-                onToast("附件上传失败：\(error.localizedDescription)")
+                let desc = error.localizedDescription
+                AppLogStore.shared.record(.error, source: "attachment.upload", message: desc)
+                onToast(desc.hasPrefix("附件上传失败") || desc.hasPrefix("上传失败") ? desc : "附件上传失败：\(desc)")
             }
         }
     }
@@ -696,15 +697,26 @@ final class ChatStore: ObservableObject {
                 ? AttachmentStore.normalizeImageForUpload(data: rawData, fileName: file.name)
                 : (data: rawData, fileName: file.name, mimeType: file.mimeType)
             let purpose = AttachmentStore.uploadPurpose(fileName: normalized.fileName, isImage: file.isImage)
-            let serverId = try await AIClient.uploadFile(
-                data: normalized.data,
-                fileName: normalized.fileName,
-                mimeType: normalized.mimeType,
-                purpose: purpose,
-                secret: secret,
-                useAccount: useAccount,
-                baseUrl: baseUrl
-            )
+            let serverId: String
+            do {
+                serverId = try await AIClient.uploadFile(
+                    data: normalized.data,
+                    fileName: normalized.fileName,
+                    mimeType: normalized.mimeType,
+                    purpose: purpose,
+                    secret: secret,
+                    useAccount: useAccount,
+                    baseUrl: baseUrl
+                )
+            } catch {
+                if error is CancellationError || (error as? URLError)?.code == .cancelled {
+                    throw error
+                }
+                if case AIClientError.uploadFailed = error {
+                    throw error
+                }
+                throw AIClientError.uploadFailed(error.localizedDescription)
+            }
             uploadedMap[file.id] = serverId
         }
         if !uploadedMap.isEmpty {

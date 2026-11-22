@@ -695,6 +695,13 @@ struct SettingsView: View {
                                 isSelected: apiProtocolDraft == proto
                             ) {
                                 apiProtocolDraft = proto
+                                let base = apiBaseUrlDraft.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                                let model = apiModelDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                                if proto == .anthropic &&
+                                    (base.isEmpty || base.contains("api.deepseek.com")) &&
+                                    (model.isEmpty || model == "deepseek-chat") {
+                                    apiModelDraft = "deepseek-flash"
+                                }
                             }
                         }
                     )

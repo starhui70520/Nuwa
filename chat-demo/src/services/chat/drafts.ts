@@ -1,8 +1,11 @@
 import { create } from 'zustand'
+import { showToast } from '../../components/base/toastState.js'
 import type { TranslationMessage } from '../../i18n/index.js'
 import { createId } from '../../utils/id.js'
 import {
   cancelUpload,
+  describeUploadFailure,
+  describeUploadQuota,
   isImage,
   resolveMimeType,
   uploadAttachment,
@@ -47,14 +50,21 @@ export const setDraftText = (sessionId: string | null, text: string) =>
   updateDraft(sessionId, (draft) => ({ ...draft, text }))
 
 const upload = (attachment: DraftAttachment, apiKey: string) => {
-  // 上传任务负责记录错误，输入框的附件卡片展示失败及重试入口。
+  // 上传任务负责记录错误，输入框的附件卡片展示失败及重试入口；非配额类错误额外弹 toast 说明具体原因。
   void uploadAttachment(
     apiKey,
     attachment.id,
     attachment.file,
     attachment.file.name,
     attachment.isImage
-  ).catch(() => {})
+  ).catch((error: unknown) => {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      return
+    }
+    if (!describeUploadQuota(error)) {
+      showToast({ ...describeUploadFailure(error), type: 'error' })
+    }
+  })
 }
 
 /** 整批校验通过后才创建预览和开始上传。 */
