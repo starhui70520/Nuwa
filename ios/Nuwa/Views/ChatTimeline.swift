@@ -366,6 +366,20 @@ private struct TimelineCellKey: Equatable {
 private final class TimelineCell<Row: View>: UICollectionViewCell {
     private(set) var key: TimelineCellKey?
 
+    override func preferredLayoutAttributesFitting(
+        _ layoutAttributes: UICollectionViewLayoutAttributes
+    ) -> UICollectionViewLayoutAttributes {
+        let proposedHeight = layoutAttributes.size.height
+        let fitted = super.preferredLayoutAttributesFitting(layoutAttributes)
+        let scale = max(1, traitCollection.displayScale)
+        let deltaInPixels = abs(fitted.size.height - proposedHeight) * scale
+        // SwiftUI can round differently by one pixel as UIKit settles the scroll bounds.
+        if proposedHeight > 0, deltaInPixels <= 1.001 {
+            fitted.size.height = proposedHeight
+        }
+        return fitted
+    }
+
     override func prepareForReuse() {
         super.prepareForReuse()
         key = nil
