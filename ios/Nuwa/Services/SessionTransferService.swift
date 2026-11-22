@@ -91,11 +91,13 @@ private final class SessionSnapshotBox: @unchecked Sendable {
     private let lock = NSLock()
     private var session: ChatSession?
     private var eligible = false
+    private var configuration: UIActivityItemsConfiguration?
 
-    func update(session: ChatSession?, eligible: Bool) {
+    func update(session: ChatSession?, eligible: Bool, configuration: UIActivityItemsConfiguration?) {
         lock.lock()
         self.session = session
         self.eligible = eligible
+        self.configuration = configuration
         lock.unlock()
     }
 
@@ -104,6 +106,13 @@ private final class SessionSnapshotBox: @unchecked Sendable {
         defer { lock.unlock() }
         guard eligible, let session, !session.messages.isEmpty else { return nil }
         return session
+    }
+
+    func currentConfiguration() -> UIActivityItemsConfiguration? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard eligible, let session, !session.messages.isEmpty else { return nil }
+        return configuration
     }
 }
 
@@ -256,22 +265,20 @@ final class ProximitySessionShareCoordinator: NSObject, UIActivityItemsConfigura
     private var cachedConfiguration: UIActivityItemsConfiguration?
 
     nonisolated var activityItemsConfiguration: (any UIActivityItemsConfigurationReading)? {
-        MainActor.assumeIsolated {
-            guard let session = snapshotBox.currentShareableSession() else { return nil }
-            return cachedConfiguration ?? Self.makeConfiguration(for: session, snapshotBox: snapshotBox)
-        }
+        snapshotBox.currentConfiguration()
     }
 
     func update(session: ChatSession?, eligible: Bool) {
-        snapshotBox.update(session: session, eligible: eligible)
         let shareable = eligible ? session.flatMap { $0.messages.isEmpty ? nil : $0 } : nil
         let nextKey = shareable.map { "\($0.id.uuidString):\($0.title):\($0.messages.count):\($0.updatedAt.timeIntervalSince1970)" }
         if nextKey == cachedKey {
+            snapshotBox.update(session: session, eligible: eligible, configuration: cachedConfiguration)
             attachToActiveScenes(configuration: cachedConfiguration)
             return
         }
         cachedKey = nextKey
         cachedConfiguration = shareable.map { Self.makeConfiguration(for: $0, snapshotBox: snapshotBox) }
+        snapshotBox.update(session: session, eligible: eligible, configuration: cachedConfiguration)
         attachToActiveScenes(configuration: cachedConfiguration)
     }
 

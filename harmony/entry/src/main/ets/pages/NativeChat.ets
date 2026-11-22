@@ -2200,11 +2200,7 @@ struct NativeChat {
         return;
       }
       const config = this.requestConfig();
-      if (!config.accountToken && config.protocol !== 'anthropic') {
-        drop?.setResult(DragResult.DRAG_FAILED);
-        this.toast(this.label('当前服务不支持附件，请配置 Anthropic 接口', "Configure an Anthropic API endpoint to send attachments"));
-        return;
-      }
+      const openAIMode = !config.accountToken && config.protocol !== 'anthropic';
       const existingCount = this.draftItems(id).length;
       let items: NativeAttachment[];
       if (clipboard) {
@@ -2220,18 +2216,38 @@ struct NativeChat {
         drop?.setResult(DragResult.DRAG_FAILED);
         return;
       }
+      if (openAIMode && items.length > 0) {
+        const nonImages = items.filter((file: NativeAttachment): boolean => !file.isImage);
+        if (nonImages.length > 0) {
+          await Promise.all(nonImages.map((file: NativeAttachment): Promise<void> => this.attachments.remove(context, file).catch(() => {})));
+          items = items.filter((file: NativeAttachment): boolean => file.isImage);
+          this.toast(this.label(
+            'OpenAI 兼容模式暂仅支持上传图片，如需上传文档请切换为 Anthropic 兼容协议或登录 DeepSeek 账号',
+            'OpenAI-compatible mode supports images only. Switch to Anthropic protocol or sign in for documents.'
+          ));
+        }
+      }
       if (!items.length) {
         if (drop) {
           drop.setResult(DragResult.DRAG_FAILED);
-          this.toast(this.label('拖入的内容中没有可用附件', 'No usable files were dropped'));
+          if (!openAIMode) {
+            this.toast(this.label('拖入的内容中没有可用附件', 'No usable files were dropped'));
+          }
         }
         return;
       }
-      const drafts = items.map<NativeDraftAttachment>((item: NativeAttachment): NativeDraftAttachment => ({
-        item, state: 'uploading', error: '',
-      }));
-      this.updateDraftItems(id, [...this.draftItems(id), ...drafts]);
-      drafts.forEach((file: NativeDraftAttachment) => { void this.uploadDraftFile(id, file.item); });
+      if (openAIMode) {
+        const drafts = items.map<NativeDraftAttachment>((item: NativeAttachment): NativeDraftAttachment => ({
+          item, state: 'ready', error: '',
+        }));
+        this.updateDraftItems(id, [...this.draftItems(id), ...drafts]);
+      } else {
+        const drafts = items.map<NativeDraftAttachment>((item: NativeAttachment): NativeDraftAttachment => ({
+          item, state: 'uploading', error: '',
+        }));
+        this.updateDraftItems(id, [...this.draftItems(id), ...drafts]);
+        drafts.forEach((file: NativeDraftAttachment) => { void this.uploadDraftFile(id, file.item); });
+      }
       drop?.setResult(DragResult.DRAG_SUCCESSFUL);
     } catch (error) {
       drop?.setResult(DragResult.DRAG_FAILED);
@@ -2275,6 +2291,14 @@ struct NativeChat {
 
   private async uploadDraftFile(draftId: string, item: NativeAttachment): Promise<void> {
     const config = this.requestConfig();
+    if (!config.accountToken && config.protocol !== 'anthropic') {
+      if (item.isImage) {
+        this.replaceDraftFile(draftId, item, 'ready', '');
+      } else {
+        this.replaceDraftFile(draftId, item, 'failed', this.label('仅支持图片', 'Images only'), false);
+      }
+      return;
+    }
     const binding = this.settings.attachmentBinding;
     this.replaceDraftFile(draftId, item, 'uploading', '');
     try {
@@ -2317,9 +2341,50 @@ struct NativeChat {
   private canSendDraft(): boolean {
     const session = this.session();
     return !session?.unloaded && !session?.unreadable && this.attachmentIntakeDraftId !== (this.history.activeId ?? '') &&
-      (!this.draftFiles.length || !!this.accountToken() || this.settings.protocol === 'anthropic') &&
+      (!this.draftFiles.length || !!this.accountToken() || this.settings.protocol === 'anthropic' ||
+        this.draftFiles.every((file: NativeDraftAttachment): boolean => file.item.isImage)) &&
       !this.recognitionId && this.canModifyHistory() && (!!this.draft.trim() || this.draftFiles.length > 0) &&
       this.draftFiles.every((file: NativeDraftAttachment): boolean => file.state === 'ready');
+  }
+
+  private async prepareOpenAIInlineImages(context: common.UIAbilityContext, session: NativeConversation,
+    reply: NativeReply, path: NativeConversationMessage[], prepared: Map<string, NativeChatFileRef>): Promise<void> {
+    let imageBudget = 16;
+    const encodeOne = async (original: NativeAttachment): Promise<void> => {
+      if (!original.isImage || imageBudget <= 0 || prepared.has(original.id) || reply.stopped) {
+        return;
+      }
+      let file = original;
+      if (!file.local) {
+        const hydrated = await hydrateImportedAttachment(context, session, file);
+        if (!hydrated) return;
+        if (reply.stopped || !this.updatePreparedAttachment(session.id, file.id, hydrated)) {
+          await this.attachments.remove(context, hydrated).catch(() => {});
+          return;
+        }
+        file = hydrated;
+      }
+      if (reply.stopped) return;
+      const dataUrl = await this.attachments.encodeImageDataUrl(context, file);
+      if (dataUrl && !reply.stopped) {
+        prepared.set(file.id, { serverId: '', isImage: true, dataUrl });
+        imageBudget -= 1;
+      }
+    };
+    const prompt = path[path.length - 2];
+    for (const item of prompt?.files ?? []) {
+      if (reply.stopped || imageBudget <= 0) break;
+      await encodeOne(item);
+    }
+    for (let index = path.length - 3; index >= 0 && !reply.stopped && imageBudget > 0; index--) {
+      const message = path[index];
+      if (message.role === 'user' && this.usableContextReply(session, path[index + 1])) {
+        const items = message.files ?? [];
+        for (let fileIndex = items.length - 1; fileIndex >= 0 && !reply.stopped && imageBudget > 0; fileIndex--) {
+          await encodeOne(items[fileIndex]);
+        }
+      }
+    }
   }
 
   private async prepareReplyAttachmentMap(context: common.UIAbilityContext, session: NativeConversation,
@@ -2328,15 +2393,17 @@ struct NativeChat {
     const path = visibleMessages(current);
     const usesFiles = !!config.accountToken || config.protocol === 'anthropic';
     const prepared = new Map<string, NativeChatFileRef>();
-    if (usesFiles) {
-      const stopped = new Promise<void>((resolve): void => {
-        reply.stopPreparing = (): void => { resolve(); };
-      });
-      try {
+    const stopped = new Promise<void>((resolve): void => {
+      reply.stopPreparing = (): void => { resolve(); };
+    });
+    try {
+      if (usesFiles) {
         await Promise.race([this.prepareReplyFiles(context, current, config, reply, path, prepared), stopped]);
-      } finally {
-        reply.stopPreparing = undefined;
+      } else {
+        await Promise.race([this.prepareOpenAIInlineImages(context, current, reply, path, prepared), stopped]);
       }
+    } finally {
+      reply.stopPreparing = undefined;
     }
     return prepared;
   }
@@ -2367,7 +2434,7 @@ struct NativeChat {
         for (const item of message.files ?? []) {
           const file = prepared.get(item.id);
           if (!file) continue;
-          if (file.isImage && rejectedImages.has(file.serverId)) {
+          if (file.isImage && file.serverId && rejectedImages.has(file.serverId)) {
             rejectedImageRemoved = true;
           } else {
             files.push(file);
@@ -5184,31 +5251,47 @@ struct NativeChat {
       return;
     }
     const config = this.requestConfig();
-    if (!config.accountToken && config.protocol !== 'anthropic') {
-      this.toast(this.label('当前服务不支持附件，请配置 Anthropic 接口',
-        'Configure an Anthropic API endpoint to send attachments'));
-      return;
-    }
+    const openAIMode = !config.accountToken && config.protocol !== 'anthropic';
     const id = this.history.activeId ?? '';
     const context = this.host();
     const binding = this.settings.attachmentBinding;
     this.attachmentIntakeDraftId = id;
     try {
-      const items = await this.attachments.importUris(context, uris, this.draftItems(id).length);
+      let items = await this.attachments.importUris(context, uris, this.draftItems(id).length);
       if (!this.canModifyHistory() || !this.authenticated() ||
         this.settings.attachmentBinding !== binding || (id && !this.session(id))) {
         await Promise.all(items.map((file: NativeAttachment): Promise<void> => this.attachments.remove(context, file).catch(() => {})));
         return;
       }
+      if (openAIMode && items.length > 0) {
+        const nonImages = items.filter((file: NativeAttachment): boolean => !file.isImage);
+        if (nonImages.length > 0) {
+          await Promise.all(nonImages.map((file: NativeAttachment): Promise<void> => this.attachments.remove(context, file).catch(() => {})));
+          items = items.filter((file: NativeAttachment): boolean => file.isImage);
+          this.toast(this.label(
+            'OpenAI 兼容模式暂仅支持上传图片，如需上传文档请切换为 Anthropic 兼容协议或登录 DeepSeek 账号',
+            'OpenAI-compatible mode supports images only. Switch to Anthropic protocol or sign in for documents.'
+          ));
+        }
+      }
       if (!items.length) {
-        this.toast(this.label('接收的内容中没有可用附件', 'No usable files were received'));
+        if (!openAIMode) {
+          this.toast(this.label('接收的内容中没有可用附件', 'No usable files were received'));
+        }
         return;
       }
-      const drafts = items.map<NativeDraftAttachment>((item: NativeAttachment): NativeDraftAttachment => ({
-        item, state: 'uploading', error: '',
-      }));
-      this.updateDraftItems(id, [...this.draftItems(id), ...drafts]);
-      drafts.forEach((file: NativeDraftAttachment) => { void this.uploadDraftFile(id, file.item); });
+      if (openAIMode) {
+        const drafts = items.map<NativeDraftAttachment>((item: NativeAttachment): NativeDraftAttachment => ({
+          item, state: 'ready', error: '',
+        }));
+        this.updateDraftItems(id, [...this.draftItems(id), ...drafts]);
+      } else {
+        const drafts = items.map<NativeDraftAttachment>((item: NativeAttachment): NativeDraftAttachment => ({
+          item, state: 'uploading', error: '',
+        }));
+        this.updateDraftItems(id, [...this.draftItems(id), ...drafts]);
+        drafts.forEach((file: NativeDraftAttachment) => { void this.uploadDraftFile(id, file.item); });
+      }
       triggerNativeHaptic('light');
     } catch (error) {
       this.toast(error instanceof NativeAttachmentValidationError ? this.attachmentValidationMessage(error) :

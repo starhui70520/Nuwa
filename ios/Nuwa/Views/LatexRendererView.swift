@@ -162,7 +162,8 @@ enum LatexParser {
                 applyInlineStyle(style, darkMode: darkMode, to: &seg)
                 output.append(seg)
             case .space(let pt):
-                let count = max(1, Int((pt / 5.0).rounded()))
+                let clamped = pt.isFinite ? max(0, min(pt, 200)) : 4
+                let count = max(1, Int((clamped / 5.0).rounded()))
                 var seg = AttributedString(String(repeating: " ", count: min(count, 6)))
                 applyInlineStyle(style, darkMode: darkMode, to: &seg)
                 output.append(seg)
@@ -185,7 +186,8 @@ enum LatexParser {
                     output.append(boxAttr)
                 }
             case .rule(let width, _):
-                let dashes = max(3, min(20, Int((width / 8.0).rounded())))
+                let clamped = width.isFinite ? max(0, min(width, 280)) : 80
+                let dashes = max(3, min(20, Int((clamped / 8.0).rounded())))
                 var seg = AttributedString(String(repeating: "─", count: dashes))
                 applyInlineStyle(style, darkMode: darkMode, to: &seg)
                 output.append(seg)
@@ -410,9 +412,9 @@ private struct ParserState {
                 flushText()
                 var base: [LatexNode] = []
                 if let last = nodes.popLast() {
-                    if case .text(let str) = last, str.count > 1 {
+                    if case .text(let str) = last, str.count > 1, let lastCharValue = str.last {
                         let prefix = String(str.dropLast())
-                        let lastChar = String(str.last!)
+                        let lastChar = String(lastCharValue)
                         nodes.append(.text(prefix))
                         base = [.text(lastChar)]
                     } else {
@@ -534,7 +536,7 @@ private struct ParserState {
         case "\\", "newline", "cr":
             var extra: CGFloat = 0
             if let spacingRaw = parseBracketRaw() {
-                extra = parseDimension(spacingRaw, defaultPt: 4)
+                extra = max(0, min(64, parseDimension(spacingRaw, defaultPt: 4)))
             }
             return .lineBreak(extraSpacing: extra)
 
@@ -591,7 +593,9 @@ private struct ParserState {
             _ = parseBracketRaw() // optional raise
             let wRaw = parseBracedRaw() ?? "6em"
             let hRaw = parseBracedRaw() ?? "1pt"
-            return .rule(width: parseDimension(wRaw, defaultPt: 80), height: max(0.75, parseDimension(hRaw, defaultPt: 1)))
+            let w = max(0, min(280, parseDimension(wRaw, defaultPt: 80)))
+            let h = max(0.75, min(40, parseDimension(hRaw, defaultPt: 1)))
+            return .rule(width: w, height: h)
 
         // Text & Font style wrappers
         case "text", "textrm", "mathrm", "textsf", "mathsf", "operatorname", "mbox", "hbox":
@@ -624,7 +628,10 @@ private struct ParserState {
 
         case "sqrt":
             let idxRaw = parseBracketRaw()
-            let idxNodes: [LatexNode]? = idxRaw.map { LatexParser.parse($0, cacheable: false) }
+            let idxNodes: [LatexNode]? = idxRaw.map { raw in
+                var st = ParserState(raw)
+                return st.parseSequence(stopAt: nil, depth: depth + 1)
+            }
             let body = parseGroupOrSingle(depth: depth + 1)
             return .sqrt(index: idxNodes, body: body)
 
@@ -798,7 +805,7 @@ private struct ParserState {
                             endBracket += 1
                         }
                         if endBracket < rawChars.count && rawChars[endBracket] == "]" {
-                            spacing = parseDimension(dimBuf, defaultPt: 4)
+                            spacing = max(0, min(64, parseDimension(dimBuf, defaultPt: 4)))
                             i = endBracket + 1
                         }
                     }
@@ -911,13 +918,16 @@ private struct ParserState {
     private func parseDimension(_ raw: String, defaultPt: CGFloat) -> CGFloat {
         let s = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let numStr = String(s.prefix { $0.isNumber || $0 == "." || $0 == "-" })
-        guard let val = Double(numStr) else { return defaultPt }
-        if s.hasSuffix("em") { return CGFloat(val * 14.0) }
-        if s.hasSuffix("ex") { return CGFloat(val * 7.5) }
-        if s.hasSuffix("cm") { return CGFloat(val * 28.0) }
-        if s.hasSuffix("mm") { return CGFloat(val * 2.8) }
-        if s.hasSuffix("in") { return CGFloat(val * 72.0) }
-        return CGFloat(val)
+        guard let val = Double(numStr), val.isFinite else { return defaultPt }
+        let rawPt: Double
+        if s.hasSuffix("em") { rawPt = val * 14.0 }
+        else if s.hasSuffix("ex") { rawPt = val * 7.5 }
+        else if s.hasSuffix("cm") { rawPt = val * 28.0 }
+        else if s.hasSuffix("mm") { rawPt = val * 2.8 }
+        else if s.hasSuffix("in") { rawPt = val * 72.0 }
+        else { rawPt = val }
+        guard rawPt.isFinite else { return defaultPt }
+        return CGFloat(max(-200, min(400, rawPt)))
     }
 
     private func parseLatexColor(_ raw: String) -> LatexColor? {
@@ -1139,17 +1149,26 @@ private struct LatexInlineRowView: View {
     let baseFontSize: Double
     let alignment: LatexColumnAlign
     let darkMode: Bool
+    var renderDepth: Int = 0
+
+    private static let maxRenderDepth = 12
 
     var body: some View {
         // Unwrap single block-level array so it takes full width directly
-        if nodes.count == 1, case .array(let cols, let rows, let bracket) = nodes[0] {
+        if renderDepth >= Self.maxRenderDepth {
+            Text(buildAttributedText(nodes: nodes, style: style))
+                .multilineTextAlignment(alignment.textAlignment)
+                .lineSpacing(3)
+                .fixedSize(horizontal: false, vertical: true)
+        } else if nodes.count == 1, case .array(let cols, let rows, let bracket) = nodes[0] {
             LatexArrayView(
                 columns: cols,
                 rows: rows,
                 bracket: bracket,
                 style: style,
                 baseFontSize: baseFontSize,
-                darkMode: darkMode
+                darkMode: darkMode,
+                renderDepth: renderDepth + 1
             )
         } else if isPureTextTree(nodes) {
             Text(buildAttributedText(nodes: nodes, style: style))
@@ -1167,7 +1186,8 @@ private struct LatexInlineRowView: View {
                             .lineSpacing(3)
                             .fixedSize(horizontal: false, vertical: true)
                     case .spacer(let width):
-                        Color.clear.frame(width: width, height: 1)
+                        let safeW = width.isFinite ? max(0, min(width, 200)) : 4
+                        Color.clear.frame(width: safeW, height: 1)
                     case .complex(let node):
                         renderComplex(node)
                     }
@@ -1258,7 +1278,8 @@ private struct LatexInlineRowView: View {
                 output.append(seg)
 
             case .space(let pt):
-                let spaces = max(1, min(14, Int((pt / 4.5).rounded())))
+                let clamped = pt.isFinite ? max(0, min(pt, 200)) : 4
+                let spaces = max(1, min(14, Int((clamped / 4.5).rounded())))
                 var seg = AttributedString(String(repeating: "\u{00A0}", count: spaces))
                 seg.font = .system(size: max(10, baseFontSize * style.scale))
                 output.append(seg)
@@ -1303,7 +1324,8 @@ private struct LatexInlineRowView: View {
                 style: next,
                 baseFontSize: baseFontSize,
                 alignment: alignment,
-                darkMode: darkMode
+                darkMode: darkMode,
+                renderDepth: renderDepth + 1
             )
 
         case .colorBox(let bg, let border, let isFrameBox, let body):
@@ -1328,7 +1350,8 @@ private struct LatexInlineRowView: View {
                 style: boxStyle,
                 baseFontSize: baseFontSize,
                 alignment: .leading,
-                darkMode: darkMode
+                darkMode: darkMode,
+                renderDepth: renderDepth + 1
             )
             .padding(.horizontal, hPad)
             .padding(.vertical, vPad)
@@ -1348,9 +1371,11 @@ private struct LatexInlineRowView: View {
         case .rule(let width, let height):
             let fill = style.color?.resolved(darkMode: darkMode, hasExplicitBackground: style.hasExplicitBackground)
                 ?? Color.nuwaLabelTertiary.opacity(0.6)
+            let safeW = width.isFinite ? max(0, min(width, 280)) : 80
+            let safeH = height.isFinite ? max(0.75, min(height, 40)) : 1
             Rectangle()
                 .fill(fill)
-                .frame(maxWidth: min(width, 280), minHeight: height, maxHeight: height)
+                .frame(maxWidth: safeW, minHeight: safeH, maxHeight: safeH)
 
         case .fraction(let num, let den):
             let fracStyle: LatexStyle = {
@@ -1361,12 +1386,12 @@ private struct LatexInlineRowView: View {
             let barColor = style.color?.resolved(darkMode: darkMode, hasExplicitBackground: style.hasExplicitBackground)
                 ?? Color.nuwaLabelPrimary
             VStack(spacing: 2) {
-                LatexInlineRowView(nodes: num, style: fracStyle, baseFontSize: baseFontSize, alignment: .center, darkMode: darkMode)
+                LatexInlineRowView(nodes: num, style: fracStyle, baseFontSize: baseFontSize, alignment: .center, darkMode: darkMode, renderDepth: renderDepth + 1)
                 Rectangle()
                     .fill(barColor.opacity(0.85))
                     .frame(height: 1)
                     .frame(minWidth: 16)
-                LatexInlineRowView(nodes: den, style: fracStyle, baseFontSize: baseFontSize, alignment: .center, darkMode: darkMode)
+                LatexInlineRowView(nodes: den, style: fracStyle, baseFontSize: baseFontSize, alignment: .center, darkMode: darkMode, renderDepth: renderDepth + 1)
             }
             .fixedSize(horizontal: true, vertical: false)
             .padding(.horizontal, 3)
@@ -1377,7 +1402,7 @@ private struct LatexInlineRowView: View {
             HStack(alignment: .center, spacing: 1) {
                 if let indexNodes {
                     let idxStyle = LatexParser.mergeStyle(style, delta: LatexStyleDelta(scale: style.scale * 0.65))
-                    LatexInlineRowView(nodes: indexNodes, style: idxStyle, baseFontSize: baseFontSize, alignment: .trailing, darkMode: darkMode)
+                    LatexInlineRowView(nodes: indexNodes, style: idxStyle, baseFontSize: baseFontSize, alignment: .trailing, darkMode: darkMode, renderDepth: renderDepth + 1)
                         .offset(y: -4)
                 }
                 Text("√")
@@ -1385,7 +1410,7 @@ private struct LatexInlineRowView: View {
                     .foregroundStyle(stroke)
                 VStack(spacing: 1) {
                     Rectangle().fill(stroke.opacity(0.85)).frame(height: 1)
-                    LatexInlineRowView(nodes: body, style: style, baseFontSize: baseFontSize, alignment: .leading, darkMode: darkMode)
+                    LatexInlineRowView(nodes: body, style: style, baseFontSize: baseFontSize, alignment: .leading, darkMode: darkMode, renderDepth: renderDepth + 1)
                         .padding(.horizontal, 2)
                 }
             }
@@ -1398,7 +1423,8 @@ private struct LatexInlineRowView: View {
                 bracket: bracket,
                 style: style,
                 baseFontSize: baseFontSize,
-                darkMode: darkMode
+                darkMode: darkMode,
+                renderDepth: renderDepth + 1
             )
 
         default:
@@ -1414,6 +1440,7 @@ private struct LatexArrayView: View {
     let style: LatexStyle
     let baseFontSize: Double
     let darkMode: Bool
+    var renderDepth: Int = 0
 
     private var maxCols: Int {
         rows.reduce(1) { acc, row in
@@ -1448,7 +1475,8 @@ private struct LatexArrayView: View {
                                 style: style,
                                 baseFontSize: baseFontSize,
                                 alignment: colAlign,
-                                darkMode: darkMode
+                                darkMode: darkMode,
+                                renderDepth: renderDepth + 1
                             )
                             .padding(.bottom, extraSpacing)
                         }
@@ -1477,7 +1505,8 @@ private struct LatexArrayView: View {
                                             style: style,
                                             baseFontSize: baseFontSize,
                                             alignment: align,
-                                            darkMode: darkMode
+                                            darkMode: darkMode,
+                                            renderDepth: renderDepth + 1
                                         )
                                         .gridColumnAlignment(align.horizontalAlignment)
                                     }

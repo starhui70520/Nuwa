@@ -433,6 +433,28 @@ if (typeof g.AbortController !== 'function') {
   g.AbortController = FallbackAbortController
 }
 
+// Chrome 66–99 自带原生 AbortController/AbortSignal，但缺少 Chrome 100 才引入的 AbortSignal.prototype.throwIfAborted()
+if (
+  typeof AbortSignal !== 'undefined' &&
+  typeof AbortSignal.prototype.throwIfAborted !== 'function'
+) {
+  Object.defineProperty(AbortSignal.prototype, 'throwIfAborted', {
+    value: function throwIfAborted(this: AbortSignal) {
+      if (this.aborted) {
+        const reason = (this as AbortSignal & { reason?: unknown }).reason
+        throw reason !== undefined
+          ? reason
+          : typeof DOMException === 'function'
+            ? new DOMException('The operation was aborted.', 'AbortError')
+            : new Error('Aborted')
+      }
+    },
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  })
+}
+
 if (typeof g.ResizeObserver !== 'function') {
   class FallbackResizeObserver {
     private cb: ResizeObserverCallback

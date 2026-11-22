@@ -99,7 +99,7 @@ struct SessionDrawerView: View {
 
     private var allSelectedPinned: Bool {
         guard !validSelectedIds.isEmpty else { return false }
-        let byId = Dictionary(uniqueKeysWithValues: listStore.summaries.map { ($0.id, $0) })
+        let byId = Dictionary(listStore.summaries.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         return validSelectedIds.allSatisfy { byId[$0]?.isPinned == true }
     }
 

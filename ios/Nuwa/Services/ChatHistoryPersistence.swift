@@ -54,7 +54,7 @@ final class ChatHistoryPersistence {
     }
 
     func save(_ sessions: [ChatSession], legacyURL: URL) throws {
-        let next = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0) })
+        let next = Dictionary(sessions.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
         let changed = sessions.filter { saved[$0.id] != $0 }
         let removed = saved.keys.filter { next[$0] == nil }
         guard !changed.isEmpty || !removed.isEmpty else { return }

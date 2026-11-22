@@ -363,16 +363,6 @@ struct ProgressiveEdgeBlur: View {
                     )
                 }
 
-            Rectangle()
-                .fill(.thinMaterial)
-                .mask {
-                    LinearGradient(
-                        stops: innerBlurMaskStops,
-                        startPoint: startPoint,
-                        endPoint: endPoint
-                    )
-                }
-
             LinearGradient(
                 stops: tintFadeStops,
                 startPoint: startPoint,
@@ -389,15 +379,6 @@ struct ProgressiveEdgeBlur: View {
             .init(color: .black.opacity(0.55), location: 0.74),
             .init(color: .black.opacity(0.18), location: 0.90),
             .init(color: .black.opacity(0.0), location: 1.0),
-        ]
-    }
-
-    private var innerBlurMaskStops: [Gradient.Stop] {
-        [
-            .init(color: .black, location: 0.0),
-            .init(color: .black.opacity(0.76), location: 0.42),
-            .init(color: .black.opacity(0.24), location: 0.68),
-            .init(color: .black.opacity(0.0), location: 0.86),
         ]
     }
 

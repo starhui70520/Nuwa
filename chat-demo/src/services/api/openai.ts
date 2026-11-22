@@ -6,9 +6,13 @@ import type {
   StopReason,
 } from './types.js'
 
+type OpenAIContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } }
+
 type OpenAIMessage = {
   role: 'system' | 'user' | 'assistant'
-  content: string
+  content: string | OpenAIContentPart[]
 }
 
 type OpenAIChunk = {
@@ -65,6 +69,28 @@ const extractText = (content: MessageParam['content']): string => {
     .join('\n')
 }
 
+const buildOpenAIUserContent = (
+  content: Extract<MessageParam, { role: 'user' }>['content']
+): string | OpenAIContentPart[] | null => {
+  if (typeof content === 'string') {
+    return content || null
+  }
+  const imageParts: OpenAIContentPart[] = []
+  const textParts: string[] = []
+  for (const block of content) {
+    if (block.type === 'image_url' && block.image_url.url) {
+      imageParts.push({ type: 'image_url', image_url: { url: block.image_url.url } })
+    } else if (block.type === 'text' && block.text) {
+      textParts.push(block.text)
+    }
+  }
+  const text = textParts.join('\n')
+  if (imageParts.length === 0) {
+    return text || null
+  }
+  return text ? [...imageParts, { type: 'text', text }] : imageParts
+}
+
 export const buildOpenAIChatBody = (body: CreateMessageRequest) => {
   const messages: OpenAIMessage[] = []
   if (body.system.trim()) {
@@ -72,6 +98,13 @@ export const buildOpenAIChatBody = (body: CreateMessageRequest) => {
   }
   for (const message of body.messages) {
     if (message.role === 'latest_reminder') {
+      continue
+    }
+    if (message.role === 'user') {
+      const content = buildOpenAIUserContent(message.content)
+      if (content) {
+        messages.push({ role: 'user', content })
+      }
       continue
     }
     const content = extractText(message.content)

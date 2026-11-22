@@ -8,6 +8,7 @@ import { NativePrefillBlock } from './NativeReplyPrefill';
 export interface NativeChatFileRef {
   serverId: string;
   isImage: boolean;
+  dataUrl?: string;
 }
 
 export interface NativeChatMessage {
@@ -51,9 +52,24 @@ export interface NativeChatConfig {
   requestTitle?: boolean;
 }
 
+interface OpenAIImageUrl {
+  url: string;
+}
+
+interface OpenAIContentPart {
+  type: 'text' | 'image_url';
+  text?: string;
+  image_url?: OpenAIImageUrl;
+}
+
+interface OpenAIChatMessage {
+  role: string;
+  content: string | OpenAIContentPart[];
+}
+
 interface ChatRequestBody {
   model: string;
-  messages: NativeChatMessage[];
+  messages: OpenAIChatMessage[];
   stream: boolean;
 }
 
@@ -502,7 +518,7 @@ function resolveAnthropicEndpoint(baseUrl: string): string {
   }
   let path = endpoint.pathname.replace(/\/+$/, '');
   if (!path.endsWith('/anthropic/v1/messages')) {
-    path = `${path.replace(/\/(?:anthropic\/v1|v1)$/i, '')}/anthropic/v1/messages`;
+    path = `${path.replace(/\/(?:anthropic(?:\/v1)?|v1)$/i, '')}/anthropic/v1/messages`;
   }
   endpoint.pathname = path;
   return endpoint.href;
@@ -984,24 +1000,45 @@ export class NativeChatClient {
         title: extended && config.requestTitle ? { enabled: true } : undefined,
       } as AnthropicRequestBody;
     } else {
-      const textMessages = messages.filter((message: NativeChatMessage): boolean =>
-        !!message.content && (message.role === 'user' || message.role === 'assistant'))
-        .map<NativeChatMessage>((message: NativeChatMessage): NativeChatMessage => {
-          const blocks = message.role === 'assistant' ? historicalAssistantBlocks(message, message.readLinks ?? []) : undefined;
-          return { role: message.role, content: blocks ? openAIAssistantText(blocks) : message.content };
-        });
+      const openAIMessages: OpenAIChatMessage[] = [];
       const system = config.system ?? DEFAULT_DEEPSEEK_SYSTEM;
       if (system.trim()) {
-        textMessages.unshift({ role: 'system', content: system });
+        openAIMessages.push({ role: 'system', content: system });
+      }
+      for (const message of messages) {
+        if (message.role === 'user') {
+          const imageParts: OpenAIContentPart[] = [];
+          for (const file of message.files ?? []) {
+            if (file.isImage && file.dataUrl) {
+              const imgUrl: OpenAIImageUrl = { url: file.dataUrl };
+              imageParts.push({ type: 'image_url', image_url: imgUrl });
+            }
+          }
+          if (imageParts.length > 0) {
+            const parts: OpenAIContentPart[] = imageParts.slice();
+            if (message.content) {
+              parts.push({ type: 'text', text: message.content });
+            }
+            openAIMessages.push({ role: 'user', content: parts });
+          } else if (message.content) {
+            openAIMessages.push({ role: 'user', content: message.content });
+          }
+        } else if (message.role === 'assistant') {
+          const blocks = historicalAssistantBlocks(message, message.readLinks ?? []);
+          const text = blocks ? openAIAssistantText(blocks) : message.content;
+          if (text) {
+            openAIMessages.push({ role: 'assistant', content: text });
+          }
+        }
       }
       const prefill = config.prefill;
       if (prefill) {
         const text = prefill.blocks === undefined ?
           (hasPrefillContent(prefill, config.thinking === true) ? prefill.text : '') :
           openAIAssistantText(anthropicPrefillContent(prefill, config.thinking === true));
-        if (text) textMessages.push({ role: 'assistant', content: text });
+        if (text) openAIMessages.push({ role: 'assistant', content: text });
       }
-      body = { model: model, messages: textMessages, stream: true } as ChatRequestBody;
+      body = { model: model, messages: openAIMessages, stream: true } as ChatRequestBody;
     }
     const options: http.HttpRequestOptions = {
       method: http.RequestMethod.POST,

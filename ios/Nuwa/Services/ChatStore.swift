@@ -70,14 +70,25 @@ final class DraftStore: ObservableObject {
             return
         }
 
+        let isOpenAIMode = !settings.isUsingDeepSeekAccount && settings.effectiveProtocol == .openai
+        if isOpenAIMode && !isImage {
+            onToast("OpenAI 兼容模式暂仅支持上传图片，如需上传文档请切换为 Anthropic 兼容协议或登录 DeepSeek 账号")
+            return
+        }
+
         Task.detached(priority: .userInitiated) {
             do {
                 let (file, normalizedData) = try AttachmentStore.saveLocally(data: data, originalName: fileName, isImage: isImage)
                 await MainActor.run {
                     var current = self.drafts[k] ?? DraftEntry()
-                    current.attachments.append(DraftAttachment(id: file.id, file: file, status: .uploading))
-                    self.drafts[k] = current
-                    self.uploadAttachment(fileId: file.id, data: normalizedData, file: file, draftKey: k, settings: settings, onToast: onToast)
+                    if isOpenAIMode {
+                        current.attachments.append(DraftAttachment(id: file.id, file: file, status: .done))
+                        self.drafts[k] = current
+                    } else {
+                        current.attachments.append(DraftAttachment(id: file.id, file: file, status: .uploading))
+                        self.drafts[k] = current
+                        self.uploadAttachment(fileId: file.id, data: normalizedData, file: file, draftKey: k, settings: settings, onToast: onToast)
+                    }
                 }
             } catch {
                 await MainActor.run {
@@ -99,6 +110,15 @@ final class DraftStore: ObservableObject {
               let idx = entry.attachments.firstIndex(where: { $0.id == fileId })
         else { return }
         let file = entry.attachments[idx].file
+        if !settings.isUsingDeepSeekAccount && settings.effectiveProtocol == .openai {
+            if file.isImage {
+                entry.attachments[idx].status = .done
+                drafts[k] = entry
+            } else {
+                onToast("OpenAI 兼容模式暂仅支持上传图片，请切换为 Anthropic 兼容协议后重试")
+            }
+            return
+        }
         guard let url = AttachmentStore.localURL(for: file),
               let data = try? Data(contentsOf: url)
         else { return }
@@ -679,7 +699,7 @@ final class ChatStore: ObservableObject {
 
         let liveById: [UUID: ChatMessage]
         if let s = sessions.first(where: { $0.id == sessionId }) {
-            liveById = Dictionary(uniqueKeysWithValues: s.messages.map { ($0.id, $0) })
+            liveById = Dictionary(s.messages.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         } else {
             liveById = [:]
         }
@@ -757,7 +777,7 @@ final class ChatStore: ObservableObject {
         guard let refreshedSession = sessions.first(where: { $0.id == sessionId }) else {
             return (liveHistory, liveQuestion)
         }
-        let refreshedById = Dictionary(uniqueKeysWithValues: refreshedSession.messages.map { ($0.id, $0) })
+        let refreshedById = Dictionary(refreshedSession.messages.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         return (
             liveHistory.map { refreshedById[$0.id] ?? $0 },
             refreshedById[liveQuestion.id] ?? liveQuestion
@@ -1850,7 +1870,7 @@ final class ChatStore: ObservableObject {
     private static func buildSessionPathSignatures(_ session: ChatSession) -> Set<String> {
         var normalized = session
         normalized.ensureTreeNormalized()
-        let byId = Dictionary(uniqueKeysWithValues: normalized.messages.map { ($0.id, $0) })
+        let byId = Dictionary(normalized.messages.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         var memo = [UUID: String](minimumCapacity: normalized.messages.count)
         var paths = Set<String>()
         paths.reserveCapacity(normalized.messages.count)
@@ -1922,7 +1942,7 @@ final class ChatStore: ObservableObject {
     ///    `N分支·` and create independent incoming branch with new ID as `D分支·`.
     private func mergeSessions(_ incoming: [ChatSession]) -> (sessions: [ChatSession], outcome: SessionImportOutcome, changed: Bool) {
         var merged = sessions
-        var existingById = Dictionary(uniqueKeysWithValues: merged.enumerated().map { ($1.id, $0) })
+        var existingById = Dictionary(merged.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first })
         var addedCount = 0
         var updatedCount = 0
         var branchedCount = 0

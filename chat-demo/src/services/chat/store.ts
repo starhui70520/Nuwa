@@ -3,9 +3,21 @@ import { showToast } from '../../components/base/toastState.js'
 import { createId } from '../../utils/id.js'
 import { refreshBalanceAfterReply } from '../api/balance.js'
 import { ApiError, streamMessage } from '../api/client.js'
-import type { ChatModel, CreateMessageRequest, MessageParam } from '../api/types.js'
+import type {
+  ChatModel,
+  CreateMessageRequest,
+  InlineImageBlockParam,
+  MessageParam,
+} from '../api/types.js'
 import { extractFileIds, getFileErrorCode, isRetryableApiError } from '../api/errors.js'
-import { cancelUpload, describeUploadFailure, uploadAttachment, useUploads } from '../attachments.js'
+import {
+  blobToDataUrl,
+  cancelUpload,
+  describeUploadFailure,
+  normalizeImageForUpload,
+  uploadAttachment,
+  useUploads,
+} from '../attachments.js'
 import { getActiveSecret, isUsingDeepSeekAccount, useSettings } from '../settings.js'
 import { appendBranch, getVisibleMessages, normalizeSession, selectVersion } from './branches.js'
 import * as db from './db.js'
@@ -21,6 +33,7 @@ import {
   applyEvent,
   canContinueReply,
   getContextRounds,
+  getReplyText,
   settleReply,
   toRequestMessages,
 } from './reply.js'
@@ -1238,6 +1251,138 @@ const saveServerIds = (sessionId: string, serverIds: Map<string, string>) => {
   persist(sessionId)
 }
 
+const MAX_OPENAI_INLINE_IMAGES = 16
+const MAX_OPENAI_INLINE_IMAGE_BYTES = 20 * 1024 * 1024
+
+const assertNotAborted = (signal: AbortSignal) => {
+  if (signal.aborted) {
+    const reason = (signal as AbortSignal & { reason?: unknown }).reason
+    throw reason !== undefined
+      ? reason
+      : typeof DOMException === 'function'
+        ? new DOMException('The operation was aborted.', 'AbortError')
+        : new Error('Aborted')
+  }
+}
+
+const isOpenAIProtocolActive = () =>
+  !isUsingDeepSeekAccount() && useSettings.getState().apiProtocol === 'openai'
+
+const loadLocalFileBlob = async (sessionId: string, fileId: string): Promise<Blob | null> => {
+  const inMemory = pendingFiles.get(sessionId)?.find((entry) => entry.id === fileId)
+  if (inMemory) {
+    return inMemory.blob
+  }
+  return (await db.loadFile(fileId)) ?? null
+}
+
+const buildOpenAIImageBlock = async (
+  sessionId: string,
+  file: FileAttachment
+): Promise<InlineImageBlockParam | null> => {
+  if (!file.isImage) {
+    return null
+  }
+  const blob = await loadLocalFileBlob(sessionId, file.id)
+  if (!blob || blob.size === 0) {
+    return null
+  }
+  const normalized = await normalizeImageForUpload(blob, file.name)
+  if (normalized.size === 0 || normalized.size > MAX_OPENAI_INLINE_IMAGE_BYTES) {
+    return null
+  }
+  const url = await blobToDataUrl(normalized)
+  return url ? { type: 'image_url', image_url: { url } } : null
+}
+
+const buildOpenAIRequestMessages = async (
+  sessionId: string,
+  request: Request,
+  signal: AbortSignal,
+  imageCap: number
+): Promise<MessageParam[]> => {
+  const rounds = getContextRounds(request.history)
+  let remaining = Math.min(MAX_OPENAI_INLINE_IMAGES, Math.max(0, imageCap))
+  const questionBlocks: InlineImageBlockParam[] = []
+  for (const file of request.question.files) {
+    if (!file.isImage || remaining <= 0) {
+      continue
+    }
+    assertNotAborted(signal)
+    const block = await buildOpenAIImageBlock(sessionId, file)
+    if (block) {
+      questionBlocks.push(block)
+      remaining -= 1
+    }
+  }
+
+  const historyBlocksByRound = new Map<number, InlineImageBlockParam[]>()
+  for (let i = rounds.length - 1; i >= 0 && remaining > 0; i--) {
+    const [user] = rounds[i]
+    if (!user.files.some((file) => file.isImage)) {
+      continue
+    }
+    const collected: InlineImageBlockParam[] = []
+    for (let j = user.files.length - 1; j >= 0 && remaining > 0; j--) {
+      const file = user.files[j]
+      if (!file.isImage) {
+        continue
+      }
+      assertNotAborted(signal)
+      const block = await buildOpenAIImageBlock(sessionId, file)
+      if (block) {
+        collected.push(block)
+        remaining -= 1
+      }
+    }
+    if (collected.length > 0) {
+      historyBlocksByRound.set(i, collected.reverse())
+    }
+  }
+
+  const messages: MessageParam[] = []
+  for (let i = 0; i < rounds.length; i++) {
+    const [user, reply] = rounds[i]
+    const imageBlocks = historyBlocksByRound.get(i) ?? []
+    if (!user.content && imageBlocks.length === 0) {
+      continue
+    }
+    messages.push({
+      role: 'user',
+      content:
+        imageBlocks.length > 0
+          ? [...imageBlocks, ...(user.content ? [{ type: 'text' as const, text: user.content }] : [])]
+          : user.content,
+    })
+    messages.push({
+      role: 'assistant',
+      content: [{ type: 'text', text: getReplyText(reply) }],
+    })
+  }
+  messages.push({
+    role: 'user',
+    content:
+      questionBlocks.length > 0
+        ? [
+            ...questionBlocks,
+            ...(request.question.content
+              ? [{ type: 'text' as const, text: request.question.content }]
+              : []),
+          ]
+        : request.question.content,
+  })
+  if (request.prefix?.prefix) {
+    const prefixText = getReplyText(request.prefix)
+    if (prefixText.trim()) {
+      messages.push({
+        role: 'assistant',
+        content: [{ type: 'text', text: prefixText }],
+      })
+    }
+  }
+  return messages
+}
+
 /**
  * 附件的服务端 id：已有直接用；正在上传的等待同一任务；否则读取本地原件补传。
  * 本地也没有原件（导入的文档附件只有元数据）时返回 null，该附件只展示、不进入请求。
@@ -1247,7 +1392,7 @@ const ensureServerId = async (apiKey: string, file: FileAttachment): Promise<str
     return file.serverId
   }
   const task = useUploads.getState().tasks[file.id]
-  if (task?.status === 'done') {
+  if (task?.status === 'done' && task.serverId) {
     return task.serverId
   }
   const blob = await db.loadFile(file.id)
@@ -1284,6 +1429,10 @@ const prepareFiles = async (sessionId: string, request: Request, signal: AbortSi
   // 服务端判定 file_id 失效时会清掉会话里的 serverId，先用最新消息替换请求快照，
   // 否则快照里仍是旧 id，补传会直接复用它。
   request = refreshRequest(sessionId, request)
+  // OpenAI 兼容协议直接走内联 base64 image_url，不调用 Anthropic Files API。
+  if (isOpenAIProtocolActive()) {
+    return request
+  }
   const apiKey = getActiveSecret()
   const serverIds = new Map<string, string>()
   // 停止生成立即生效；上传本身不取消（输入框与其他消息可能共用同一任务），完成后照常写回 serverId
@@ -1328,7 +1477,7 @@ const prepareFiles = async (sessionId: string, request: Request, signal: AbortSi
     }
   }
   for (const file of pending.values()) {
-    signal.throwIfAborted()
+    assertNotAborted(signal)
     try {
       const serverId = await Promise.race([ensureServerId(apiKey, file), aborted])
       if (serverId) {
@@ -1336,7 +1485,7 @@ const prepareFiles = async (sessionId: string, request: Request, signal: AbortSi
         saveServerIds(sessionId, new Map([[file.id, serverId]]))
       }
     } catch {
-      signal.throwIfAborted()
+      assertNotAborted(signal)
     }
   }
 
@@ -1475,19 +1624,21 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
           updateReply(sessionId, reply)
           persist(sessionId)
         }
-        const messages = limitRequestImages(
-          stripRejectedImages(
-            toRequestMessages(
-              prepared.history,
-              prepared.question,
-              prepared.prefix,
-              initial.thinking ?? false,
-              latestReminder
-            ),
-            rejectedHistoryImageIds
-          ),
-          imageCap
-        )
+        const messages = isOpenAIProtocolActive()
+          ? await buildOpenAIRequestMessages(sessionId, prepared, controller.signal, imageCap)
+          : limitRequestImages(
+              stripRejectedImages(
+                toRequestMessages(
+                  prepared.history,
+                  prepared.question,
+                  prepared.prefix,
+                  initial.thinking ?? false,
+                  latestReminder
+                ),
+                rejectedHistoryImageIds
+              ),
+              imageCap
+            )
         sentMessages = messages
         const configuredModel = useSettings.getState().apiModel.trim()
         const resolvedModel = isUsingDeepSeekAccount()

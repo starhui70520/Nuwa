@@ -169,7 +169,7 @@ function normalizeOrigin(baseUrl: string): NormalizedProviderBase | null {
       return null;
     }
     let pathname = parsed.pathname.replace(/\/+$/, '');
-    pathname = pathname.replace(/\/(?:v1|anthropic\/v1)$/i, '');
+    pathname = pathname.replace(/\/(?:v1|anthropic(?:\/v1)?)$/i, '');
     parsed.pathname = pathname.length > 0 ? pathname : '/';
     parsed.search = '';
     parsed.hash = '';

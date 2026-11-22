@@ -725,7 +725,7 @@ struct SettingsView: View {
                 }
 
                 labeledInput("API 地址 (Base URL)", placeholder: "https://api.deepseek.com", text: $apiBaseUrlDraft)
-                labeledInput("模型名称", placeholder: "deepseek-flash", text: $apiModelDraft)
+                labeledInput("模型名称", placeholder: "deepseek-flash / deepseek-v4-pro / gpt-4o", text: $apiModelDraft)
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text("API Key")

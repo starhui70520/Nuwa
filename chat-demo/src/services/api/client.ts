@@ -109,11 +109,15 @@ const getBaseOrigin = () => {
   if (!raw) {
     return API_ORIGIN
   }
-  return raw.replace(/\/(v1|anthropic\/v1)$/i, '')
+  return raw.replace(/\/(v1|anthropic(?:\/v1)?)$/i, '')
 }
 
 /** 用 GET /models 校验 API Key（不产生费用）；第三方中转若未开放 /models（404/405）则放行 */
 export const verifyApiKey = async (apiKey: string, signal?: AbortSignal): Promise<void> => {
+  const cleanKey = apiKey.trim()
+  if (!/^[\x21-\x7e]+$/.test(cleanKey)) {
+    throw new ApiError('protocol', { key: 'apiKeyInvalidFormat' })
+  }
   const { apiProtocol, apiBaseUrl } = useSettings.getState()
   const url =
     apiProtocol === 'openai'
@@ -122,7 +126,7 @@ export const verifyApiKey = async (apiKey: string, signal?: AbortSignal): Promis
   try {
     await request(url, {
       method: 'GET',
-      headers: { Authorization: `Bearer ${apiKey}` },
+      headers: { Authorization: `Bearer ${cleanKey}` },
       signal,
     })
   } catch (error) {
@@ -204,13 +208,19 @@ export async function* streamMessage(
     })
     const contentType = response.headers.get('Content-Type') ?? ''
     if (!response.body || !contentType.includes('text/event-stream')) {
-      throw await readErrorResponse(response, 'protocol', '')
+      const protocolErr = await readErrorResponse(response, 'protocol', '')
+      recordAppLog(
+        'error',
+        'api.stream',
+        `POST ${endpoint.split('?')[0]} non-SSE (${contentType || 'unknown'})`,
+        protocolErr.message
+      )
+      throw protocolErr
     }
-    yield* parseOpenAIStream(
-      response.body,
-      signal,
-      (message) => new ApiError('stream', message)
-    )
+    yield* parseOpenAIStream(response.body, signal, (message) => {
+      recordAppLog('error', 'api.stream', `OpenAI stream error`, message)
+      return new ApiError('stream', message)
+    })
     return
   }
 
@@ -229,7 +239,14 @@ export async function* streamMessage(
   })
   const contentType = response.headers.get('Content-Type') ?? ''
   if (!response.body || !contentType.includes('text/event-stream')) {
-    throw await readErrorResponse(response, 'protocol', '')
+    const protocolErr = await readErrorResponse(response, 'protocol', '')
+    recordAppLog(
+      'error',
+      'api.stream',
+      `POST ${anthropicUrl.split('?')[0]} non-SSE (${contentType || 'unknown'})`,
+      protocolErr.message
+    )
+    throw protocolErr
   }
   for await (const { event: eventName, data } of readServerSentEvents(response.body, signal)) {
     let payload: unknown
@@ -241,9 +258,11 @@ export async function* streamMessage(
       }
     }
     if (isErrorBody(payload)) {
+      recordAppLog('error', 'api.stream', 'Anthropic stream error', payload.error.message)
       throw new ApiError('stream', payload.error.message)
     }
     if (eventName === 'error') {
+      recordAppLog('error', 'api.stream', 'Anthropic stream error event', data)
       throw new ApiError('stream', data)
     }
     const event = readMessageEvent(payload)
@@ -255,6 +274,11 @@ export async function* streamMessage(
       return
     }
   }
-  // 服务端没有提供错误内容时保持为空，不推测断流原因。
+  recordAppLog(
+    'error',
+    'api.stream',
+    `POST ${anthropicUrl.split('?')[0]} interrupted before message_stop`
+  )
+  // 服务端没有提供错误内容时保持为空，由展示层映射为统一中断提示。
   throw new ApiError('interrupted', '')
 }

@@ -162,7 +162,7 @@ enum AIClient {
         let trimmed = rawBaseUrl.trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard !trimmed.isEmpty else { return deepSeekOrigin }
-        if let range = trimmed.range(of: "/(v1|anthropic/v1)$", options: [.regularExpression, .caseInsensitive]) {
+        if let range = trimmed.range(of: "/(v1|anthropic(?:/v1)?)$", options: [.regularExpression, .caseInsensitive]) {
             return String(trimmed[..<range.lowerBound])
         }
         return trimmed
@@ -210,6 +210,9 @@ enum AIClient {
     static func verifyApiKey(apiKey: String, apiProtocol: ApiProtocol, baseUrl: String) async throws {
         let cleanKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanKey.isEmpty else { throw AIClientError.missingConfiguration }
+        guard cleanKey.unicodeScalars.allSatisfy({ $0.value >= 0x21 && $0.value <= 0x7E }) else {
+            throw AIClientError.streamError("API Key 包含无效字符或空格，请仅粘贴纯英文与数字密钥。")
+        }
         let url: URL?
         if apiProtocol == .openai {
             url = resolveOpenAIEndpoint(baseUrl, endpoint: "models")
@@ -1030,6 +1033,38 @@ enum AIClient {
         }
     }
 
+    private static let maxOpenAIInlineImages = 16
+    private static let maxOpenAIInlineImageBytes = 20 * 1024 * 1024
+
+    private static func buildOpenAIImagePart(for file: FileAttachment) -> [String: Any]? {
+        guard file.isImage,
+              let url = AttachmentStore.localURL(for: file),
+              let rawData = try? Data(contentsOf: url),
+              !rawData.isEmpty
+        else { return nil }
+        let normalized = AttachmentStore.normalizeImageForUpload(data: rawData, fileName: file.name)
+        guard !normalized.data.isEmpty, normalized.data.count <= maxOpenAIInlineImageBytes else {
+            return nil
+        }
+        let mime = normalized.mimeType.isEmpty ? "image/jpeg" : normalized.mimeType
+        let dataUrl = "data:\(mime);base64,\(normalized.data.base64EncodedString())"
+        return [
+            "type": "image_url",
+            "image_url": ["url": dataUrl],
+        ]
+    }
+
+    private static func buildOpenAIUserContent(_ message: ChatMessage, imageParts: [[String: Any]]) -> Any? {
+        if imageParts.isEmpty {
+            return message.content.isEmpty ? nil : message.content
+        }
+        var parts = imageParts
+        if !message.content.isEmpty {
+            parts.append(["type": "text", "text": message.content])
+        }
+        return parts
+    }
+
     private static func streamOpenAI(
         _ params: StreamParams,
         continuation: AsyncThrowingStream<AIStreamEvent, Error>.Continuation
@@ -1038,18 +1073,50 @@ enum AIClient {
             throw AIClientError.invalidURL
         }
 
-        var payloadMessages: [[String: String]] = []
+        let rounds = contextRounds(params.history)
+        var imageBudget = min(maxOpenAIInlineImages, max(0, params.imageCap))
+        var questionImageParts: [[String: Any]] = []
+        for file in params.question.files where file.isImage && imageBudget > 0 {
+            if let part = buildOpenAIImagePart(for: file) {
+                questionImageParts.append(part)
+                imageBudget -= 1
+            }
+        }
+
+        var historyImagePartsByRound: [Int: [[String: Any]]] = [:]
+        if imageBudget > 0 {
+            for idx in stride(from: rounds.count - 1, through: 0, by: -1) {
+                guard imageBudget > 0 else { break }
+                let userFiles = rounds[idx].0.files
+                guard userFiles.contains(where: \.isImage) else { continue }
+                var collected: [[String: Any]] = []
+                for file in userFiles.reversed() where file.isImage && imageBudget > 0 {
+                    if let part = buildOpenAIImagePart(for: file) {
+                        collected.append(part)
+                        imageBudget -= 1
+                    }
+                }
+                if !collected.isEmpty {
+                    historyImagePartsByRound[idx] = collected.reversed()
+                }
+            }
+        }
+
+        var payloadMessages: [[String: Any]] = []
         let trimmedSystem = params.customSystemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedSystem.isEmpty {
             payloadMessages.append(["role": "system", "content": trimmedSystem])
         }
-        for (question, reply) in contextRounds(params.history) where !question.content.isEmpty {
-            payloadMessages.append(["role": "user", "content": question.content])
+        for (idx, (question, reply)) in rounds.enumerated() {
+            guard let userContent = buildOpenAIUserContent(question, imageParts: historyImagePartsByRound[idx] ?? []) else {
+                continue
+            }
+            payloadMessages.append(["role": "user", "content": userContent])
             let text = buildAnthropicAssistantBlocks(reply).compactMap { $0["text"] as? String }.joined(separator: "\n")
             payloadMessages.append(["role": "assistant", "content": text])
         }
-        if !params.question.content.isEmpty {
-            payloadMessages.append(["role": "user", "content": params.question.content])
+        if let currentContent = buildOpenAIUserContent(params.question, imageParts: questionImageParts) {
+            payloadMessages.append(["role": "user", "content": currentContent])
         }
         if let prefix = params.prefixReply, prefix.canContinueReply {
             let text = buildAnthropicAssistantBlocks(prefix, isPrefix: true)

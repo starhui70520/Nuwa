@@ -46,6 +46,9 @@ export const describeReply = (reply: AssistantMessage): Notice | null => {
     if (kind === 'network') {
       return { text: translate('commonNetworkErrorToast') }
     }
+    if (kind === 'interrupted') {
+      return { text: message || translate('replyInterrupted') }
+    }
     switch (classifyStatus(status)) {
       case 'unauthorized':
         return { text: translate('replyInvalidApiKey'), action: 'apiKey' }
@@ -59,9 +62,10 @@ export const describeReply = (reply: AssistantMessage): Notice | null => {
         if (message) {
           return { text: message }
         }
-        return status !== undefined
-          ? { text: translate('replyHttpFailed', { status: String(status) }) }
-          : null
+        if (status !== undefined) {
+          return { text: translate('replyHttpFailed', { status: String(status) }) }
+        }
+        return kind === 'protocol' ? { text: translate('replyProtocolError') } : null
     }
   }
   const template = getTemplateText(reply)

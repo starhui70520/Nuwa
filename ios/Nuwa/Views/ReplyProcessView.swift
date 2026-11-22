@@ -262,7 +262,9 @@ private struct SourceThumbnails: View {
     let items: [WebSearchResultItem]
     var body: some View {
         HStack(spacing: -4) {
-            ForEach(items.prefix(4)) { SourceLogo(item: $0) }
+            ForEach(Array(items.prefix(4).enumerated()), id: \.offset) { _, item in
+                SourceLogo(item: item)
+            }
         }
     }
 }
@@ -310,7 +312,7 @@ struct SearchSourcesPanel: View {
             Divider()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 6) {
-                    ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                    ForEach(Array(items.enumerated()), id: \.offset) { index, item in
                         if let url = webURL(item.url) {
                             Link(destination: url) {
                                 VStack(alignment: .leading, spacing: 5) {

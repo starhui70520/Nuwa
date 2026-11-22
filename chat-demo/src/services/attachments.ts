@@ -225,7 +225,7 @@ const MAX_IMAGE_DIMENSION = 4096
  * - 任意宽或高超过 4096px 的长图（如手机长截图）等比缩放至 4096px 以内，避免服务端报 too large to process；
  * - 标准格式且尺寸合规的图片原样上传，无损保留。
  */
-const normalizeImageForUpload = async (file: Blob, name: string): Promise<File> => {
+export const normalizeImageForUpload = async (file: Blob, name: string): Promise<File> => {
   const sniffed = await sniffApiSupportedImageMime(file)
   const formatSupported = Boolean(sniffed && API_SUPPORTED_IMAGE_TYPES.has(sniffed))
   const fallbackFile = () =>
@@ -278,6 +278,21 @@ const normalizeImageForUpload = async (file: Blob, name: string): Promise<File> 
   return fallbackFile()
 }
 
+/** 将 Blob 转为 data URL（用于 OpenAI 兼容协议内联图片传输，兼容旧版 WebView） */
+export const blobToDataUrl = (blob: Blob): Promise<string> =>
+  new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        resolve(reader.result)
+      } else {
+        reject(new Error('Failed to encode image data URL'))
+      }
+    }
+    reader.onerror = () => reject(reader.error ?? new Error('Failed to read image blob'))
+    reader.readAsDataURL(blob)
+  })
+
 /** 排队上传，最多同时上传 MAX_CONCURRENT 个；排队期间中止的任务不会发出请求 */
 const enqueueUpload = (
   apiKey: string,
@@ -313,7 +328,7 @@ const enqueueUpload = (
  */
 export type UploadTask =
   | { status: 'uploading' }
-  | { status: 'done'; serverId: string }
+  | { status: 'done'; serverId: string | null }
   | { status: 'error'; error: TranslationMessage; retryable: boolean }
 
 type UploadState = { tasks: Record<string, UploadTask> }
@@ -373,6 +388,11 @@ export const uploadAttachment = (
     .finally(() => pending.delete(id))
   pending.set(id, { promise, controller })
   return promise
+}
+
+/** OpenAI 兼容协议图片无需走 Anthropic Files API，直接标记本地就绪（发送时内联 base64） */
+export const markAttachmentLocalReady = (id: string) => {
+  setTask(id, { status: 'done', serverId: null })
 }
 
 export const cancelUpload = (id: string) => {

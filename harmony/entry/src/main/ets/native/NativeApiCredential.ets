@@ -97,13 +97,16 @@ export async function verifyNativeApiCredential(credential: NativeApiCredential)
   if (/[\r\n]/.test(key)) {
     throw new Error('API Key 中不能包含换行');
   }
+  if (key && !/^[\x21-\x7e]+$/.test(key)) {
+    throw new Error('API Key 包含无效字符（如中文、空格或全角符号），请仅粘贴纯英文与数字密钥');
+  }
   if (!credential.model.trim()) {
     throw new Error('请输入模型名称');
   }
 
   const path = endpoint.pathname.replace(/\/+$/, '');
   if (credential.protocol === 'anthropic') {
-    endpoint.pathname = `${path.replace(/\/(?:anthropic\/v1(?:\/messages)?|v1)$/i, '')}/models`;
+    endpoint.pathname = `${path.replace(/\/(?:anthropic(?:\/v1(?:\/messages)?)?|v1)$/i, '')}/models`;
   } else {
     endpoint.pathname = `${path.replace(/\/chat\/completions$/, '') || '/v1'}/models`;
   }

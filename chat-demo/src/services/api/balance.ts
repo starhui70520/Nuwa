@@ -29,7 +29,7 @@ const normalizeOrigin = (rawBaseUrl: string): string => {
   if (!trimmed) {
     return API_ORIGIN
   }
-  return trimmed.replace(/\/(v1|anthropic\/v1)$/i, '')
+  return trimmed.replace(/\/(v1|anthropic(?:\/v1)?)$/i, '')
 }
 
 const getCredentialTag = (state: SettingsState = useSettings.getState()): string | null => {

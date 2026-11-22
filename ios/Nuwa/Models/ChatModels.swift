@@ -399,7 +399,15 @@ struct ChatSession: Identifiable, Codable, Equatable {
 
     /// Normalizes a legacy linear message list into a linked tree with rootMessageId / parentId / selectedChildId.
     mutating func ensureTreeNormalized() {
-        guard rootMessageId == nil && !messages.isEmpty else { return }
+        guard !messages.isEmpty else { return }
+        if let root = rootMessageId, messages.contains(where: { $0.id == root }) {
+            return
+        }
+        if rootMessageId != nil {
+            // Repair an orphaned rootMessageId pointer without discarding existing branch links.
+            rootMessageId = messages.first(where: { $0.parentId == nil })?.id ?? messages.first?.id
+            return
+        }
         rootMessageId = messages.first?.id
         for i in messages.indices {
             messages[i].parentId = i > 0 ? messages[i - 1].id : nil
@@ -409,19 +417,27 @@ struct ChatSession: Identifiable, Codable, Equatable {
 
     /// Returns the currently visible linear branch path (1:1 getVisibleMessages).
     func visibleMessages() -> [ChatMessage] {
+        guard !messages.isEmpty else { return [] }
         guard let root = rootMessageId else {
             return messages
         }
         var byId = [UUID: Int](minimumCapacity: messages.count)
-        for (index, message) in messages.enumerated() { byId[message.id] = index }
+        for (index, message) in messages.enumerated() {
+            if byId[message.id] == nil {
+                byId[message.id] = index
+            }
+        }
+        let startId: UUID? = byId[root] != nil
+            ? root
+            : (messages.first(where: { $0.parentId == nil })?.id ?? messages.first?.id)
         var path: [ChatMessage] = []
-        var cursor: UUID? = root
+        var cursor: UUID? = startId
         while let id = cursor, let index = byId.removeValue(forKey: id) {
             let msg = messages[index]
             path.append(msg)
             cursor = msg.selectedChildId
         }
-        return path
+        return path.isEmpty ? messages : path
     }
 
     func messageVersions() -> [UUID: MessageVersionInfo] {

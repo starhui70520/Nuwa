@@ -430,7 +430,7 @@ function filesEndpoint(config: NativeChatConfig): string {
     resolved.hash || resolved.search) {
     throw new Error('附件服务地址必须使用 HTTPS 且不包含凭据、查询或片段。');
   }
-  const basePath = resolved.pathname.replace(/\/+$/, '').replace(/\/(?:anthropic\/v1(?:\/(?:messages|files))?|v1)$/i, '');
+  const basePath = resolved.pathname.replace(/\/+$/, '').replace(/\/(?:anthropic(?:\/v1(?:\/(?:messages|files))?)?|v1)$/i, '');
   resolved.pathname = basePath + '/anthropic/v1/files';
   return resolved.href;
 }
@@ -809,6 +809,53 @@ export class NativeChatAttachments {
       return result;
     } finally {
       await fileIo.close(file);
+    }
+  }
+
+  async encodeImageDataUrl(context: common.UIAbilityContext, item: NativeAttachment): Promise<string | null> {
+    if (!item.local || !item.isImage) {
+      return null;
+    }
+    const maxInlineBytes = 20 * 1024 * 1024;
+    const dummyConfig: NativeChatConfig = { baseUrl: '', apiKey: '', model: '' };
+    const transfer: AttachmentTransfer = { config: dummyConfig, canceled: false };
+    let file: UploadFile = {
+      localPath: attachmentPath(context, item),
+      mimeType: item.mimeType || 'image/jpeg',
+      name: item.name,
+      temporary: false,
+    };
+    try {
+      file = await queueImageConversion(file, transfer);
+      const handle = await fileIo.open(file.localPath, fileIo.OpenMode.READ_ONLY);
+      try {
+        const size = (await fileIo.stat(handle.fd)).size;
+        if (size <= 0 || size > maxInlineBytes) {
+          return null;
+        }
+        const bytes = new Uint8Array(size);
+        let offset = 0;
+        while (offset < size) {
+          const chunk = new ArrayBuffer(Math.min(IO_CHUNK, size - offset));
+          const read = await fileIo.read(handle.fd, chunk);
+          if (read <= 0) {
+            return null;
+          }
+          bytes.set(new Uint8Array(chunk, 0, read), offset);
+          offset += read;
+        }
+        const mime = file.mimeType || 'image/jpeg';
+        const encoded = new util.Base64Helper().encodeToStringSync(bytes);
+        return `data:${mime};base64,${encoded}`;
+      } finally {
+        await fileIo.close(handle);
+      }
+    } catch {
+      return null;
+    } finally {
+      if (file.temporary) {
+        await fileIo.unlink(file.localPath).catch(() => {});
+      }
     }
   }
 

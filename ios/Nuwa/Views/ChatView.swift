@@ -1054,7 +1054,7 @@ struct ChatView: View {
     private func userFilesStrip(_ files: [FileAttachment]) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                ForEach(files) { file in
+                ForEach(Array(files.enumerated()), id: \.offset) { _, file in
                     AttachmentThumbnail(file: file, pointSize: 72) { image in
                         if let thumb = image {
                             Button {
