@@ -1,4 +1,9 @@
 import SwiftUI
+import UIKit
+
+enum ChatMemoryBudget {
+    static let isConstrainedDevice = ProcessInfo.processInfo.physicalMemory <= 4 * 1024 * 1024 * 1024
+}
 
 @main
 struct NuwaApp: App {
@@ -38,6 +43,11 @@ struct NuwaApp: App {
             }
             .onOpenURL { url in
                 chatStore.handleIncomingURL(url, settings: settings)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
+                AttachmentStore.purgeThumbnailCache()
+                MarkdownMessageView.purgeRenderCaches()
+                LatexParser.purgeCache()
             }
             .onChange(of: scenePhase) { _, phase in
                 if phase == .active {

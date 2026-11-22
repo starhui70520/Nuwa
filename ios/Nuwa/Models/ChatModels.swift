@@ -376,6 +376,25 @@ struct ChatSession: Identifiable, Codable, Equatable {
     var updatedAt: Date
     var isPinned: Bool
     var pinnedAt: Date?
+    private(set) var hasLoadedMessages = true
+
+    private enum CodingKeys: String, CodingKey {
+        case id, title, rootMessageId, messages, createdAt, updatedAt, isPinned, pinnedAt
+    }
+
+    var metadataOnly: ChatSession {
+        var result = self
+        result.messages = []
+        result.hasLoadedMessages = false
+        return result
+    }
+
+    mutating func applyMetadata(from record: ChatSession) {
+        title = record.title
+        updatedAt = record.updatedAt
+        isPinned = record.isPinned
+        pinnedAt = record.pinnedAt
+    }
 
     init(
         id: UUID = UUID(),

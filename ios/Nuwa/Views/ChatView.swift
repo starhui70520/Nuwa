@@ -121,8 +121,13 @@ struct ChatView: View {
                                 onSetSessionsPinned: { chatStore.setSessionsPinned($0, pinned: $1) },
                                 onRenameSession: { chatStore.renameSession($0, title: $1) },
                                 onShareSession: { id in
-                                    if let session = chatStore.session(byId: id) {
-                                        ProximitySessionShareCoordinator.presentShareSheet(for: session)
+                                    Task {
+                                        do {
+                                            let session = try await chatStore.sessionForSharing(id)
+                                            ProximitySessionShareCoordinator.presentShareSheet(for: session)
+                                        } catch {
+                                            chatStore.showToast(error.localizedDescription)
+                                        }
                                     }
                                 },
                                 onDeleteSession: { chatStore.deleteSession($0) },
@@ -493,7 +498,13 @@ struct ChatView: View {
                 )
                 .padding(.top, usesSystemSafeAreaBars ? 0 : topSafe + headerHeight)
                 .padding(.bottom, usesSystemSafeAreaBars ? 0 : bottomSafe + composerHeight)
-            } else if !chatStore.historyLoaded {
+            } else if chatStore.activeSessionLoadFailed, let id = session?.id {
+                VStack(spacing: 12) {
+                    Text(settings.locale == .enUS ? "Couldn’t open this conversation." : "无法打开此对话。")
+                    Button(settings.locale == .enUS ? "Retry" : "重试") { chatStore.selectSession(id) }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if !chatStore.historyLoaded || chatStore.activeSessionIsLoading {
                 ProgressView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let session, let timeline, hasMessages {
@@ -579,7 +590,8 @@ struct ChatView: View {
             speech: speech,
             sessionId: chatStore.activeSessionId,
             isGenerating: chatStore.isGenerating,
-            isImporting: chatStore.importingHistory || !chatStore.historyLoaded,
+            isImporting: chatStore.importingHistory || !chatStore.historyLoaded
+                || chatStore.activeSessionIsLoading || chatStore.activeSessionLoadFailed,
             allowPressEffect: allowComposerPress,
             onSend: sendMessage,
             onStop: {
@@ -1154,6 +1166,8 @@ struct ChatView: View {
             && chatStore.pendingIncomingFile == nil
             && !chatStore.isGenerating
             && !chatStore.importingHistory
+            && !chatStore.activeSessionIsLoading
+            && !chatStore.activeSessionLoadFailed
         proximityShareCoordinator.update(session: chatStore.activeSession, eligible: eligible)
     }
 

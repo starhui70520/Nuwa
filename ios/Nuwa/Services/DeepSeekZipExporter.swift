@@ -14,7 +14,10 @@ enum DeepSeekZipExporter {
         let data: Data
     }
 
-    static func exportSessionsToZip(_ sessions: [ChatSession]) throws -> Data {
+    static func exportSessionsToZip(
+        _ sessions: [ChatSession],
+        loadSession: (ChatSession) throws -> ChatSession = { $0 }
+    ) throws -> Data {
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 
@@ -28,7 +31,8 @@ enum DeepSeekZipExporter {
 
         // 2. chat_sessions/<id>.json
         var indexList: [[String: Any]] = []
-        for var session in sessions {
+        for record in sessions {
+            var session = try loadSession(record)
             session.ensureTreeNormalized()
             let sessionIdStr = session.id.uuidString.lowercased()
             let insertedStr = iso.string(from: session.createdAt)

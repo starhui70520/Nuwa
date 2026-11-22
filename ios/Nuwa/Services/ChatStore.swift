@@ -242,11 +242,21 @@ struct SessionImportOutcome: Equatable {
 @MainActor
 final class ChatStore: ObservableObject {
     @Published private(set) var sessions: [ChatSession] = [] {
-        didSet { activeTimelineCache = nil }
+        didSet {
+            if let activeSessionId,
+               oldValue.first(where: { $0.id == activeSessionId }) != activeSession {
+                activeTimelineCache = nil
+            }
+        }
     }
     @Published private(set) var activeSessionId: UUID? {
-        didSet { activeTimelineCache = nil }
+        didSet {
+            guard oldValue != activeSessionId else { return }
+            activeTimelineCache = nil
+            loadActiveSessionIfNeeded()
+        }
     }
+    @Published private(set) var activeSessionLoadFailed = false
     @Published var isGenerating = false
     @Published private(set) var importingHistory = false
     @Published private(set) var importProgress: ImportProgress?
@@ -265,6 +275,7 @@ final class ChatStore: ObservableObject {
     private var generationID: UUID?
     private var toastTask: Task<Void, Never>?
     private var saveWorkItem: DispatchWorkItem?
+    private var saveToken: UUID?
     private var lastIcloudBackupAt: Date?
     private var manuallyRenamedSessions: Set<UUID> = []
     private var rejectedHistoryImageOrder: [String] = []
@@ -277,6 +288,7 @@ final class ChatStore: ObservableObject {
     private var committingImport = false
     private var saveDeferredByImport = false
     private var activeTimelineCache: ActiveTimeline?
+    private var sessionLoadTask: Task<Void, Never>?
 
     private static let persistenceQueue = DispatchQueue(label: "com.rankchord.nuwa.persistence", qos: .utility)
     nonisolated(unsafe) private static let persistence = ChatHistoryPersistence()
@@ -328,8 +340,21 @@ final class ChatStore: ObservableObject {
         return sessions.first { $0.id == activeSessionId }
     }
 
-    func session(byId id: UUID) -> ChatSession? {
-        sessions.first { $0.id == id }
+    var activeSessionIsLoading: Bool {
+        activeSession?.hasLoadedMessages == false && !activeSessionLoadFailed
+    }
+
+    func sessionForSharing(_ id: UUID) async throws -> ChatSession {
+        guard let record = sessions.first(where: { $0.id == id }) else { throw CocoaError(.fileReadNoSuchFile) }
+        if record.hasLoadedMessages { return record }
+        let url = Self.storageURL
+        return try await Task.detached(priority: .userInitiated) {
+            try ChatHistoryPersistence.withSessionLoader(legacyURL: url) { read in
+                var session = try read(id)
+                session.applyMetadata(from: record)
+                return session
+            }
+        }.value
     }
 
     struct ActiveTimeline {
@@ -339,24 +364,32 @@ final class ChatStore: ObservableObject {
 
     var activeTimeline: ActiveTimeline? {
         if let activeTimelineCache { return activeTimelineCache }
-        guard let session = activeSession else { return nil }
+        guard let session = activeSession, session.hasLoadedMessages else { return nil }
         let timeline = ActiveTimeline(messages: session.visibleMessages(), versions: session.messageVersions())
         activeTimelineCache = timeline
         return timeline
     }
 
     func matchingSessionIDs(query: String) async -> Set<UUID> {
+        guard historyLoaded else { return [] }
         let snapshot = sessions
+        let url = Self.storageURL
         let lookup = Task.detached(priority: .userInitiated) {
             var matches = Set<UUID>()
-            for session in snapshot {
-                if Task.isCancelled { break }
-                if session.title.localizedCaseInsensitiveContains(query)
-                    || session.messages.contains(where: {
-                        $0.content.localizedCaseInsensitiveContains(query)
-                        || $0.reasoning.localizedCaseInsensitiveContains(query)
-                    }) {
-                    matches.insert(session.id)
+            try? ChatHistoryPersistence.withSessionLoader(legacyURL: url) { read in
+                for record in snapshot {
+                    if Task.isCancelled { break }
+                    if record.title.localizedCaseInsensitiveContains(query) {
+                        matches.insert(record.id)
+                        continue
+                    }
+                    if let session = record.hasLoadedMessages ? record : try? read(record.id),
+                       session.messages.contains(where: {
+                           $0.content.localizedCaseInsensitiveContains(query)
+                               || $0.reasoning.localizedCaseInsensitiveContains(query)
+                       }) {
+                        matches.insert(record.id)
+                    }
                 }
             }
             return matches
@@ -372,8 +405,9 @@ final class ChatStore: ObservableObject {
 
     @discardableResult
     func createNewSession(silentIfAlreadyNew: Bool = false) -> ChatSession? {
+        guard !committingImport else { return nil }
         stopGenerating()
-        if activeSessionId == nil || (activeSession?.visibleMessages().isEmpty == true) {
+        if activeSessionId == nil || (activeSession?.hasLoadedMessages == true && activeSession?.messages.isEmpty == true) {
             if !silentIfAlreadyNew {
                 showToast("已在最新对话中")
             }
@@ -385,9 +419,12 @@ final class ChatStore: ObservableObject {
     }
 
     func selectSession(_ id: UUID) {
+        guard !committingImport else { return }
         if activeSessionId != id {
             stopGenerating()
             activeSessionId = id
+        } else if activeSessionLoadFailed {
+            loadActiveSessionIfNeeded()
         }
     }
 
@@ -493,7 +530,7 @@ final class ChatStore: ObservableObject {
     // MARK: - Branching Chat Actions (Send / Edit / Regenerate / Continue / Switch Version)
 
     func sendCurrentDraft(settings: SettingsStore) {
-        guard historyLoaded else { return }
+        guard historyLoaded, activeSession?.hasLoadedMessages != false else { return }
         let targetId = activeSessionId
         guard draftStore.canSend(for: targetId, isBusy: importingHistory || isGenerating) else { return }
         let d = draftStore.consumeDraft(for: targetId)
@@ -1131,9 +1168,21 @@ final class ChatStore: ObservableObject {
     func exportDeepSeekZipDataAsync() async throws -> Data {
         guard historyLoaded else { throw HistoryUnavailable() }
         let snapshot = sessions
+        let url = Self.storageURL
         return try await Task.detached(priority: .userInitiated) {
-            try DeepSeekZipExporter.exportSessionsToZip(snapshot)
+            try Self.exportSnapshot(snapshot, legacyURL: url)
         }.value
+    }
+
+    private nonisolated static func exportSnapshot(_ snapshot: [ChatSession], legacyURL: URL) throws -> Data {
+        try ChatHistoryPersistence.withSessionLoader(legacyURL: legacyURL, consistentSnapshot: true) { read in
+            try DeepSeekZipExporter.exportSessionsToZip(snapshot) { record in
+                guard !record.hasLoadedMessages else { return record }
+                var session = try read(record.id)
+                session.applyMetadata(from: record)
+                return session
+            }
+        }
     }
 
     func importFromFile(_ url: URL) async throws -> Int {
@@ -1790,24 +1839,25 @@ final class ChatStore: ObservableObject {
         }
         guard DeepSeekZipExporter.isIcloudAvailable() else { return }
         let snapshot = sessions
+        let url = Self.storageURL
         lastIcloudBackupAt = Date()
         Task.detached(priority: .utility) {
-            if let zip = try? DeepSeekZipExporter.exportSessionsToZip(snapshot) {
+            if let zip = try? Self.exportSnapshot(snapshot, legacyURL: url) {
                 _ = DeepSeekZipExporter.writeIcloudSnapshot(zipData: zip)
             }
         }
     }
 
     private func commitImportedSessions(_ incoming: [ChatSession]) async throws -> SessionImportOutcome {
+        guard !committingImport else { throw HistoryImportInProgress() }
         if isGenerating, incoming.contains(where: { $0.id == activeSessionId }) { stopGenerating() }
-        let merged = mergeSessions(incoming)
-        guard merged.changed else { return merged.outcome }
-
-        // Keep delayed snapshots from overwriting the import while SQLite commits it.
         committingImport = true
         saveWorkItem?.cancel()
+        saveWorkItem = nil
+        saveToken = nil
         let targetURL = Self.storageURL
-        let snapshot = merged.sessions
+        let snapshot = sessions
+        let selected = activeSessionId
         defer {
             committingImport = false
             if saveDeferredByImport {
@@ -1816,23 +1866,47 @@ final class ChatStore: ObservableObject {
             }
         }
         do {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let (changes, outcome) = try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<([ChatSession], SessionImportOutcome), Error>) in
                 Self.persistenceQueue.async {
-                    continuation.resume(with: Result { try Self.persistence.save(snapshot, legacyURL: targetURL) })
+                    continuation.resume(with: Result {
+                        let merged = try ChatHistoryPersistence.withSessionLoader(legacyURL: targetURL) { read in
+                            try Self.mergeSessions(incoming, into: snapshot, read: read)
+                        }
+                        try Self.persistence.save(merged.sessions, legacyURL: targetURL)
+                        Self.persistence.retainSavedPayload(for: selected)
+                        let changes = merged.sessions.compactMap { record -> ChatSession? in
+                            guard merged.changed.contains(record.id) else { return nil }
+                            return record.id == selected ? record : record.metadataOnly
+                        }
+                        return (changes, merged.outcome)
+                    })
                 }
             }
+            // An unrelated reply can finish during the transaction. Do not overwrite it.
+            var current = sessions
+            let indices = Dictionary(current.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first })
+            for record in changes {
+                if let index = indices[record.id] {
+                    current[index] = record
+                } else {
+                    current.append(record)
+                }
+            }
+            sessions = current
+            listStore.sync(from: sessions)
+            let changedIDs = Set(changes.map(\.id))
+            evictSavedSessions(from: snapshot.filter { !changedIDs.contains($0.id) })
+            if activeSession?.hasLoadedMessages == false { loadActiveSessionIfNeeded() }
+            if !changes.isEmpty { ShareSuggestionDonor.donateUsage(mode: .import) }
+            return outcome
         } catch {
             saveDeferredByImport = true
             throw error
         }
-        // An unrelated reply can finish while the disk write runs.
-        sessions = saveDeferredByImport ? mergeSessions(incoming).sessions : snapshot
-        listStore.sync(from: sessions)
-        ShareSuggestionDonor.donateUsage(mode: .import)
-        return merged.outcome
     }
 
-    private static func messageSignature(_ message: ChatMessage) -> String {
+    private nonisolated static func messageSignature(_ message: ChatMessage) -> String {
         if message.role == .user {
             let files = message.files.map { "\($0.name):\($0.size)" }.joined(separator: ",")
             return "U:\(message.content)|\(files)"
@@ -1847,7 +1921,7 @@ final class ChatStore: ObservableObject {
 
     /// Dual 32-bit FNV-1a rolling hash matching Android `db.ts` (`hashStep`) bit-for-bit,
     /// compressing arbitrary-length histories into 16-hex-char digests in O(N) time & memory.
-    private static func hashStep(seed: String, text: String) -> String {
+    private nonisolated static func hashStep(seed: String, text: String) -> String {
         var h1: UInt32 = 0x811c9dc5
         var h2: UInt32 = 0x01000193
         for unit in seed.utf16 {
@@ -1867,7 +1941,7 @@ final class ChatStore: ObservableObject {
 
     /// Iterative O(N) root-to-node path hash set matching Android `db.ts` (`buildSessionPathSignatures`),
     /// avoiding recursion stack overflow and O(N^2) string memory on long conversations.
-    private static func buildSessionPathSignatures(_ session: ChatSession) -> Set<String> {
+    private nonisolated static func buildSessionPathSignatures(_ session: ChatSession) -> Set<String> {
         var normalized = session
         normalized.ensureTreeNormalized()
         let byId = Dictionary(normalized.messages.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
@@ -1896,7 +1970,7 @@ final class ChatStore: ObservableObject {
         return paths
     }
 
-    private static func withBranchPrefix(_ title: String, prefix: String) -> String {
+    private nonisolated static func withBranchPrefix(_ title: String, prefix: String) -> String {
         var base = title
         if base.hasPrefix("N分支·") || base.hasPrefix("D分支·") {
             base = String(base.dropFirst(4))
@@ -1906,7 +1980,7 @@ final class ChatStore: ObservableObject {
     }
 
     /// Preserves local attachment file references / serverIds on messages carried over when updating a session.
-    private static func carryOverLocalAttachments(from existing: ChatSession, into incomingMessages: [ChatMessage]) -> [ChatMessage] {
+    private nonisolated static func carryOverLocalAttachments(from existing: ChatSession, into incomingMessages: [ChatMessage]) -> [ChatMessage] {
         var localById: [String: FileAttachment] = [:]
         var localByNameSize: [String: FileAttachment] = [:]
         for msg in existing.messages where msg.role == .user {
@@ -1940,7 +2014,15 @@ final class ChatStore: ObservableObject {
     /// 3. Local behind Incoming (incoming has extra and local has no unique branch) -> import the extra messages.
     /// 4. Partially overlapping / diverged (both sides have distinct messages) -> do NOT merge; preserve local as
     ///    `N分支·` and create independent incoming branch with new ID as `D分支·`.
-    private func mergeSessions(_ incoming: [ChatSession]) -> (sessions: [ChatSession], outcome: SessionImportOutcome, changed: Bool) {
+    private nonisolated static func mergeSessions(
+        _ incoming: [ChatSession], into sessions: [ChatSession], read: (UUID) throws -> ChatSession
+    ) throws -> (sessions: [ChatSession], outcome: SessionImportOutcome, changed: Set<UUID>) {
+        func materialize(_ record: ChatSession) throws -> ChatSession {
+            if record.hasLoadedMessages { return record }
+            var session = try read(record.id)
+            session.applyMetadata(from: record)
+            return session
+        }
         var merged = sessions
         var existingById = Dictionary(merged.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first })
         var addedCount = 0
@@ -1948,7 +2030,7 @@ final class ChatStore: ObservableObject {
         var branchedCount = 0
         var skippedCount = 0
         var focusSessionId: UUID?
-        var changed = false
+        var changed = Set<UUID>()
 
         for item in incoming {
             guard let idx = existingById[item.id] else {
@@ -1956,11 +2038,11 @@ final class ChatStore: ObservableObject {
                 merged.append(item)
                 addedCount += 1
                 focusSessionId = item.id
-                changed = true
+                changed.insert(item.id)
                 continue
             }
 
-            let existing = merged[idx]
+            let existing = try materialize(merged[idx])
             let localPaths = Self.buildSessionPathSignatures(existing)
             let incomingPaths = Self.buildSessionPathSignatures(item)
             let localHasExtra = localPaths.contains { !incomingPaths.contains($0) }
@@ -1976,6 +2058,7 @@ final class ChatStore: ObservableObject {
             if !localHasExtra {
                 // Rule 3: Local is behind imported data -> update with incoming messages (preserving local attachments & pin).
                 let nextTitle = item.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? existing.title : item.title
+                merged[idx] = existing
                 merged[idx].title = nextTitle
                 merged[idx].rootMessageId = item.rootMessageId
                 merged[idx].messages = Self.carryOverLocalAttachments(from: existing, into: item.messages)
@@ -1986,14 +2069,14 @@ final class ChatStore: ObservableObject {
                 }
                 updatedCount += 1
                 focusSessionId = existing.id
-                changed = true
+                changed.insert(existing.id)
                 continue
             }
 
             // Rule 4: Both sides diverged -> do NOT merge; preserve local (`N分支·`) and incoming (`D分支·`) as 2 branches.
             // Guard against accidental duplicate re-import of the exact same already-branched `D分支·` conversation.
-            if let existingDuplicateBranch = merged.first(where: {
-                $0.title.hasPrefix("D分支·") && Self.buildSessionPathSignatures($0) == incomingPaths
+            if let existingDuplicateBranch = try merged.first(where: {
+                try $0.title.hasPrefix("D分支·") && Self.buildSessionPathSignatures(materialize($0)) == incomingPaths
             }) {
                 skippedCount += 1
                 focusSessionId = focusSessionId ?? existingDuplicateBranch.id
@@ -2015,7 +2098,8 @@ final class ChatStore: ObservableObject {
             merged.append(incomingBranched)
             branchedCount += 1
             focusSessionId = incomingBranched.id
-            changed = true
+            changed.insert(existing.id)
+            changed.insert(incomingBranched.id)
         }
         let outcome = SessionImportOutcome(
             addedCount: addedCount,
@@ -2048,11 +2132,23 @@ final class ChatStore: ObservableObject {
         }
         let snapshot = sessionsToSave
         let targetURL = Self.storageURL
-        let work = DispatchWorkItem {
-            do {
+        let selected = activeSessionId
+        let token = UUID()
+        saveToken = token
+        let work = DispatchWorkItem { [weak self] in
+            let result = Result {
                 try Self.persistence.save(snapshot, legacyURL: targetURL)
-            } catch {
-                Task { @MainActor in
+                Self.persistence.retainSavedPayload(for: selected)
+            }
+            Task { @MainActor [weak self] in
+                if self?.saveToken == token {
+                    self?.saveWorkItem = nil
+                    self?.saveToken = nil
+                }
+                switch result {
+                case .success:
+                    self?.evictSavedSessions(from: snapshot)
+                case .failure(let error):
                     AppLogStore.shared.record(.error, source: "chatStore.save", message: error.localizedDescription)
                 }
             }
@@ -2062,6 +2158,55 @@ final class ChatStore: ObservableObject {
             Self.persistenceQueue.async(execute: work)
         } else {
             Self.persistenceQueue.asyncAfter(deadline: .now() + 0.25, execute: work)
+        }
+    }
+
+    private func evictSavedSessions(from snapshot: [ChatSession]) {
+        let persisted = Dictionary(snapshot.lazy.filter(\.hasLoadedMessages).map { ($0.id, $0) },
+                                   uniquingKeysWith: { _, last in last })
+        var next = sessions
+        var evicted = false
+        for index in next.indices where next[index].hasLoadedMessages && next[index].id != activeSessionId {
+            if persisted[next[index].id] == next[index] {
+                next[index] = next[index].metadataOnly
+                evicted = true
+            }
+        }
+        if evicted { sessions = next }
+    }
+
+    private func loadActiveSessionIfNeeded() {
+        sessionLoadTask?.cancel()
+        activeSessionLoadFailed = false
+        if sessions.contains(where: { $0.id != activeSessionId && $0.hasLoadedMessages }) {
+            scheduleSave(immediate: true)
+        }
+        guard let record = activeSession, !record.hasLoadedMessages else { return }
+        let url = Self.storageURL
+        sessionLoadTask = Task { [weak self] in
+            guard !Task.isCancelled else { return }
+            let result = await withCheckedContinuation {
+                (continuation: CheckedContinuation<Result<(ChatSession, ActiveTimeline), Error>, Never>) in
+                Self.persistenceQueue.async {
+                    let loaded = Result<(ChatSession, ActiveTimeline), Error> {
+                        let session = try Self.persistence.loadSession(record.id, legacyURL: url)
+                        return (session, ActiveTimeline(messages: session.visibleMessages(), versions: session.messageVersions()))
+                    }
+                    continuation.resume(returning: loaded)
+                }
+            }
+            guard !Task.isCancelled, let self, self.activeSessionId == record.id,
+                  let index = self.sessions.firstIndex(where: { $0.id == record.id && !$0.hasLoadedMessages })
+            else { return }
+            switch result {
+            case .success((var session, let timeline)):
+                session.applyMetadata(from: self.sessions[index])
+                self.sessions[index] = session
+                self.activeTimelineCache = timeline
+            case .failure(let error):
+                AppLogStore.shared.record(.error, source: "chatStore.loadSession", message: error.localizedDescription)
+                self.activeSessionLoadFailed = true
+            }
         }
     }
 

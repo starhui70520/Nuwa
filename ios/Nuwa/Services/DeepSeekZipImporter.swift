@@ -278,11 +278,14 @@ enum DeepSeekZipImporter {
             let lower = path.lowercased()
             if lower.hasPrefix("chat_sessions/") && lower.hasSuffix(".json") && !lower.contains("_files/") {
                 var extractedInSession = 0
-                if let entryData = try? extractEntry(entry, from: data),
-                   let session = parseSessionFile(
-                    entryData, path: path, zipData: data, entriesByPath: entriesByNFCPath,
-                    staging: staging, strict: isV3, extractedImagesCount: &extractedInSession
-                   ) {
+                let parsed: ChatSession? = autoreleasepool {
+                    guard let entryData = try? extractEntry(entry, from: data) else { return nil }
+                    return parseSessionFile(
+                        entryData, path: path, zipData: data, entriesByPath: entriesByNFCPath,
+                        staging: staging, strict: isV3, extractedImagesCount: &extractedInSession
+                    )
+                }
+                if let session = parsed {
                     sessions.append(session)
                     imageCount += extractedInSession
                     sessionIds.insert(String(path.dropFirst("chat_sessions/".count).dropLast(".json".count)))

@@ -49,15 +49,15 @@ private enum MarkdownParseCache {
 
     static let cache: NSCache<NSString, CachedMarkdownBlocks> = {
         let c = NSCache<NSString, CachedMarkdownBlocks>()
-        c.countLimit = 250
-        c.totalCostLimit = 8 * 1024 * 1024
+        c.countLimit = ChatMemoryBudget.isConstrainedDevice ? 100 : 250
+        c.totalCostLimit = (ChatMemoryBudget.isConstrainedDevice ? 2 : 8) * 1024 * 1024
         return c
     }()
 
     static let inlineCache: NSCache<NSString, CachedInlineMarkdown> = {
         let cache = NSCache<NSString, CachedInlineMarkdown>()
-        cache.countLimit = 512
-        cache.totalCostLimit = 2 * 1024 * 1024
+        cache.countLimit = ChatMemoryBudget.isConstrainedDevice ? 192 : 512
+        cache.totalCostLimit = (ChatMemoryBudget.isConstrainedDevice ? 512 : 2048) * 1024
         return cache
     }()
 
@@ -559,9 +559,14 @@ private enum MarkdownParseCache {
 private enum CodeSyntaxHighlighter {
     private static let cache: NSCache<NSString, CachedCodeHighlight> = {
         let c = NSCache<NSString, CachedCodeHighlight>()
-        c.countLimit = 128
+        c.countLimit = ChatMemoryBudget.isConstrainedDevice ? 32 : 128
+        c.totalCostLimit = (ChatMemoryBudget.isConstrainedDevice ? 1 : 4) * 1024 * 1024
         return c
     }()
+
+    static func purgeCache() {
+        cache.removeAllObjects()
+    }
 
     private static let tokenRegex: NSRegularExpression? = try? NSRegularExpression(
         pattern: "(//[^\\n]*|#[^\\n]*|/\\*[\\s\\S]*?\\*/)|(\"(?:\\\\.|[^\"\\\\\\n])*\"|'(?:\\\\.|[^'\\\\\\n])*'|`(?:\\\\.|[^`\\\\])*`)|\\b(func|var|let|const|class|struct|enum|protocol|extension|import|return|if|else|for|while|switch|case|default|break|continue|guard|defer|async|await|try|catch|throw|throws|public|private|internal|fileprivate|final|static|override|init|self|super|true|false|nil|null|None|True|False|def|from|as|with|yield|lambda|in|not|and|or|function|export|interface|type|new|this|typeof|void|int|float|double|bool|string|char|auto|package|go|chan|select|match|fn|pub|mut|impl|use|mod|SELECT|FROM|WHERE|JOIN|INSERT|UPDATE|DELETE|CREATE|TABLE)\\b|\\b(\\d+(?:\\.\\d+)?)\\b",
@@ -605,12 +610,18 @@ private enum CodeSyntaxHighlighter {
                 attr[lower..<upper].foregroundColor = color
             }
         }
-        cache.setObject(CachedCodeHighlight(attr), forKey: cacheKey)
+        cache.setObject(CachedCodeHighlight(attr), forKey: cacheKey, cost: cacheKey.length * 8 + matches.count * 64)
         return attr
     }
 }
 
 struct MarkdownMessageView: View, Equatable {
+    static func purgeRenderCaches() {
+        MarkdownParseCache.cache.removeAllObjects()
+        MarkdownParseCache.inlineCache.removeAllObjects()
+        CodeSyntaxHighlighter.purgeCache()
+    }
+
     let text: String
     let citations: [TextCitation]
     let fontSize: Double

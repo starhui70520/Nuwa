@@ -67,10 +67,14 @@ enum AttachmentStore {
 
     private static let thumbnailCache: NSCache<NSString, UIImage> = {
         let cache = NSCache<NSString, UIImage>()
-        cache.countLimit = 120
-        cache.totalCostLimit = 32 * 1024 * 1024
+        cache.countLimit = ChatMemoryBudget.isConstrainedDevice ? 40 : 120
+        cache.totalCostLimit = (ChatMemoryBudget.isConstrainedDevice ? 8 : 32) * 1024 * 1024
         return cache
     }()
+
+    static func purgeThumbnailCache() {
+        thumbnailCache.removeAllObjects()
+    }
 
     static var filesDirectory: URL {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!

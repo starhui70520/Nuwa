@@ -166,7 +166,9 @@ private struct TimelineCollection<Row: View>: UIViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, UICollectionViewDelegate {
         private var input: TimelineCollection
-        private var messages: [UUID: ChatMessage] = [:]
+        private var renderedMessages: [ChatMessage] = []
+        private var indices: [UUID: Int] = [:]
+        private var itemIDs: [UUID] = []
         private var dataSource: UICollectionViewDiffableDataSource<Int, UUID>?
         private var isApplyingSnapshot = false
 
@@ -212,23 +214,25 @@ private struct TimelineCollection<Row: View>: UIViewRepresentable {
             }
 
             var reloadedFromEmpty = false
-            if previous.messages != updated.messages || messages.isEmpty {
+            if renderedMessages != updated.messages {
                 var uniqueIds: [UUID] = []
                 uniqueIds.reserveCapacity(updated.messages.count)
-                var nextMap = [UUID: ChatMessage](minimumCapacity: updated.messages.count)
-                for msg in updated.messages where nextMap[msg.id] == nil {
-                    nextMap[msg.id] = msg
-                    uniqueIds.append(msg.id)
+                var nextIndices = [UUID: Int](minimumCapacity: updated.messages.count)
+                for (index, message) in updated.messages.enumerated() where nextIndices[message.id] == nil {
+                    nextIndices[message.id] = index
+                    uniqueIds.append(message.id)
                 }
-                messages = nextMap
-                let currentSnapshot = dataSource.snapshot()
-                if currentSnapshot.itemIdentifiers != uniqueIds {
+                renderedMessages = updated.messages
+                indices = nextIndices
+                if itemIDs != uniqueIds {
+                    let wasEmpty = itemIDs.isEmpty
+                    itemIDs = uniqueIds
                     var snapshot = NSDiffableDataSourceSnapshot<Int, UUID>()
                     snapshot.appendSections([0])
                     snapshot.appendItems(uniqueIds)
                     isApplyingSnapshot = true
                     defer { isApplyingSnapshot = false }
-                    if currentSnapshot.numberOfItems == 0 {
+                    if wasEmpty {
                         reloadedFromEmpty = true
                         dataSource.applySnapshotUsingReloadData(snapshot)
                     } else {
@@ -269,7 +273,8 @@ private struct TimelineCollection<Row: View>: UIViewRepresentable {
         }
 
         private func configure(_ cell: TimelineCell<Row>, id: UUID) {
-            guard let message = messages[id] else { return }
+            guard let index = indices[id] else { return }
+            let message = renderedMessages[index]
             let appearance = input.appearance
             let key = TimelineCellKey(
                 message: message,

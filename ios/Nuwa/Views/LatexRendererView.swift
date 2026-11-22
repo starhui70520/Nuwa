@@ -108,9 +108,14 @@ private final class CachedLatexAST: NSObject {
 enum LatexParser {
     private static let cache: NSCache<NSString, CachedLatexAST> = {
         let c = NSCache<NSString, CachedLatexAST>()
-        c.countLimit = 256
+        c.countLimit = ChatMemoryBudget.isConstrainedDevice ? 64 : 256
+        c.totalCostLimit = (ChatMemoryBudget.isConstrainedDevice ? 1 : 4) * 1024 * 1024
         return c
     }()
+
+    static func purgeCache() {
+        cache.removeAllObjects()
+    }
 
     fileprivate static func parse(_ source: String, cacheable: Bool = true) -> [LatexNode] {
         let cleaned = stripOuterDelimiters(source)
@@ -121,7 +126,7 @@ enum LatexParser {
         var state = ParserState(cleaned)
         let nodes = state.parseSequence(stopAt: nil, depth: 0)
         if cacheable {
-            cache.setObject(CachedLatexAST(nodes), forKey: key)
+            cache.setObject(CachedLatexAST(nodes), forKey: key, cost: key.length * 16)
         }
         return nodes
     }
