@@ -14,6 +14,8 @@ const API_TIMEOUT_MS = 20_000
 const UPLOAD_TIMEOUT_MS = 240_000
 const POLL_INTERVAL_MS = 10_000
 const MAX_POLLS = 60
+const INVITE_TEST_DAYS = 89
+const MAX_TEST_DESC_LENGTH = 50
 
 class UploadError extends Error {
   constructor(message, retryable = false) {
@@ -64,14 +66,27 @@ function httpError(label, status) {
   return new UploadError(`${label} failed with HTTP ${status}.`, retryable)
 }
 
-async function requestApi(fetchImpl, token, label, path, query, body) {
+function safeMessage(value) {
+  if (typeof value !== 'string') return ''
+  return value.replace(/[\r\n\t]+/g, ' ').trim().slice(0, 240)
+}
+
+async function requestApi(fetchImpl, token, label, path, query, body, { method, extraHeaders } = {}) {
   const target = new URL(path, API_ORIGIN)
-  target.search = new URLSearchParams(query)
+  if (query && Object.keys(query).length > 0) {
+    target.search = new URLSearchParams(query)
+  }
+  const resolvedMethod = method ?? (body === undefined ? 'GET' : 'POST')
+  const headers = {
+    authorization: `Bearer ${token}`,
+    'content-type': 'application/json',
+    ...(extraHeaders ?? {}),
+  }
   let response
   try {
     response = await fetchImpl(target, {
-      method: body === undefined ? 'GET' : 'POST',
-      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      method: resolvedMethod,
+      headers,
       body: body === undefined ? undefined : JSON.stringify(body),
       redirect: 'error',
       signal: AbortSignal.timeout(API_TIMEOUT_MS),
@@ -80,8 +95,12 @@ async function requestApi(fetchImpl, token, label, path, query, body) {
     throw new UploadError(`${label} could not connect or timed out.`, true)
   }
   if (!response.ok) {
-    await response.body?.cancel().catch(() => {})
-    throw httpError(label, response.status)
+    const errText = await response.text().catch(() => '')
+    const detail = safeMessage(errText)
+    throw new UploadError(
+      `${label} failed with HTTP ${response.status}${detail ? `: ${detail}` : ''}.`,
+      response.status === 408 || response.status === 429 || response.status >= 500,
+    )
   }
   let result
   try {
@@ -89,9 +108,22 @@ async function requestApi(fetchImpl, token, label, path, query, body) {
   } catch {
     throw new UploadError(`${label} did not return a valid JSON response.`)
   }
-  const code = result?.ret?.code
-  if (code !== 0 && code !== '0') {
-    throw new UploadError(`${label} failed with Huawei response code ${safeCode(code)}.`)
+  if (result?.ret !== undefined) {
+    const code = result?.ret?.code
+    if (code !== 0 && code !== '0') {
+      const detail = safeMessage(result?.ret?.msg)
+      throw new UploadError(
+        `${label} failed with Huawei response code ${safeCode(code)}${detail ? ` (${detail})` : ''}.`,
+      )
+    }
+  } else if (result?.rtnCode !== undefined) {
+    const code = result.rtnCode
+    if (code !== 0 && code !== '0') {
+      const detail = safeMessage(result?.rtnMsg ?? result?.rtnDesc)
+      throw new UploadError(
+        `${label} failed with Huawei response code ${safeCode(code)}${detail ? ` (${detail})` : ''}.`,
+      )
+    }
   }
   return result
 }
@@ -261,6 +293,141 @@ export async function uploadTestPackage(appPath, {
   throw new UploadError(`Test package ${packageId} is registered, but analysis is still pending. Check Huawei before rerunning.`)
 }
 
+function normalizeTestDesc(raw, fallback) {
+  const clean = String(raw ?? '')
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  const text = clean || fallback
+  return Array.from(text).slice(0, MAX_TEST_DESC_LENGTH).join('')
+}
+
+async function listHuaweiTestGroups(fetchImpl, token, appId, groupType) {
+  const result = await requestApi(
+    fetchImpl,
+    token,
+    `Listing Huawei test groups (groupType=${groupType})`,
+    '/api/app-test/v1/test-group/list',
+    { groupType: String(groupType), current: '1', pageSize: '100' },
+    undefined,
+    { extraHeaders: { appId } },
+  )
+  return Array.isArray(result?.groups) ? result.groups : []
+}
+
+async function resolveHuaweiTestGroups(fetchImpl, token, appId, requestedFilter) {
+  const externalGroups = await listHuaweiTestGroups(fetchImpl, token, appId, 0)
+  const wanted = requestedFilter
+    ? new Set(
+        requestedFilter
+          .split(',')
+          .map((name) => name.trim().toLowerCase())
+          .filter(Boolean),
+      )
+    : null
+
+  if (!wanted || wanted.size === 0) {
+    if (externalGroups.length > 0) {
+      return externalGroups
+    }
+    const internalGroups = await listHuaweiTestGroups(fetchImpl, token, appId, 1).catch(() => [])
+    return internalGroups
+  }
+
+  let matched = externalGroups.filter((g) => wanted.has(String(g?.groupName ?? '').trim().toLowerCase()))
+  if (matched.length === 0) {
+    const internalGroups = await listHuaweiTestGroups(fetchImpl, token, appId, 1).catch(() => [])
+    matched = internalGroups.filter((g) => wanted.has(String(g?.groupName ?? '').trim().toLowerCase()))
+  }
+  if (matched.length === 0) {
+    const available = externalGroups.map((g) => g?.groupName).filter(Boolean).join(', ') || '(none)'
+    throw new UploadError(
+      `Requested Huawei test group "${requestedFilter}" was not found. Available external groups: ${available}.`,
+    )
+  }
+  return matched
+}
+
+export async function submitInviteTestVersion({
+  appId,
+  packageId,
+  token,
+  testDesc,
+  groupFilter = '',
+  onshelfSelfDetect = 0,
+  fetchImpl = fetch,
+  progress = console.log,
+}) {
+  const groups = await resolveHuaweiTestGroups(fetchImpl, token, appId, groupFilter)
+  if (groups.length === 0) {
+    throw new UploadError('No Huawei test groups found. Create a test group in AppGallery Connect before auto-submitting.')
+  }
+  const groupNames = groups.map((g) => g.groupName || g.groupId).join(', ')
+  progress(`Resolved Huawei test group(s): ${groupNames}`)
+
+  const desc = normalizeTestDesc(testDesc, 'HarmonyOS 邀请测试版本')
+  const created = await requestApi(
+    fetchImpl,
+    token,
+    'Creating Huawei invite-test version',
+    '/api/publish/v2/test/app/version',
+    { appId },
+    {
+      releaseType: 6,
+      testType: 3,
+      testDesc: desc,
+      onshelfSelfDetect: onshelfSelfDetect ? 1 : 0,
+    },
+  )
+  const versionId = String(created?.versionId ?? created?.data?.versionId ?? '').trim()
+  if (!versionId) {
+    throw new UploadError('Huawei created the test version but did not return a versionId.')
+  }
+  progress(`Created Huawei invite-test version ${versionId} (onshelfSelfDetect=${onshelfSelfDetect ? 1 : 0}).`)
+
+  const startTime = Date.now()
+  const endTime = startTime + INVITE_TEST_DAYS * 24 * 60 * 60 * 1000
+  await requestApi(
+    fetchImpl,
+    token,
+    'Updating Huawei invite-test version',
+    '/api/publish/v2/test/app/version',
+    { appId },
+    {
+      versionId,
+      pkgId: packageId,
+      openTestInfo: {
+        startTime,
+        endTime,
+        testDesc: desc,
+        testTaskInfo: {
+          groupInfos: groups.map((g) => ({
+            groupId: g.groupId,
+            groupName: g.groupName,
+            bind: 1,
+          })),
+          displayArea: '1',
+          needShareLink: 1,
+          needNotify: 1,
+        },
+      },
+    },
+    { method: 'PUT' },
+  )
+  progress(`Bound package ${packageId} and group(s) [${groupNames}] to test version ${versionId}.`)
+
+  await requestApi(
+    fetchImpl,
+    token,
+    'Submitting Huawei invite-test version for review',
+    '/api/publish/v2/test/app/version/submit',
+    { appId },
+    { versionId },
+  )
+  progress(`Submitted Huawei invite-test version ${versionId} for review.`)
+  return { versionId, groupNames, desc, onshelfSelfDetect: onshelfSelfDetect ? 1 : 0 }
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     if (process.argv.length !== 3) {
@@ -268,6 +435,33 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     }
     const packageId = await uploadTestPackage(process.argv[2])
     console.log(`Huawei test package ${packageId} passed analysis and is ready in the testing package inventory.`)
+    if (process.env.HUAWEI_SUBMIT_INVITE_TEST === 'true') {
+      const appId = process.env.HUAWEI_APP_ID?.trim()
+      const token = createServiceToken(process.env.HUAWEI_SERVICE_ACCOUNT_JSON)
+      const selfDetect = process.env.HUAWEI_ONSHELF_SELF_DETECT === '1' || process.env.HUAWEI_ONSHELF_SELF_DETECT === 'true' ? 1 : 0
+      const submitted = await submitInviteTestVersion({
+        appId,
+        packageId,
+        token,
+        testDesc: process.env.HUAWEI_TEST_DESC || '',
+        groupFilter: process.env.HUAWEI_TEST_GROUP || '',
+        onshelfSelfDetect: selfDetect,
+      })
+      if (process.env.GITHUB_STEP_SUMMARY) {
+        const { appendFileSync } = await import('node:fs')
+        appendFileSync(
+          process.env.GITHUB_STEP_SUMMARY,
+          [
+            `- Invite-test versionId: \`${submitted.versionId}\``,
+            `- Package ID: \`${packageId}\``,
+            `- Test group(s): \`${submitted.groupNames}\``,
+            `- On-shelf self-detect: \`${submitted.onshelfSelfDetect}\``,
+            `- Status: submitted for Huawei invite-test review`,
+            '',
+          ].join('\n'),
+        )
+      }
+    }
   } catch (error) {
     // Only print messages built locally from known fields.
     console.error(error instanceof UploadError ? error.message : 'Huawei test package upload failed.')
