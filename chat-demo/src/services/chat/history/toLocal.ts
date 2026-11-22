@@ -15,6 +15,7 @@ import type {
 import { fail } from './errors.js'
 import type { ChatMessage, FileEntry, Fragment, SessionFile } from './format.js'
 import { sessionFilesDir } from './paths.js'
+import { parseValidatedIsoTime } from './schema.js'
 
 export type LocalSession = {
   session: Session
@@ -22,12 +23,16 @@ export type LocalSession = {
   images: Map<string, string>
 }
 
-const time = (value: string) => Date.parse(value)
+const time = (value: string) => parseValidatedIsoTime(value)
 
 /** 链接会渲染成 href，只接受 HTTP / HTTPS。 */
 const isWebUrl = (value: string) => {
+  if (value.length < 7) {
+    return false
+  }
   try {
-    return ['http:', 'https:'].includes(new URL(value).protocol)
+    const protocol = new URL(value).protocol
+    return protocol === 'http:' || protocol === 'https:'
   } catch {
     return false
   }
@@ -244,9 +249,19 @@ const toAssistant = (message: ChatMessage): AssistantMessage => {
  * current_message_id 到根的路径为当前分支；其余节点默认选中 id 最大的子消息。
  */
 const buildTree = (file: SessionFile): Pick<Session, 'messages' | 'rootMessageId'> => {
-  const sorted = file.messages.toSorted((a, b) => a.id - b.id)
+  const rawMessages = file.messages
+  let alreadySorted = true
+  for (let i = 1; i < rawMessages.length; i++) {
+    if (rawMessages[i - 1].id > rawMessages[i].id) {
+      alreadySorted = false
+      break
+    }
+  }
+  const sorted = alreadySorted ? rawMessages : [...rawMessages].sort((a, b) => a.id - b.id)
   const byId = new Map<number, Message>()
-  const messages = sorted.map((message) => {
+  const messages = new Array<Message>(sorted.length)
+  for (let i = 0; i < sorted.length; i++) {
+    const message = sorted[i]
     const { id, parent_id } = message
     const parent = parent_id === null ? undefined : byId.get(parent_id)
     if (
@@ -262,8 +277,8 @@ const buildTree = (file: SessionFile): Pick<Session, 'messages' | 'rootMessageId
       parent.selectedChildId = local.id
     }
     byId.set(id, local)
-    return local
-  })
+    messages[i] = local
+  }
   if (messages.length === 0) {
     return { messages, rootMessageId: null }
   }

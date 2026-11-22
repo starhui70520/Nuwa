@@ -1,4 +1,5 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb'
+import { isLowPerfDevice, yieldToMain } from '../../app/devicePerf.js'
 import { createId } from '../../utils/id.js'
 import { toSessionSummary, type Message, type Session, type SessionSummary } from './types.js'
 
@@ -34,16 +35,30 @@ interface ChatDB extends DBSchema {
 
 let dbPromise: Promise<IDBPDatabase<ChatDB>> | null = null
 
-const storedSummary = (session: Session): StoredSessionSummary => ({
-  ...toSessionSummary(session),
-  fileIds: [
-    ...new Set(
-      session.messages.flatMap((message) =>
-        message.role === 'user' ? message.files.map((file) => file.id) : []
-      )
-    ),
-  ],
-})
+const storedSummary = (session: Session): StoredSessionSummary => {
+  let seen: Set<string> | null = null
+  const fileIds: string[] = []
+  for (let i = 0; i < session.messages.length; i++) {
+    const message = session.messages[i]
+    if (message.role !== 'user' || message.files.length === 0) {
+      continue
+    }
+    if (!seen) {
+      seen = new Set<string>()
+    }
+    for (let j = 0; j < message.files.length; j++) {
+      const id = message.files[j].id
+      if (!seen.has(id)) {
+        seen.add(id)
+        fileIds.push(id)
+      }
+    }
+  }
+  return {
+    ...toSessionSummary(session),
+    fileIds,
+  }
+}
 
 const abortTransaction = (tx: { abort(): void }) => {
   try {
@@ -258,32 +273,58 @@ export const addStagingSessions = async (sessions: Session[]): Promise<void> => 
 export const saveStagingFiles = (files: StoredFile[]): Promise<void> =>
   putFiles('filesStaging', files)
 
-/** 图片位于会话 JSON 之后；全部读完后回填具体 MIME，保留归档给出的 isImage 标识。 */
-export const updateStagingFileTypes = async (types: ReadonlyMap<string, string>): Promise<void> => {
-  if (types.size === 0) {
+const applyFileTypesToSession = (
+  session: Session,
+  types: ReadonlyMap<string, string>
+): boolean => {
+  let changed = false
+  for (let i = 0; i < session.messages.length; i++) {
+    const message = session.messages[i]
+    if (message.role !== 'user' || message.files.length === 0) {
+      continue
+    }
+    for (let j = 0; j < message.files.length; j++) {
+      const file = message.files[j]
+      const type = types.get(file.id) ?? ''
+      if (file.mimeType !== type) {
+        file.mimeType = type
+        changed = true
+      }
+    }
+  }
+  return changed
+}
+
+/** 图片位于会话 JSON 之后；全部读完后回填具体 MIME，保留归档给出的 isImage 标识。传入 targetSessionIds 时仅定向更新含图会话。 */
+export const updateStagingFileTypes = async (
+  types: ReadonlyMap<string, string>,
+  targetSessionIds?: ReadonlySet<string>
+): Promise<void> => {
+  if (types.size === 0 || (targetSessionIds && targetSessionIds.size === 0)) {
     return
   }
   const tx = (await getDB()).transaction('sessionsStaging', 'readwrite')
   await Promise.all([
     (async () => {
-      for (let cursor = await tx.store.openCursor(); cursor; cursor = await cursor.continue()) {
-        const session = cursor.value
-        let changed = false
-        for (const message of session.messages) {
-          if (message.role !== 'user') {
-            continue
-          }
-          for (const file of message.files) {
-            const type = types.get(file.id) ?? ''
-            if (file.mimeType !== type) {
-              file.mimeType = type
-              changed = true
+      try {
+        if (targetSessionIds) {
+          for (const id of targetSessionIds) {
+            const session = await tx.store.get(id)
+            if (session && applyFileTypesToSession(session, types)) {
+              await tx.store.put(session)
             }
           }
+          return
         }
-        if (changed) {
-          await cursor.update(session)
+        for (let cursor = await tx.store.openCursor(); cursor; cursor = await cursor.continue()) {
+          const session = cursor.value
+          if (applyFileTypesToSession(session, types)) {
+            await cursor.update(session)
+          }
         }
+      } catch (error) {
+        abortTransaction(tx)
+        throw error
       }
     })(),
     tx.done,
@@ -291,8 +332,8 @@ export const updateStagingFileTypes = async (types: ReadonlyMap<string, string>)
 }
 
 /**
- * 导入完成后用暂存替换正式数据：同一事务中替换会话、摘要和原件，并清空暂存。
- * 逐条游标复制，同一时间只读取一条记录；事务失败时整体回滚，正式数据不变。
+ * 导入完成后用暂存替换正式数据：同一事务中顺序替换会话、摘要和原件并清空暂存。
+ * 逐条游标复制且不并发交叠大 Blob 与大会话，降低低内存机型峰值占用；事务失败时整体回滚。
  */
 export const commitStaging = async (): Promise<SessionSummary[]> => {
   const summaries: SessionSummary[] = []
@@ -301,45 +342,69 @@ export const commitStaging = async (): Promise<SessionSummary[]> => {
     'readwrite'
   )
   const move = async (from: 'sessionsStaging' | 'filesStaging', to: 'sessions' | 'files') => {
-    try {
-      const target = tx.objectStore(to)
-      await target.clear()
-      if (to === 'sessions') {
-        await tx.objectStore('sessionSummaries').clear()
-      }
-      for (
-        let cursor = await tx.objectStore(from).openCursor();
-        cursor;
-        cursor = await cursor.continue()
-      ) {
-        await target.put(cursor.value)
-        if (to === 'sessions') {
-          const summary = storedSummary(cursor.value as Session)
-          await tx.objectStore('sessionSummaries').put(summary)
-          summaries.push(toSessionSummary(summary))
-        }
-      }
-      await tx.objectStore(from).clear()
-    } catch (error) {
-      // 同步抛出的错误不会让事务自动回滚，需显式中止，避免只提交清空和部分移入。
-      abortTransaction(tx)
-      throw error
+    const target = tx.objectStore(to)
+    await target.clear()
+    if (to === 'sessions') {
+      await tx.objectStore('sessionSummaries').clear()
     }
+    for (
+      let cursor = await tx.objectStore(from).openCursor();
+      cursor;
+      cursor = await cursor.continue()
+    ) {
+      await target.put(cursor.value)
+      if (to === 'sessions') {
+        const summary = storedSummary(cursor.value as Session)
+        await tx.objectStore('sessionSummaries').put(summary)
+        summaries.push(toSessionSummary(summary))
+      }
+    }
+    await tx.objectStore(from).clear()
   }
-  await Promise.all([move('sessionsStaging', 'sessions'), move('filesStaging', 'files'), tx.done])
+  await Promise.all([
+    (async () => {
+      try {
+        await move('sessionsStaging', 'sessions')
+        await move('filesStaging', 'files')
+      } catch (error) {
+        // 同步抛出的错误不会让事务自动回滚，需显式中止，避免只提交清空和部分移入。
+        abortTransaction(tx)
+        throw error
+      }
+    })(),
+    tx.done,
+  ])
   // 直接返回本次提交的列表，调用方无需在替换成功后再发起可能失败的读取。
   return summaries
 }
 
 const messageSignature = (message: Message): string => {
   if (message.role === 'user') {
-    const files = message.files.map((file) => `${file.name}:${file.size}`).join(',')
+    if (message.files.length === 0) {
+      return `U:${message.content}|`
+    }
+    let files = ''
+    for (let i = 0; i < message.files.length; i++) {
+      const file = message.files[i]
+      if (i > 0) {
+        files += ','
+      }
+      files += `${file.name}:${file.size}`
+    }
     return `U:${message.content}|${files}`
   }
-  const text = message.blocks
-    .filter((block) => block.type === 'text')
-    .map((block) => block.text)
-    .join('\n')
+  let text = ''
+  let hasText = false
+  for (let i = 0; i < message.blocks.length; i++) {
+    const block = message.blocks[i]
+    if (block.type === 'text') {
+      if (hasText) {
+        text += '\n'
+      }
+      text += block.text
+      hasText = true
+    }
+  }
   return `A:${text}`
 }
 
@@ -364,10 +429,15 @@ const hashStep = (seed: string, text: string): string => {
 
 /** 为会话消息树中的每个节点计算从根到该节点的路径哈希集合（迭代计算，O(N) 时间与内存，无递归爆栈）。 */
 const buildSessionPathSignatures = (session: Session): Set<string> => {
-  const byId = new Map(session.messages.map((message) => [message.id, message]))
+  const byId = new Map<string, Message>()
+  for (let i = 0; i < session.messages.length; i++) {
+    const message = session.messages[i]
+    byId.set(message.id, message)
+  }
   const memo = new Map<string, string>()
   const paths = new Set<string>()
-  for (const start of session.messages) {
+  for (let idx = 0; idx < session.messages.length; idx++) {
+    const start = session.messages[idx]
     if (memo.has(start.id)) {
       continue
     }
@@ -409,95 +479,96 @@ export const mergeStaging = async (): Promise<{
   summaries: SessionSummary[]
 }> => {
   let importedCount = 0
+  let stored: StoredSessionSummary[] = []
   const tx = (await getDB()).transaction(
     ['sessions', 'sessionSummaries', 'files', 'sessionsStaging', 'filesStaging'],
     'readwrite'
   )
   const mergeSessions = async () => {
-    try {
-      const target = tx.objectStore('sessions')
-      const summaryStore = tx.objectStore('sessionSummaries')
-      for (
-        let cursor = await tx.objectStore('sessionsStaging').openCursor();
-        cursor;
-        cursor = await cursor.continue()
-      ) {
-        const incoming = cursor.value
-        const existing = await target.get(incoming.id)
-        if (!existing) {
-          await target.put(incoming)
-          await summaryStore.put(storedSummary(incoming))
-          importedCount += 1
-          continue
-        }
-        const localPaths = buildSessionPathSignatures(existing)
-        const incomingPaths = buildSessionPathSignatures(incoming)
-        let localHasExtra = false
-        for (const path of localPaths) {
-          if (!incomingPaths.has(path)) {
-            localHasExtra = true
-            break
-          }
-        }
-        let incomingHasExtra = false
-        for (const path of incomingPaths) {
-          if (!localPaths.has(path)) {
-            incomingHasExtra = true
-            break
-          }
-        }
-        if (!incomingHasExtra) {
-          // 规则 1：DeepSeek 记录落后或等于本地，跳过不覆盖
-          continue
-        }
-        if (!localHasExtra) {
-          // 规则 3：DeepSeek 记录多于本地且本地无新增，直接覆盖
-          await target.put(incoming)
-          await summaryStore.put(storedSummary(incoming))
-          importedCount += 1
-          continue
-        }
-        // 规则 2：两边均有各自新增，开分支保留两条独立会话
-        const localBranched: Session = {
-          ...existing,
-          title: withBranchPrefix(existing.title, 'N分支·'),
-        }
-        const incomingBranched: Session = {
-          ...incoming,
-          id: createId(),
-          title: withBranchPrefix(incoming.title, 'D分支·'),
-        }
-        await target.put(localBranched)
-        await summaryStore.put(storedSummary(localBranched))
-        await target.put(incomingBranched)
-        await summaryStore.put(storedSummary(incomingBranched))
+    const target = tx.objectStore('sessions')
+    const summaryStore = tx.objectStore('sessionSummaries')
+    for (
+      let cursor = await tx.objectStore('sessionsStaging').openCursor();
+      cursor;
+      cursor = await cursor.continue()
+    ) {
+      const incoming = cursor.value
+      const existing = await target.get(incoming.id)
+      if (!existing) {
+        await target.put(incoming)
+        await summaryStore.put(storedSummary(incoming))
         importedCount += 1
+        continue
       }
-      await tx.objectStore('sessionsStaging').clear()
-    } catch (error) {
-      abortTransaction(tx)
-      throw error
+      const localPaths = buildSessionPathSignatures(existing)
+      const incomingPaths = buildSessionPathSignatures(incoming)
+      let localHasExtra = false
+      for (const path of localPaths) {
+        if (!incomingPaths.has(path)) {
+          localHasExtra = true
+          break
+        }
+      }
+      let incomingHasExtra = false
+      for (const path of incomingPaths) {
+        if (!localPaths.has(path)) {
+          incomingHasExtra = true
+          break
+        }
+      }
+      if (!incomingHasExtra) {
+        // 规则 1：DeepSeek 记录落后或等于本地，跳过不覆盖
+        continue
+      }
+      if (!localHasExtra) {
+        // 规则 3：DeepSeek 记录多于本地且本地无新增，直接覆盖
+        await target.put(incoming)
+        await summaryStore.put(storedSummary(incoming))
+        importedCount += 1
+        continue
+      }
+      // 规则 2：两边均有各自新增，开分支保留两条独立会话
+      const localBranched: Session = {
+        ...existing,
+        title: withBranchPrefix(existing.title, 'N分支·'),
+      }
+      const incomingBranched: Session = {
+        ...incoming,
+        id: createId(),
+        title: withBranchPrefix(incoming.title, 'D分支·'),
+      }
+      await target.put(localBranched)
+      await summaryStore.put(storedSummary(localBranched))
+      await target.put(incomingBranched)
+      await summaryStore.put(storedSummary(incomingBranched))
+      importedCount += 1
     }
+    await tx.objectStore('sessionsStaging').clear()
   }
   const mergeFiles = async () => {
-    try {
-      const target = tx.objectStore('files')
-      for (
-        let cursor = await tx.objectStore('filesStaging').openCursor();
-        cursor;
-        cursor = await cursor.continue()
-      ) {
-        await target.put(cursor.value)
-      }
-      await tx.objectStore('filesStaging').clear()
-    } catch (error) {
-      abortTransaction(tx)
-      throw error
+    const target = tx.objectStore('files')
+    for (
+      let cursor = await tx.objectStore('filesStaging').openCursor();
+      cursor;
+      cursor = await cursor.continue()
+    ) {
+      await target.put(cursor.value)
     }
+    await tx.objectStore('filesStaging').clear()
   }
-  await Promise.all([mergeSessions(), mergeFiles()])
-  const stored = (await tx.objectStore('sessionSummaries').getAll()) as StoredSessionSummary[]
-  await tx.done
+  await Promise.all([
+    (async () => {
+      try {
+        await mergeSessions()
+        await mergeFiles()
+        stored = (await tx.objectStore('sessionSummaries').getAll()) as StoredSessionSummary[]
+      } catch (error) {
+        abortTransaction(tx)
+        throw error
+      }
+    })(),
+    tx.done,
+  ])
   return { importedCount, summaries: stored.map(toSessionSummary) }
 }
 
@@ -511,14 +582,16 @@ const sessionMatchesKeyword = (session: Session, q: string): boolean => {
   if (session.title.toLowerCase().includes(q)) {
     return true
   }
-  for (const message of session.messages) {
+  for (let i = 0; i < session.messages.length; i++) {
+    const message = session.messages[i]
     if (message.role === 'user') {
       if (message.content.toLowerCase().includes(q)) {
         return true
       }
       continue
     }
-    for (const block of message.blocks) {
+    for (let j = 0; j < message.blocks.length; j++) {
+      const block = message.blocks[j]
       if (block.type === 'text' && !block.isTemplate && block.text.toLowerCase().includes(q)) {
         return true
       }
@@ -527,23 +600,57 @@ const sessionMatchesKeyword = (session: Session, q: string): boolean => {
   return false
 }
 
-/** 按关键词扫描本地会话标题与正文，返回命中的会话 ID 集合 */
+/** 按关键词分片扫描本地会话正文，跳过已标题命中的会话并定期让出主线程，返回命中的会话 ID 集合 */
 export const searchSessionIdsByContent = async (
   keyword: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  skipIds?: ReadonlySet<string>
 ): Promise<Set<string>> => {
   const q = keyword.trim().toLowerCase()
   const matched = new Set<string>()
   if (!q || signal?.aborted) {
     return matched
   }
-  const tx = (await getDB()).transaction('sessions', 'readonly')
-  for (let cursor = await tx.store.openCursor(); cursor; cursor = await cursor.continue()) {
+  const db = await getDB()
+  if (signal?.aborted) {
+    return matched
+  }
+  const allKeys = await db.getAllKeys('sessions')
+  if (signal?.aborted) {
+    return matched
+  }
+  const batchSize = isLowPerfDevice() ? 24 : 40
+  let lastYieldAt = Date.now()
+  for (let offset = 0; offset < allKeys.length; ) {
     if (signal?.aborted) {
       break
     }
-    if (sessionMatchesKeyword(cursor.value, q)) {
-      matched.add(cursor.value.id)
+    const keys: string[] = []
+    while (offset < allKeys.length && keys.length < batchSize) {
+      const id = allKeys[offset++]
+      if (!skipIds?.has(id)) {
+        keys.push(id)
+      }
+    }
+    if (keys.length === 0) {
+      break
+    }
+    const tx = db.transaction('sessions', 'readonly')
+    const store = tx.store
+    // 同一只读事务内并发管线化批读，消除逐条 await 的 IDB IPC 往返延迟，同时保持峰值驻留可控
+    const sessions = await Promise.all(keys.map((id) => store.get(id)))
+    if (signal?.aborted) {
+      break
+    }
+    for (let i = 0; i < sessions.length; i++) {
+      const session = sessions[i]
+      if (session && sessionMatchesKeyword(session, q)) {
+        matched.add(session.id)
+      }
+    }
+    if (Date.now() - lastYieldAt >= 16) {
+      await yieldToMain()
+      lastYieldAt = Date.now()
     }
   }
   return matched

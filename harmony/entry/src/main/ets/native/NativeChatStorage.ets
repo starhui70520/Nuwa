@@ -11,6 +11,7 @@ import { validNativeReadLinks } from './NativeReadLinks';
 import { validNativePrefillBlocks } from './NativeReplyPrefill';
 import { isValidNativeToolTimeline, settleInterruptedNativeToolTimeline } from './NativeToolTimeline';
 import { backupImageIds, pruneBackupImages, removeBackupImage } from './NativeBackupFiles';
+import { yieldNativeTurn } from './NativeDevicePerf';
 import {
   NativeConversation,
   NativeConversationMessage,
@@ -57,6 +58,7 @@ interface SessionIndex {
 interface SessionWrite {
   metadata: SessionMetadata;
   snapshot?: string;
+  sessionRef?: NativeConversation;
   retainsSnapshot?: boolean;
 }
 
@@ -71,11 +73,105 @@ interface SessionImageIds {
   ids: string[];
 }
 
+interface CommittedSessionStamp {
+  directory: string;
+  file: string;
+  digest: string;
+  id: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  pinnedAt?: number;
+  rootMessageId: string | null;
+  messageCount: number;
+  messagesRef: NativeConversationMessage[];
+  archiveJson?: string;
+  hasAttachments: boolean;
+}
+
+interface PendingCommitStamp {
+  session: NativeConversation;
+  entry: SessionIndexEntry;
+}
+
+const SNAPSHOT_TEXT_ENCODER = new util.TextEncoder();
+const BULK_WRITE_CONCURRENCY = 4;
+const SEARCH_READ_CONCURRENCY = 4;
+const JSON_ESCAPE_SENSITIVE_PATTERN = /["\\\u0000-\u001f]/;
 let pendingStorage: Promise<void> = Promise.resolve();
 const committedIndexes = new Map<string, SessionIndex>();
+const committedIndexById = new Map<string, Map<string, SessionIndexEntry>>();
+const committedSessionStamps = new WeakMap<NativeConversation, CommittedSessionStamp>();
 const cachedSessionImages = new Map<string, Map<string, SessionImageIds>>();
 const committedImages = new Map<string, Set<string>>();
 const pendingImageWrites = new Map<string, Set<Set<string>>>();
+
+function cacheCommittedIndex(directory: string, index: SessionIndex): void {
+  committedIndexes.set(directory, index);
+  const byId = new Map<string, SessionIndexEntry>();
+  for (let i = 0; i < index.sessions.length; i++) {
+    const entry = index.sessions[i];
+    byId.set(entry.metadata.id, entry);
+  }
+  committedIndexById.set(directory, byId);
+}
+
+function clearCommittedIndex(directory: string): void {
+  committedIndexes.delete(directory);
+  committedIndexById.delete(directory);
+}
+
+function conversationHasAttachments(session: NativeConversation): boolean {
+  for (let i = 0; i < session.messages.length; i++) {
+    const files = session.messages[i].files;
+    if (files && files.length > 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function stampCommittedSession(directory: string, session: NativeConversation, entry: SessionIndexEntry): void {
+  const hasAttachments = conversationHasAttachments(session);
+  if (hasAttachments) {
+    committedSessionStamps.delete(session);
+    return;
+  }
+  committedSessionStamps.set(session, {
+    directory,
+    file: entry.file,
+    digest: entry.digest,
+    id: session.id,
+    title: session.title,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    pinnedAt: session.pinnedAt,
+    rootMessageId: session.rootMessageId,
+    messageCount: session.messages.length,
+    messagesRef: session.messages,
+    archiveJson: session.archiveJson,
+    hasAttachments: false,
+  });
+}
+
+function matchesCommittedStamp(directory: string, session: NativeConversation,
+  entry: SessionIndexEntry | undefined): boolean {
+  if (!entry) return false;
+  const stamp = committedSessionStamps.get(session);
+  if (!stamp || stamp.hasAttachments) return false;
+  return stamp.directory === directory &&
+    stamp.file === entry.file &&
+    stamp.digest === entry.digest &&
+    stamp.id === session.id &&
+    stamp.title === session.title &&
+    stamp.createdAt === session.createdAt &&
+    stamp.updatedAt === session.updatedAt &&
+    stamp.pinnedAt === session.pinnedAt &&
+    stamp.rootMessageId === session.rootMessageId &&
+    stamp.messageCount === session.messages.length &&
+    stamp.messagesRef === session.messages &&
+    stamp.archiveJson === session.archiveJson;
+}
 
 function queueStorageOperation<T>(operation: () => Promise<T>): Promise<T> {
   const result = pendingStorage.then<T>(operation);
@@ -269,13 +365,17 @@ function captureHistory(state: NativeConversationState, dirtySessionIds?: string
       }
       return { metadata, retainsSnapshot: true };
     }
-    if (dirty && !dirty.has(session.id)) {
-      return { metadata };
+    if (dirty) {
+      if (!dirty.has(session.id)) {
+        return { metadata };
+      }
+      if (!validateConversation(session)) {
+        throw new Error('Invalid native conversation');
+      }
+      return { metadata, snapshot: JSON.stringify(session), sessionRef: session };
     }
-    if (!validateConversation(session)) {
-      throw new Error('Invalid native conversation');
-    }
-    return { metadata, snapshot: JSON.stringify(session) };
+    // 全量保存延后到 commitHistory 逐条校验与序列化，避免批量导入时几百份 JSON 字符串同时驻留内存。
+    return { metadata, sessionRef: session };
   });
   if (state.activeId !== null && !ids.has(state.activeId)) {
     throw new Error('Invalid active native conversation');
@@ -292,13 +392,35 @@ function chunkEnd(value: string, start: number): number {
   return end < value.length && last >= 0xd800 && last <= 0xdbff ? end - 1 : end;
 }
 
+interface EncodedSnapshot {
+  chunks: Uint8Array[];
+  digest: string;
+}
+
+function encodeAndDigestSnapshot(snapshot: string): EncodedSnapshot {
+  const md = cryptoFramework.createMd('SHA256');
+  const chunks: Uint8Array[] = [];
+  let offset = 0;
+  while (offset < snapshot.length) {
+    const end = chunkEnd(snapshot, offset);
+    const bytes = SNAPSHOT_TEXT_ENCODER.encodeInto(snapshot.slice(offset, end));
+    md.updateSync({ data: bytes });
+    chunks.push(bytes);
+    offset = end;
+  }
+  let hash = '';
+  for (const byte of md.digestSync().data) {
+    hash += byte.toString(16).padStart(2, '0');
+  }
+  return { chunks, digest: hash };
+}
+
 function sessionDigest(snapshot: string): string {
-  const encoder = new util.TextEncoder();
   const md = cryptoFramework.createMd('SHA256');
   let offset = 0;
   while (offset < snapshot.length) {
     const end = chunkEnd(snapshot, offset);
-    md.updateSync({ data: encoder.encodeInto(snapshot.slice(offset, end)) });
+    md.updateSync({ data: SNAPSHOT_TEXT_ENCODER.encodeInto(snapshot.slice(offset, end)) });
     offset = end;
   }
   let hash = '';
@@ -308,21 +430,53 @@ function sessionDigest(snapshot: string): string {
   return hash;
 }
 
+async function writeEncodedChunks(path: string, chunks: Uint8Array[]): Promise<void> {
+  const temporaryPath = `${path}.tmp`;
+  try {
+    const file = await fileIo.open(temporaryPath,
+      fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+    try {
+      for (let i = 0; i < chunks.length; i++) {
+        let remaining = chunks[i].buffer as ArrayBuffer;
+        while (remaining.byteLength > 0) {
+          const written = await fileIo.write(file.fd, remaining);
+          if (written <= 0) {
+            throw new Error('Could not write native conversation history');
+          }
+          if (written >= remaining.byteLength) {
+            break;
+          }
+          remaining = remaining.slice(written);
+        }
+      }
+      await fileIo.fsync(file.fd);
+    } finally {
+      await fileIo.close(file);
+    }
+    await fileIo.rename(temporaryPath, path);
+  } catch (error) {
+    await fileIo.unlink(temporaryPath).catch(() => {});
+    throw error as Error;
+  }
+}
+
 async function writeSnapshot(path: string, snapshot: string): Promise<void> {
   const temporaryPath = `${path}.tmp`;
   try {
     const file = await fileIo.open(temporaryPath,
       fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
     try {
-      const encoder = new util.TextEncoder();
       let start = 0;
       while (start < snapshot.length) {
         const end = chunkEnd(snapshot, start);
-        let remaining = encoder.encodeInto(snapshot.slice(start, end)).buffer as ArrayBuffer;
+        let remaining = SNAPSHOT_TEXT_ENCODER.encodeInto(snapshot.slice(start, end)).buffer as ArrayBuffer;
         while (remaining.byteLength > 0) {
           const written = await fileIo.write(file.fd, remaining);
           if (written <= 0) {
             throw new Error('Could not write native conversation history');
+          }
+          if (written >= remaining.byteLength) {
+            break;
           }
           remaining = remaining.slice(written);
         }
@@ -378,7 +532,9 @@ async function readIndexedConversation(directory: string, entry: SessionIndexEnt
   if (!validateConversation(session) || !sameMetadata(entry.metadata, sessionMetadata(session))) {
     throw new Error('Invalid native conversation snapshot');
   }
-  return recoverInterruptedConversation(session);
+  const recovered = recoverInterruptedConversation(session);
+  stampCommittedSession(directory, recovered, entry);
+  return recovered;
 }
 
 async function loadIndexedHistory(directory: string, index: SessionIndex): Promise<NativeConversationState> {
@@ -424,34 +580,84 @@ async function commitHistory(filesDir: string, directory: string, previous: Sess
   const existing = resolveBaseEntries(previous, write);
   const next: SessionIndex = { version: STORAGE_VERSION, activeId: write.activeId, sessions: [] };
   const created: string[] = [];
+  const pendingStamps: PendingCommitStamp[] = [];
   let published = false;
   if (!previous) {
     await ensureNativeDirectory(directory);
     await syncDirectory(filesDir);
   }
   try {
-    for (const session of write.sessions) {
+    let lastYieldAt = Date.now();
+    const pendingWrites: Promise<void>[] = [];
+    const flushPendingWrites = async (): Promise<void> => {
+      if (pendingWrites.length === 0) return;
+      const batch = pendingWrites.splice(0, pendingWrites.length);
+      await Promise.all(batch);
+    };
+    for (let i = 0; i < write.sessions.length; i++) {
+      const session = write.sessions[i];
       const entry = existing.get(session.metadata.id);
-      if (session.snapshot === undefined) {
+      if (session.snapshot === undefined && session.sessionRef === undefined) {
         if (!entry) {
           throw new Error('Missing native session snapshot');
         }
         next.sessions.push(entry);
         continue;
       }
-      const digest = sessionDigest(session.snapshot);
-      if (entry?.digest === digest) {
+      if (session.snapshot === undefined && session.sessionRef &&
+        matchesCommittedStamp(directory, session.sessionRef, entry) && entry) {
         next.sessions.push(entry);
         continue;
       }
-      const file = 'session-' + util.generateRandomUUID(true) + '.json';
-      await writeSnapshot(directory + '/' + file, session.snapshot);
-      created.push(file);
-      next.sessions.push({ metadata: session.metadata, file, digest });
+      let snapshot = session.snapshot;
+      let metadata = session.metadata;
+      if (snapshot === undefined) {
+        const ref = session.sessionRef;
+        if (!ref || !validateConversation(ref)) {
+          throw new Error('Invalid native conversation');
+        }
+        metadata = sessionMetadata(ref);
+        snapshot = JSON.stringify(ref);
+      }
+      // 单遍完成 UTF-8 编码与 SHA-256，复用编码后的字节落盘，避免对每条会话重复 encodeInto。
+      const encoded = encodeAndDigestSnapshot(snapshot);
+      if (entry?.digest === encoded.digest) {
+        next.sessions.push(entry);
+        if (session.sessionRef) {
+          pendingStamps.push({ session: session.sessionRef, entry });
+        }
+      } else {
+        const file = 'session-' + util.generateRandomUUID(true) + '.json';
+        created.push(file);
+        const committedEntry: SessionIndexEntry = { metadata, file, digest: encoded.digest };
+        next.sessions.push(committedEntry);
+        if (session.sessionRef) {
+          pendingStamps.push({ session: session.sessionRef, entry: committedEntry });
+        }
+        if (write.sessions.length > 8) {
+          // 批量导入时以受控并发数（6）并发落盘，既把在途缓冲压在 ~240KB 内，又让文件系统合并 fsync 提交。
+          pendingWrites.push(writeEncodedChunks(directory + '/' + file, encoded.chunks));
+          if (pendingWrites.length >= BULK_WRITE_CONCURRENCY) {
+            await flushPendingWrites();
+          }
+        } else {
+          await writeEncodedChunks(directory + '/' + file, encoded.chunks);
+        }
+      }
+      // 及时释放本次序列化快照引用，并定期让出主线程片避免大批量导入提交掉帧。
+      session.snapshot = undefined;
+      if (write.sessions.length > 8 && Date.now() - lastYieldAt >= 16) {
+        await yieldNativeTurn();
+        lastYieldAt = Date.now();
+      }
     }
+    await flushPendingWrites();
     if (previous && previous.activeId === next.activeId && previous.sessions.length === next.sessions.length &&
       next.sessions.every((entry: SessionIndexEntry, index: number): boolean =>
         entry.file === previous.sessions[index].file)) {
+      for (const item of pendingStamps) {
+        stampCommittedSession(directory, item.session, item.entry);
+      }
       return previous;
     }
     if (created.length > 0) {
@@ -460,10 +666,13 @@ async function commitHistory(filesDir: string, directory: string, previous: Sess
     await writeSnapshot(directory + '/' + INDEX_FILE, JSON.stringify(next));
     published = true;
     await syncDirectory(directory);
+    for (const item of pendingStamps) {
+      stampCommittedSession(directory, item.session, item.entry);
+    }
   } catch (error) {
     if (published) {
       // The rename already published this index, so retain both generations.
-      committedIndexes.delete(directory);
+      clearCommittedIndex(directory);
     } else {
       for (const file of created) {
         await fileIo.unlink(directory + '/' + file).catch(() => {});
@@ -555,7 +764,7 @@ export class NativeChatStorage {
       if (index) {
         await syncDirectory(directory);
         if (summariesOnly) {
-          committedIndexes.set(directory, index);
+          cacheCommittedIndex(directory, index);
           return {
             activeId: index.activeId,
             sessions: index.sessions.map<NativeConversation>((entry: SessionIndexEntry): NativeConversation =>
@@ -572,13 +781,13 @@ export class NativeChatStorage {
       }
       const unreadable = state.sessions.some((session: NativeConversation): boolean => session.unreadable === true);
       if (index) {
-        committedIndexes.set(directory, index);
+        cacheCommittedIndex(directory, index);
         if (!unreadable) {
           await fileIo.unlink(path).catch(() => {});
           await pruneSessionSnapshots(directory, index);
         }
       } else {
-        committedIndexes.delete(directory);
+        clearCommittedIndex(directory);
       }
       const retained = retainedImageIds(path, state);
       committedImages.set(path, retained);
@@ -600,9 +809,19 @@ export class NativeChatStorage {
     const path = `${context.filesDir}/${TRANSCRIPT_FILE}`;
     const directory = `${context.filesDir}/${HISTORY_DIRECTORY}`;
     return queueStorageOperation<NativeConversation>(async (): Promise<NativeConversation> => {
-      const cached = useCachedIndex ? committedIndexes.get(directory) : undefined;
-      const index = cached ?? await readIndex(directory);
-      const entry = index?.sessions.find((row: SessionIndexEntry): boolean => row.metadata.id === id);
+      let entry: SessionIndexEntry | undefined;
+      if (useCachedIndex) {
+        entry = committedIndexById.get(directory)?.get(id);
+      }
+      if (!entry) {
+        const index = await readIndex(directory);
+        if (index && useCachedIndex) {
+          cacheCommittedIndex(directory, index);
+          entry = committedIndexById.get(directory)?.get(id);
+        } else {
+          entry = index?.sessions.find((row: SessionIndexEntry): boolean => row.metadata.id === id);
+        }
+      }
       if (!entry) throw new Error('Native conversation is missing from the index');
       const session = await readIndexedConversation(directory, entry);
       if (!useCachedIndex && session.archiveJson) {
@@ -611,6 +830,61 @@ export class NativeChatStorage {
         committedImages.set(path, retained);
       }
       return session;
+    });
+  }
+
+  /**
+   * 侧边栏全文检索专用批量只读匹配：单次队列入队内按 4 路并发读取不可变快照文件，
+   * 先以 O(1) 索引与零漏报原始文本预过滤淘汰绝大多数未命中会话（跳过 SHA-256 / JSON.parse / 整树校验），
+   * 仅对命中候选走完整校验与精确匹配。
+   */
+  searchConversationMatches(context: common.UIAbilityContext, ids: string[], query: string,
+    matcher: (session: NativeConversation) => boolean): Promise<string[]> {
+    if (ids.length === 0) return Promise.resolve([]);
+    const directory = `${context.filesDir}/${HISTORY_DIRECTORY}`;
+    const escapeSensitive = JSON_ESCAPE_SENSITIVE_PATTERN.test(query);
+    return queueStorageOperation<string[]>(async (): Promise<string[]> => {
+      let byId = committedIndexById.get(directory);
+      if (!byId) {
+        const index = await readIndex(directory);
+        if (!index) return [];
+        cacheCommittedIndex(directory, index);
+        byId = committedIndexById.get(directory);
+        if (!byId) return [];
+      }
+      const matchedIds: string[] = [];
+      const checkOne = async (id: string): Promise<void> => {
+        const entry = byId?.get(id);
+        if (!entry) return;
+        let raw: string;
+        try {
+          raw = await fileIo.readText(directory + '/' + entry.file);
+        } catch {
+          return;
+        }
+        if (!escapeSensitive && !raw.toLowerCase().includes(query)) {
+          return;
+        }
+        try {
+          if (sessionDigest(raw) !== entry.digest) return;
+          const parsed = JSON.parse(raw) as NativeConversation;
+          if (!validateConversation(parsed) || !sameMetadata(entry.metadata, sessionMetadata(parsed))) return;
+          if (matcher(recoverInterruptedConversation(parsed))) {
+            matchedIds.push(id);
+          }
+        } catch {
+          // 单个损坏快照不阻断其余会话检索。
+        }
+      };
+      for (let i = 0; i < ids.length; i += SEARCH_READ_CONCURRENCY) {
+        const end = Math.min(i + SEARCH_READ_CONCURRENCY, ids.length);
+        const batch: Promise<void>[] = [];
+        for (let k = i; k < end; k++) {
+          batch.push(checkOne(ids[k]));
+        }
+        await Promise.all(batch);
+      }
+      return matchedIds;
     });
   }
 
@@ -642,7 +916,7 @@ export class NativeChatStorage {
           }
         }
         const next = await commitHistory(context.filesDir, directory, previous, write);
-        committedIndexes.set(directory, next);
+        cacheCommittedIndex(directory, next);
         if (!previous) {
           await fileIo.unlink(path).catch(() => {});
         }

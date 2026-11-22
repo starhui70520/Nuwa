@@ -10,6 +10,13 @@ const IO_CHUNK = 256 * 1024;
 const IMAGE_DIRECTORY = 'nuwa-history-images';
 const PRUNE_AFTER_MS = 24 * 60 * 60 * 1_000;
 const FILE_SYSTEM_FULL = 13900025;
+const FREE_SPACE_CACHE_TTL_MS = 8_000;
+const FREE_SPACE_RESERVE_BYTES = 16 * 1024 * 1024;
+
+let cachedFreeDir: string = '';
+let cachedFreeBytes: number = -1;
+let cachedFreeAt: number = 0;
+const ensuredImageDirs = new Set<string>();
 
 interface RetainedImage {
   blobId?: string;
@@ -32,13 +39,28 @@ export function isBackupSpaceError(error: Error): boolean {
 }
 
 export async function ensureBackupSpace(directory: string, requiredBytes: number): Promise<void> {
+  const now = Date.now();
+  if (cachedFreeDir === directory && cachedFreeBytes >= 0 && now - cachedFreeAt < FREE_SPACE_CACHE_TTL_MS &&
+    cachedFreeBytes - requiredBytes >= FREE_SPACE_RESERVE_BYTES) {
+    cachedFreeBytes -= requiredBytes;
+    return;
+  }
   let available = -1;
   try {
     available = await statfs.getFreeSize(directory);
   } catch {
     // If space cannot be queried, the filesystem still enforces its own write limit.
   }
-  if (available >= 0 && requiredBytes > available) throw new NativeBackupSpaceError();
+  if (available >= 0 && requiredBytes > available) {
+    cachedFreeDir = '';
+    cachedFreeBytes = -1;
+    throw new NativeBackupSpaceError();
+  }
+  if (available >= 0) {
+    cachedFreeDir = directory;
+    cachedFreeBytes = available - requiredBytes;
+    cachedFreeAt = now;
+  }
 }
 
 function validBlobId(id: string): boolean {
@@ -65,15 +87,39 @@ async function readExactly(fd: number, offset: number, length: number): Promise<
     return new Uint8Array(0);
   }
   fileIo.lseek(fd, offset);
+  if (length <= IO_CHUNK) {
+    const buffer = new ArrayBuffer(length);
+    const first = await fileIo.read(fd, buffer);
+    if (first === length) {
+      return new Uint8Array(buffer);
+    }
+    if (first <= 0) {
+      throw new Error('备份数据读取未完成。');
+    }
+    const output = new Uint8Array(buffer);
+    let copied = first;
+    while (copied < length) {
+      const rest = new ArrayBuffer(length - copied);
+      const count = await fileIo.read(fd, rest);
+      if (count <= 0) {
+        throw new Error('备份数据读取未完成。');
+      }
+      output.set(new Uint8Array(rest, 0, count), copied);
+      copied += count;
+    }
+    return output;
+  }
   const output = new Uint8Array(length);
   let copied = 0;
+  const chunk = new ArrayBuffer(IO_CHUNK);
   while (copied < length) {
-    const chunk = new ArrayBuffer(Math.min(IO_CHUNK, length - copied));
-    const count = await fileIo.read(fd, chunk);
+    const need = Math.min(IO_CHUNK, length - copied);
+    const target = need === IO_CHUNK ? chunk : new ArrayBuffer(need);
+    const count = await fileIo.read(fd, target);
     if (count <= 0) {
       throw new Error('备份数据读取未完成。');
     }
-    output.set(new Uint8Array(chunk, 0, count), copied);
+    output.set(new Uint8Array(target, 0, count), copied);
     copied += count;
   }
   return output;
@@ -96,6 +142,28 @@ export async function withBackupInput<T>(uri: string, action: (input: NativeBack
 }
 
 async function writeBytes(fd: number, bytes: Uint8Array): Promise<void> {
+  if (bytes.length === 0) {
+    return;
+  }
+  if (bytes.byteOffset === 0 && bytes.length <= IO_CHUNK) {
+    const written = await fileIo.write(fd, bytes.buffer as ArrayBuffer, { length: bytes.byteLength });
+    if (written <= 0) {
+      throw new Error('备份数据写入未完成。');
+    }
+    if (written >= bytes.length) {
+      return;
+    }
+    let offset = written;
+    while (offset < bytes.length) {
+      const content = bytes.buffer.slice(offset, bytes.length) as ArrayBuffer;
+      const more = await fileIo.write(fd, content);
+      if (more <= 0) {
+        throw new Error('备份数据写入未完成。');
+      }
+      offset += more;
+    }
+    return;
+  }
   let offset = 0;
   while (offset < bytes.length) {
     const end = Math.min(offset + IO_CHUNK, bytes.length);
@@ -131,22 +199,49 @@ export async function copyBackupFile(from: string, to: string): Promise<void> {
   });
 }
 
+export interface StagedBackupImage {
+  id: string;
+  header: Uint8Array;
+}
+
 export async function stageBackupImage(context: common.UIAbilityContext,
   entry: NativeBackupZipStreamEntry): Promise<string> {
   return stageBackupBlob(context, entry.size, (write: (chunk: Uint8Array) => Promise<void>): Promise<void> =>
     entry.consume(write));
 }
 
+export async function stageBackupImageWithHeader(context: common.UIAbilityContext,
+  entry: NativeBackupZipStreamEntry, headerLimit: number = 64 * 1024): Promise<StagedBackupImage> {
+  const cap = Math.min(entry.size, headerLimit);
+  const header = new Uint8Array(cap);
+  let captured = 0;
+  const id = await stageBackupBlob(context, entry.size, (write: (chunk: Uint8Array) => Promise<void>): Promise<void> =>
+    entry.consume(async (chunk: Uint8Array): Promise<void> => {
+      if (captured < cap) {
+        const take = Math.min(cap - captured, chunk.length);
+        header.set(chunk.subarray(0, take), captured);
+        captured += take;
+      }
+      await write(chunk);
+    }));
+  return { id, header: captured === cap ? header : header.subarray(0, captured) };
+}
+
 export async function stageBackupBlob(context: common.UIAbilityContext, size: number,
   action: (write: (chunk: Uint8Array) => Promise<void>) => Promise<void>): Promise<string> {
   await ensureBackupSpace(context.filesDir, size);
   const id = util.generateRandomUUID(true);
-  await ensureNativeDirectory(imageDirectory(context));
+  const dir = imageDirectory(context);
+  if (!ensuredImageDirs.has(dir)) {
+    await ensureNativeDirectory(dir);
+    ensuredImageDirs.add(dir);
+  }
   const path = backupImagePath(context, id);
   try {
     await writeBackupFile(path, true, action);
     return id;
   } catch (error) {
+    ensuredImageDirs.delete(dir);
     await fileIo.unlink(path).catch(() => {});
     throw error as Error;
   }

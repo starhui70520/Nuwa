@@ -19,7 +19,11 @@ export const getVisibleMessages = (session: Session): Message[] => {
   if (session.rootMessageId === undefined) {
     return session.messages
   }
-  const byId = new Map(session.messages.map((message) => [message.id, message]))
+  const byId = new Map<string, Message>()
+  for (let i = 0; i < session.messages.length; i++) {
+    const message = session.messages[i]
+    byId.set(message.id, message)
+  }
   const path: Message[] = []
   let id = session.rootMessageId
   while (id) {
@@ -36,14 +40,39 @@ export const getVisibleMessages = (session: Session): Message[] => {
 
 export type MessageVersions = { ids: string[]; index: number }
 
-/** 一次遍历收集兄弟版本；版本列表未变化时复用旧对象与索引，避免流式正文更新重绘历史消息。 */
+type TopologyEntry = { id: string; key: string | null | undefined }
+const versionTopologyCache = new WeakMap<ReadonlyMap<string, MessageVersions>, TopologyEntry[]>()
+
+/** 一次遍历收集兄弟版本；流式正文更新仅变更末条内容而树拓扑未变时零分配复用旧 Map。 */
 export const buildMessageVersions = (
   session: Session,
   previous: ReadonlyMap<string, MessageVersions>
 ): ReadonlyMap<string, MessageVersions> => {
+  const messages = session.messages
+  const isFlat = session.rootMessageId === undefined
+  const prevTopology = versionTopologyCache.get(previous)
+  if (prevTopology && prevTopology.length === messages.length) {
+    let sameTopology = true
+    for (let i = 0; i < messages.length; i++) {
+      const message = messages[i]
+      const key = isFlat ? message.id : message.parentId
+      const prev = prevTopology[i]
+      if (prev.id !== message.id || prev.key !== key) {
+        sameTopology = false
+        break
+      }
+    }
+    if (sameTopology) {
+      return previous
+    }
+  }
+
+  const topology = new Array<TopologyEntry>(messages.length)
   const groups = new Map<string | null | undefined, string[]>()
-  for (const message of session.messages) {
-    const key = session.rootMessageId === undefined ? message.id : message.parentId
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i]
+    const key = isFlat ? message.id : message.parentId
+    topology[i] = { id: message.id, key }
     const ids = groups.get(key)
     if (ids) {
       ids.push(message.id)
@@ -53,14 +82,15 @@ export const buildMessageVersions = (
   }
 
   const versions = new Map<string, MessageVersions>()
-  let unchanged = previous.size === session.messages.length
+  let unchanged = previous.size === messages.length
   for (const ids of groups.values()) {
     const cachedIds = previous.get(ids[0])?.ids
     const stableIds =
       cachedIds?.length === ids.length && ids.every((id, index) => id === cachedIds[index])
         ? cachedIds
         : ids
-    ids.forEach((id, index) => {
+    for (let index = 0; index < ids.length; index++) {
+      const id = ids[index]
       const cached = previous.get(id)
       const version =
         cached?.ids === stableIds && cached.index === index ? cached : { ids: stableIds, index }
@@ -68,9 +98,11 @@ export const buildMessageVersions = (
       if (version !== cached) {
         unchanged = false
       }
-    })
+    }
   }
-  return unchanged ? previous : versions
+  const result = unchanged ? previous : versions
+  versionTopologyCache.set(result, topology)
+  return result
 }
 
 /** 新消息挂在指定父节点下，并选择新分支；原节点与其后续对话保持不变。 */

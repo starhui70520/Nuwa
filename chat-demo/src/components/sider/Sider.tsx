@@ -1,5 +1,6 @@
 import clsx from 'clsx'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { isLowPerfDevice } from '../../app/devicePerf.js'
 import logoUrl from '../../assets/logo.png'
 import { useTranslate } from '../../i18n/index.js'
 import { refreshBalance, useBalance } from '../../services/api/balance.js'
@@ -28,8 +29,7 @@ import { closeMobileSider, useMobileSider } from './mobileSiderState.js'
 import { SessionItem } from './SessionItem.js'
 import styles from './Sider.module.css'
 
-const INITIAL_RENDER_LIMIT = 60
-const RENDER_LOAD_STEP = 60
+const getSiderBatchSize = () => (isLowPerfDevice() ? 30 : 60)
 
 /** 展开的侧边栏：搜索框 / 会话列表 / 底部账号入口 */
 export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
@@ -52,12 +52,14 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
   const [selectMode, setSelectMode] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
   const [batchDeleting, setBatchDeleting] = useState(false)
-  const [renderLimit, setRenderLimit] = useState(INITIAL_RENDER_LIMIT)
+  const [renderLimit, setRenderLimit] = useState(getSiderBatchSize)
+  const sessionsRef = useRef(sessions)
+  sessionsRef.current = sessions
 
   const normalizedQuery = query.trim().toLowerCase()
 
   useEffect(() => {
-    setRenderLimit(INITIAL_RENDER_LIMIT)
+    setRenderLimit(getSiderBatchSize())
   }, [normalizedQuery])
 
   useEffect(() => {
@@ -65,8 +67,19 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
       return
     }
     const controller = new AbortController()
+    const debounceMs = isLowPerfDevice() ? 200 : 180
     const timer = setTimeout(() => {
-      void searchSessionIdsByContent(normalizedQuery, controller.signal)
+      const titleMatched = new Set<string>()
+      const untitled = t('untitledChat').toLowerCase()
+      const currentSessions = sessionsRef.current
+      for (let i = 0; i < currentSessions.length; i++) {
+        const s = currentSessions[i]
+        const title = s.title ? s.title.toLowerCase() : untitled
+        if (title.includes(normalizedQuery)) {
+          titleMatched.add(s.id)
+        }
+      }
+      void searchSessionIdsByContent(normalizedQuery, controller.signal, titleMatched)
         .then((ids) => {
           if (!controller.signal.aborted) {
             setContentSearch({ keyword: normalizedQuery, ids })
@@ -75,12 +88,12 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
         .catch(() => {
           // 检索中断时保留当前标题匹配结果
         })
-    }, 180)
+    }, debounceMs)
     return () => {
       clearTimeout(timer)
       controller.abort()
     }
-  }, [normalizedQuery])
+  }, [normalizedQuery, t])
 
   const filteredSessions = useMemo(() => {
     if (!normalizedQuery) {
@@ -141,7 +154,7 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
     if (mobile && !mobileOpen) {
       setSelectMode(false)
       setSelectedIds(new Set())
-      setRenderLimit(INITIAL_RENDER_LIMIT)
+      setRenderLimit(getSiderBatchSize())
     }
   }, [mobile, mobileOpen])
 
@@ -277,7 +290,8 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
           }
           const el = event.currentTarget
           if (el.scrollHeight - el.scrollTop - el.clientHeight < 320) {
-            setRenderLimit((prev) => Math.min(filteredSessions.length, prev + RENDER_LOAD_STEP))
+            const step = getSiderBatchSize()
+            setRenderLimit((prev) => Math.min(filteredSessions.length, prev + step))
           }
         }}
       >

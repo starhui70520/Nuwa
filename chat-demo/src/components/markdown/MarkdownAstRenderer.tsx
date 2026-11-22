@@ -145,13 +145,21 @@ const MarkdownPhrasingContentItem = memo(function MarkdownPhrasingContentItem({
   }
 })
 
-// 按 \n 拆行插 <br>：源文每个换行（含软换行）都渲染为视觉换行
+// 按 \n 拆行插 <br>：源文每个换行（含软换行）都渲染为视觉换行；单行文本直出字符串，避免生成大量冗余 span 节点
 const TextContent = memo(function TextContent({ children }: { children: string }) {
+  if (!children.includes('\n') && !children.includes('\r')) {
+    return children
+  }
+  const lines = children.split(/\r?\n/)
   const result: ReactNode[] = []
-  children.split(/\r?\n/).forEach((line, index) => {
-    result.push(<span key={index + 's'}>{line}</span>, <br key={index + 'br'} />)
-  })
-  result.pop()
+  for (let index = 0; index < lines.length; index++) {
+    if (index > 0) {
+      result.push(<br key={index} />)
+    }
+    if (lines[index]) {
+      result.push(lines[index])
+    }
+  }
   return result
 })
 

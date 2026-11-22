@@ -2,6 +2,7 @@ import { LengthMetrics } from '@kit.ArkUI';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { text } from '@kit.ArkGraphics2D';
 import { NativeChatSource, safeNativeSourceUrl } from './NativeChatSources';
+import { isHarmonyLowPerfDevice } from './NativeDevicePerf';
 import { NativeHighlightedCode } from './NativeHighlightedCode';
 import { NativeLocale } from './NativeLocation';
 import { NativeMathEquation } from './NativeMathEquation';
@@ -165,8 +166,25 @@ export struct NativeMarkdown {
     }
   }
 
+  private maybeHasMath(value: string): boolean {
+    return value.includes('$') || value.includes('\\(') || value.includes('\\[');
+  }
+
   private scheduleMathPictures(): void {
-    if (!this.mathMounted || this.mathTimer >= 0) return;
+    if (!this.mathMounted) return;
+    const text = this.loading ? this.visibleContent : this.content;
+    // 无数学定界符的普通消息直接跳过定时器与 AST 遍历，避免 90%+ 消息的无效公式扫描。
+    if (!this.maybeHasMath(text)) {
+      if (this.mathTimer >= 0) {
+        clearTimeout(this.mathTimer);
+        this.mathTimer = -1;
+      }
+      if (this.mathPictures.size > 0 || this.mathRequests.size > 0 || this.mathPictureFiles) {
+        this.clearMathPictures();
+      }
+      return;
+    }
+    if (this.mathTimer >= 0) return;
     this.mathTimer = setTimeout(() => {
       this.mathTimer = -1;
       this.updateMathRequests();
@@ -372,7 +390,9 @@ export struct NativeMarkdown {
 
   private blocks(): NativeMarkdownBlock[] {
     const content = this.loading ? this.visibleContent : this.content;
-    const sources = this.hasCitations ? this.citationSources.map<number>((source: NativeChatSource): number => source.index) :
+    const sources = this.hasCitations ?
+      (this.citationSources.length > 0 ?
+        this.citationSources.map<number>((source: NativeChatSource): number => source.index) : []) :
       undefined;
     const indexKey = sources?.join(',');
     if (content !== this.cachedContent || indexKey !== this.cachedSourceIndices ||
@@ -383,7 +403,10 @@ export struct NativeMarkdown {
       this.cachedLinkMode = this.disableLinks;
       this.cachedBlocks = nativeMarkdownBlocks(content, sources, this.disableLinks);
       const finished = Date.now();
-      this.nextStreamUpdate = finished + Math.min(2000, (finished - started) * 2);
+      const elapsed = finished - started;
+      const delay = isHarmonyLowPerfDevice() ?
+        Math.max(64, Math.min(2000, elapsed * 3)) : Math.min(2000, elapsed * 2);
+      this.nextStreamUpdate = finished + delay;
     }
     return this.cachedBlocks;
   }

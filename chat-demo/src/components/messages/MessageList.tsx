@@ -1,5 +1,6 @@
 import clsx from 'clsx'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { isLowPerfDevice } from '../../app/devicePerf.js'
 import { useIsMobile } from '../../app/viewport.js'
 import {
   buildMessageVersions,
@@ -32,9 +33,8 @@ import styles from './MessageList.module.css'
 
 /** 距底部小于该值时视为在底部，流式内容增长时跟随 */
 const STICKY_THRESHOLD = 40
-/** 超长对话分批渲染，避免数百条长文一次性挂载导致卡顿 */
-const INITIAL_VISIBLE_COUNT = 40
-const LOAD_MORE_STEP = 40
+/** 超长对话分批渲染，低性能设备缩减首屏与增量窗口降低 DOM 挂载开销与内存占用 */
+const getVisibleBatchCount = () => (isLowPerfDevice() ? 20 : 40)
 const LOAD_MORE_THRESHOLD = 260
 const EMPTY_VERSIONS: MessageVersions = { ids: [], index: -1 }
 
@@ -62,15 +62,15 @@ export const MessageList = ({
     sessionId: string
     anchor: 'bottom' | 'top'
     count: number
-  }>({
+  }>(() => ({
     sessionId: session.id,
     anchor: 'bottom',
-    count: INITIAL_VISIBLE_COUNT,
-  })
+    count: getVisibleBatchCount(),
+  }))
   const activeWindow =
     visibleWindow.sessionId === session.id
       ? visibleWindow
-      : { sessionId: session.id, anchor: 'bottom' as const, count: INITIAL_VISIBLE_COUNT }
+      : { sessionId: session.id, anchor: 'bottom' as const, count: getVisibleBatchCount() }
 
   const messages = useMemo(() => getVisibleMessages(session), [session])
   const startIndex =
@@ -81,6 +81,8 @@ export const MessageList = ({
       : messages.length
   const hiddenAboveCount = startIndex
   const hiddenBelowCount = Math.max(0, messages.length - endIndex)
+  const hiddenAboveCountRef = useRef(hiddenAboveCount)
+  hiddenAboveCountRef.current = hiddenAboveCount
   const hiddenBelowCountRef = useRef(hiddenBelowCount)
   hiddenBelowCountRef.current = hiddenBelowCount
   const visibleMessages = useMemo(
@@ -103,7 +105,7 @@ export const MessageList = ({
   const lastMessageId = messages.at(-1)?.id
 
   const loadOlderMessages = useCallback(() => {
-    if (hiddenAboveCount <= 0) {
+    if (hiddenAboveCountRef.current <= 0) {
       return
     }
     const el = scrollRef.current
@@ -111,30 +113,32 @@ export const MessageList = ({
       prependAnchorRef.current = { prevHeight: el.scrollHeight, prevTop: el.scrollTop }
     }
     stickyRef.current = false
+    const batch = getVisibleBatchCount()
     setVisibleWindow((prev) => ({
       sessionId: session.id,
       anchor: 'bottom',
       count:
-        (prev.sessionId === session.id && prev.anchor === 'bottom'
-          ? prev.count
-          : INITIAL_VISIBLE_COUNT) + LOAD_MORE_STEP,
+        (prev.sessionId === session.id && prev.anchor === 'bottom' ? prev.count : batch) + batch,
     }))
-  }, [hiddenAboveCount, session.id])
+  }, [session.id])
 
   const loadNewerMessages = useCallback(() => {
-    if (hiddenBelowCount <= 0) {
+    if (hiddenBelowCountRef.current <= 0) {
       return
     }
     stickyRef.current = false
+    const batch = getVisibleBatchCount()
     setVisibleWindow((prev) => ({
       sessionId: session.id,
       anchor: 'top',
-      count:
-        (prev.sessionId === session.id && prev.anchor === 'top'
-          ? prev.count
-          : INITIAL_VISIBLE_COUNT) + LOAD_MORE_STEP,
+      count: (prev.sessionId === session.id && prev.anchor === 'top' ? prev.count : batch) + batch,
     }))
-  }, [hiddenBelowCount, session.id])
+  }, [session.id])
+
+  const loadOlderMessagesRef = useRef(loadOlderMessages)
+  loadOlderMessagesRef.current = loadOlderMessages
+  const loadNewerMessagesRef = useRef(loadNewerMessages)
+  loadNewerMessagesRef.current = loadNewerMessages
 
   const jumpToLatest = useCallback(() => {
     prependAnchorRef.current = null
@@ -144,15 +148,15 @@ export const MessageList = ({
     setVisibleWindow({
       sessionId: session.id,
       anchor: 'bottom',
-      count: INITIAL_VISIBLE_COUNT,
+      count: getVisibleBatchCount(),
     })
     const el = scrollRef.current
-    if (el && hiddenBelowCount === 0) {
+    if (el && hiddenBelowCountRef.current === 0) {
       jumpBottomPendingRef.current = false
       el.scrollTop = el.scrollHeight
       scrollTopRef.current = el.scrollTop
     }
-  }, [hiddenBelowCount, session.id])
+  }, [session.id])
 
   // 顶部增量加载更早消息后精确补偿 scrollTop；双击跳顶 / 一键回底在窗口切换完成后落位。
   useLayoutEffect(() => {
@@ -199,13 +203,13 @@ export const MessageList = ({
     }
     stickyRef.current = false
     prependAnchorRef.current = null
-    if (hiddenAboveCount > 0) {
+    if (hiddenAboveCountRef.current > 0) {
       // 超长会话直接切换窗口到第 1 条消息，毫秒级直达真正顶部且不一次性挂载全部 DOM。
       jumpTopPendingRef.current = true
       setVisibleWindow({
         sessionId: session.id,
         anchor: 'top',
-        count: INITIAL_VISIBLE_COUNT,
+        count: getVisibleBatchCount(),
       })
       return
     }
@@ -215,7 +219,7 @@ export const MessageList = ({
     } else {
       el.scrollTop = 0
     }
-  }, [hiddenAboveCount, session.id])
+  }, [session.id])
 
   useEffect(() => {
     if (!scrollToTopRef) {
@@ -258,7 +262,7 @@ export const MessageList = ({
     setVisibleWindow((prev) =>
       prev.sessionId === session.id && prev.anchor === 'bottom'
         ? prev
-        : { sessionId: session.id, anchor: 'bottom', count: INITIAL_VISIBLE_COUNT }
+        : { sessionId: session.id, anchor: 'bottom', count: getVisibleBatchCount() }
     )
     scrollToBottom()
   }, [session.id, lastMessageId, scrollToBottom])
@@ -278,7 +282,7 @@ export const MessageList = ({
     [session.id, streaming]
   )
 
-  // 跨移动端断点时切换滚动层，并保持输入框及当前阅读位置。
+  // 跨移动端断点时切换滚动层，并保持输入框及当前阅读位置；用 ref 读取窗口计数，避免分页加载时反复拆绑 scroll 监听。
   useLayoutEffect(() => {
     const el = scrollRef.current
     if (!el) {
@@ -293,30 +297,30 @@ export const MessageList = ({
       const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight
       const nearBottom = distanceToBottom < STICKY_THRESHOLD
       // 仅在用户向上滚动时停止跟随底部，布局或内容增高时保持跟随状态。
-      if (nearBottom && hiddenBelowCount === 0) {
+      if (nearBottom && hiddenBelowCountRef.current === 0) {
         stickyRef.current = true
       } else if (el.scrollTop < scrollTopRef.current) {
         stickyRef.current = false
       }
       if (
         !stickyRef.current &&
-        hiddenAboveCount > 0 &&
+        hiddenAboveCountRef.current > 0 &&
         el.scrollTop < LOAD_MORE_THRESHOLD &&
         el.scrollTop < scrollTopRef.current
       ) {
-        loadOlderMessages()
+        loadOlderMessagesRef.current()
       } else if (
-        hiddenBelowCount > 0 &&
+        hiddenBelowCountRef.current > 0 &&
         distanceToBottom < LOAD_MORE_THRESHOLD &&
         el.scrollTop > scrollTopRef.current
       ) {
-        loadNewerMessages()
+        loadNewerMessagesRef.current()
       }
       scrollTopRef.current = el.scrollTop
     }
     el.addEventListener('scroll', onScroll, { passive: true })
     return () => el.removeEventListener('scroll', onScroll)
-  }, [isMobile, scrollToBottom, loadOlderMessages, loadNewerMessages, hiddenAboveCount, hiddenBelowCount])
+  }, [isMobile, scrollToBottom])
 
   const lastIndex = messages.length - 1
   const uploadRetryId = getUploadRetryId(messages, streaming)

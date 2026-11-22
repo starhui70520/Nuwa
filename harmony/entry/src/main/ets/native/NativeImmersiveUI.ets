@@ -3,8 +3,10 @@ import { deviceInfo } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { vibrator } from '@kit.SensorServiceKit';
 import { hdsEffect } from '@kit.UIDesignKit';
+import { isHarmonyLowPerfDevice } from './NativeDevicePerf';
 
 let cachedImmersiveSupport: boolean | undefined = undefined;
+let cachedHdsSupport: boolean | undefined = undefined;
 const IMMERSIVE_LOG_DOMAIN = 0x2090;
 const IMMERSIVE_LOG_TAG = 'NuwaImmersiveUI';
 
@@ -32,9 +34,17 @@ export function isImmersiveMaterialAvailable(): boolean {
 
 /** Runtime detection for HarmonyOS 6.0+ (API 20+) HDS point-light & press-glow visual effects. */
 function isHdsPointLightAvailable(): boolean {
+  if (isHarmonyLowPerfDevice()) {
+    return false;
+  }
+  if (cachedHdsSupport !== undefined) {
+    return cachedHdsSupport;
+  }
   try {
-    return deviceInfo.sdkApiVersion >= 20;
+    cachedHdsSupport = deviceInfo.sdkApiVersion >= 20;
+    return cachedHdsSupport;
   } catch {
+    cachedHdsSupport = false;
     return false;
   }
 }
@@ -148,16 +158,17 @@ export class ImmersiveGlassCapsuleModifier implements AttributeModifier<CommonAt
         // Fall through to GPU frosted glass fallback.
       }
     }
+    const lowPerf = isHarmonyLowPerfDevice();
     instance
       .backgroundColor(Color.Transparent)
       .backgroundEffect({
-        radius: 36,
-        saturation: 1.5,
+        radius: lowPerf ? 20 : 36,
+        saturation: lowPerf ? 1.25 : 1.5,
         brightness: 1.08,
         color: $r('app.color.native_immersive_composer_tint'),
       })
       .border({ width: 0.75, color: $r('app.color.native_glass_rim') })
-      .shadow({ radius: 14, color: $r('app.color.native_glass_shadow'), offsetY: 3 });
+      .shadow({ radius: lowPerf ? 8 : 14, color: $r('app.color.native_glass_shadow'), offsetY: lowPerf ? 2 : 3 });
     applyHdsGlassLight(instance, this.interactive);
   }
 }
@@ -167,6 +178,7 @@ export class ImmersiveGlassCapsuleModifier implements AttributeModifier<CommonAt
  * Uses pure GPU backgroundEffect (44px blur, boosted saturation & brightness, low-alpha smoked/crystal tint)
  * + delicate luminous glass rim + subtle top specular sheen + HDS pointLight so scrolled messages
  * genuinely refract and glow behind the composer across both light and dark modes (API 12-26+).
+ * On low-tier HarmonyOS devices, blur radius is reduced to ease RenderService GPU fill-rate pressure.
  */
 export class ImmersiveComposerModifier implements AttributeModifier<CommonAttribute> {
   private readonly elevated: boolean;
@@ -176,11 +188,12 @@ export class ImmersiveComposerModifier implements AttributeModifier<CommonAttrib
   }
 
   applyNormalAttribute(instance: CommonAttribute): void {
+    const lowPerf = isHarmonyLowPerfDevice();
     instance
       .backgroundColor(Color.Transparent)
       .backgroundEffect({
-        radius: this.elevated ? 44 : 32,
-        saturation: 1.6,
+        radius: lowPerf ? (this.elevated ? 22 : 18) : (this.elevated ? 44 : 32),
+        saturation: lowPerf ? 1.3 : 1.6,
         brightness: 1.1,
         color: $r('app.color.native_immersive_composer_tint'),
       })
@@ -201,16 +214,17 @@ export class ImmersiveComposerModifier implements AttributeModifier<CommonAttrib
  */
 export class ImmersiveGlassControlModifier implements AttributeModifier<CommonAttribute> {
   applyNormalAttribute(instance: CommonAttribute): void {
+    const lowPerf = isHarmonyLowPerfDevice();
     instance
       .backgroundColor(Color.Transparent)
       .backgroundEffect({
-        radius: 28,
-        saturation: 1.5,
+        radius: lowPerf ? 16 : 28,
+        saturation: lowPerf ? 1.25 : 1.5,
         brightness: 1.1,
         color: $r('app.color.native_immersive_composer_tint'),
       })
       .border({ width: 0.75, color: $r('app.color.native_glass_rim') })
-      .shadow({ radius: 10, offsetY: 2, color: $r('app.color.native_glass_shadow') });
+      .shadow({ radius: lowPerf ? 6 : 10, offsetY: 2, color: $r('app.color.native_glass_shadow') });
     applyHdsGlassLight(instance, true);
   }
 }
@@ -220,16 +234,17 @@ export class ImmersiveGlassControlModifier implements AttributeModifier<CommonAt
  */
 export class ImmersiveSurfaceModifier implements AttributeModifier<CommonAttribute> {
   applyNormalAttribute(instance: CommonAttribute): void {
+    const lowPerf = isHarmonyLowPerfDevice();
     instance
       .backgroundColor(Color.Transparent)
       .backgroundEffect({
-        radius: 48,
-        saturation: 1.5,
+        radius: lowPerf ? 24 : 48,
+        saturation: lowPerf ? 1.25 : 1.5,
         brightness: 1.08,
         color: $r('app.color.native_immersive_composer_tint'),
       })
       .border({ width: 0.85, color: $r('app.color.native_glass_rim') })
-      .shadow({ radius: 24, offsetY: 8, color: '#2E000000' });
+      .shadow({ radius: lowPerf ? 12 : 24, offsetY: lowPerf ? 4 : 8, color: '#2E000000' });
     applyHdsGlassLight(instance, false);
   }
 }

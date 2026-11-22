@@ -29,3 +29,5 @@ export interface NativeMarkdownAstNode {
 
 export function toNativeMarkdownAst(input: string, sourceIndices: number[] | undefined,
   disableLink: boolean): NativeMarkdownAstNode;
+
+export function clearNativeMarkdownAstCache(): void;

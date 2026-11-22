@@ -1,6 +1,7 @@
 import { useTranslate } from '../../i18n/index.js'
 import { memo, useEffect, useMemo, useReducer, useState } from 'react'
 import Prism from 'prismjs'
+import { isLowPerfDevice } from '../../app/devicePerf.js'
 import {
   getHighlightLang,
   isHighlightLoaded,
@@ -69,7 +70,12 @@ const CodeInfoRow = ({
   )
 }
 
-/** 代码块：语言包按需加载，不支持或尚未加载的语言按纯文本显示 */
+const STREAMING_HIGHLIGHT_LIMIT_LOW = 1200
+const STREAMING_HIGHLIGHT_LIMIT_NORMAL = 6000
+const MAX_HIGHLIGHT_CHARS_LOW = 32_768
+const MAX_HIGHLIGHT_CHARS_NORMAL = 65_536
+
+/** 代码块：语言包按需加载，不支持、尚未加载或流式超大代码块按纯文本直出，结束后再高亮 */
 export const CodeBlock = memo(function CodeBlock({
   code,
   infostring,
@@ -85,8 +91,13 @@ export const CodeBlock = memo(function CodeBlock({
   const rerender = useReducer((n: number) => n + 1, 0)[1]
   const lang = getHighlightLang(infostring)
   const loaded = lang !== null && isHighlightLoaded(lang)
+  const lowPerf = isLowPerfDevice()
+  const maxHighlightChars = lowPerf ? MAX_HIGHLIGHT_CHARS_LOW : MAX_HIGHLIGHT_CHARS_NORMAL
+  const streamingLimit = lowPerf ? STREAMING_HIGHLIGHT_LIMIT_LOW : STREAMING_HIGHLIGHT_LIMIT_NORMAL
+  const deferHighlight =
+    code.length > maxHighlightChars || (loading && code.length > streamingLimit)
   useEffect(() => {
-    if (lang === null || loaded) {
+    if (lang === null || loaded || code.length > maxHighlightChars) {
       return
     }
     let unmounted = false
@@ -98,11 +109,13 @@ export const CodeBlock = memo(function CodeBlock({
     return () => {
       unmounted = true
     }
-  }, [lang, loaded, rerender])
+  }, [lang, loaded, rerender, code.length, maxHighlightChars])
   const renderedHtml = useMemo(() => {
-    const name = lang !== null && loaded ? lang : 'plaintext'
-    return Prism.highlight(code, Prism.languages[name], name)
-  }, [code, lang, loaded])
+    if (lang === null || !loaded || deferHighlight) {
+      return null
+    }
+    return Prism.highlight(code, Prism.languages[lang], lang)
+  }, [code, lang, loaded, deferHighlight])
   return (
     <div className="md-code-block">
       <div className="md-code-block-banner">
@@ -115,8 +128,10 @@ export const CodeBlock = memo(function CodeBlock({
       </div>
       {isMermaid && showDiagram ? (
         <MermaidDiagram code={code} loading={loading} />
-      ) : (
+      ) : renderedHtml !== null ? (
         <pre dangerouslySetInnerHTML={{ __html: renderedHtml }}></pre>
+      ) : (
+        <pre>{code}</pre>
       )}
     </div>
   )

@@ -2,12 +2,17 @@ import { AbilityConstant, common, Configuration, ConfigurationConstant } from '@
 import { text } from '@kit.ArkGraphics2D';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { NativeCodeHighlightRun, nativeCodeHighlightKey, requestNativeCodeHighlight } from './NativeCodeHighlightQueue';
+import { isHarmonyLowPerfDevice } from './NativeDevicePerf';
 import { NativeTheme } from './NativeSettings';
 
 const CODE_FONT = 'monospace';
 const CODE_PADDING = 16;
 const TAB_COLUMNS = 8;
 const TAB_LAYOUT_LINES = 128;
+const STREAMING_DEFER_CHARS_LOW = 1200;
+const STREAMING_DEFER_CHARS_NORMAL = 6000;
+const STREAMING_DEBOUNCE_LOW_MS = 220;
+const STREAMING_DEBOUNCE_NORMAL_MS = 100;
 
 const themeListeners = new Set<(dark: boolean) => void>();
 let observingTheme = false;
@@ -44,6 +49,15 @@ interface HighlightedSource {
 interface HighlightedSpan extends NativeCodeHighlightRun {
   text: string;
   spacing?: number;
+  spanKey: string;
+}
+
+function fastTextHash(value: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i++) {
+    hash = Math.imul(hash ^ value.charCodeAt(i), 16777619);
+  }
+  return (hash >>> 0).toString(36);
 }
 
 interface CodeTabLayout {
@@ -118,6 +132,10 @@ export struct NativeHighlightedCode {
   @State private highlight: HighlightedSource | undefined = undefined;
   @State private layoutWidth: number = 0;
   private tabs?: CodeTabLayout;
+  private cachedSpansSource: string = '';
+  private cachedSpansHighlight?: HighlightedSource;
+  private cachedSpansSpacing?: Map<number, number>;
+  private cachedSpans: HighlightedSpan[] = [];
   private mounted: boolean = false;
   private timer: number = -1;
   private unsubscribeTheme?: () => void;
@@ -138,12 +156,24 @@ export struct NativeHighlightedCode {
   }
 
   private schedule(): void {
-    if (!this.mounted || (this.timer >= 0 && this.loading)) return;
+    if (!this.mounted) return;
+    const lowPerf = isHarmonyLowPerfDevice();
+    const deferLimit = lowPerf ? STREAMING_DEFER_CHARS_LOW : STREAMING_DEFER_CHARS_NORMAL;
+    // 流式输出大代码块时延后语法高亮，结束瞬间再一次性着色，避免反复向 Worker 序列化整段代码。
+    if (this.loading && this.source.length > deferLimit) {
+      if (this.timer >= 0) {
+        clearTimeout(this.timer);
+        this.timer = -1;
+      }
+      return;
+    }
+    if (this.timer >= 0 && this.loading) return;
     clearTimeout(this.timer);
+    const delay = this.loading ? (lowPerf ? STREAMING_DEBOUNCE_LOW_MS : STREAMING_DEBOUNCE_NORMAL_MS) : 0;
     this.timer = setTimeout((): void => {
       this.timer = -1;
       void this.highlightSource();
-    }, this.loading ? 100 : 0);
+    }, delay);
   }
 
   private async highlightSource(): Promise<void> {
@@ -180,14 +210,24 @@ export struct NativeHighlightedCode {
   private appendSpan(spans: HighlightedSpan[], run: NativeCodeHighlightRun, start: number,
     end: number, spacing?: number): void {
     if (end <= start && this.source.length > 0) return;
-    spans.push({ text: this.source.slice(start, end), end, lightColor: run.lightColor,
-      darkColor: run.darkColor, lightFlags: run.lightFlags, darkFlags: run.darkFlags, spacing });
+    const piece = this.source.slice(start, end);
+    const spanKey = spans.length.toString() + ':' + end.toString() + ':' + piece.length.toString() + ':' +
+      fastTextHash(piece) + ':' + run.lightColor + ':' + run.darkColor + ':' +
+      run.lightFlags.toString() + ':' + run.darkFlags.toString() + ':' + (spacing === undefined ? '' : spacing.toString());
+    spans.push({ text: piece, end, lightColor: run.lightColor,
+      darkColor: run.darkColor, lightFlags: run.lightFlags, darkFlags: run.darkFlags, spacing, spanKey });
   }
 
   private spans(): HighlightedSpan[] {
-    const runs: NativeCodeHighlightRun[] = this.highlight?.key === nativeCodeHighlightKey(this.language, this.source) ?
-      this.highlight.runs : [{ end: this.source.length, lightColor: '', darkColor: '', lightFlags: 0, darkFlags: 0 }];
+    const activeHighlight = this.highlight?.key === nativeCodeHighlightKey(this.language, this.source) ?
+      this.highlight : undefined;
     const spacing = this.tabSpacing();
+    if (this.cachedSpansSource === this.source && this.cachedSpansHighlight === activeHighlight &&
+      this.cachedSpansSpacing === spacing && this.cachedSpans.length > 0) {
+      return this.cachedSpans;
+    }
+    const runs: NativeCodeHighlightRun[] = activeHighlight ?
+      activeHighlight.runs : [{ end: this.source.length, lightColor: '', darkColor: '', lightFlags: 0, darkFlags: 0 }];
     const spans: HighlightedSpan[] = [];
     let start = 0;
     let tab = spacing?.size ? this.source.indexOf('\t') : -1;
@@ -201,6 +241,10 @@ export struct NativeHighlightedCode {
       this.appendSpan(spans, run, start, run.end);
       start = run.end;
     }
+    this.cachedSpansSource = this.source;
+    this.cachedSpansHighlight = activeHighlight;
+    this.cachedSpansSpacing = spacing;
+    this.cachedSpans = spans;
     return spans;
   }
 
@@ -223,9 +267,7 @@ export struct NativeHighlightedCode {
           .fontWeight((this.flags(span) & 1) ? FontWeight.Bold : FontWeight.Regular)
           .fontStyle((this.flags(span) & 2) ? FontStyle.Italic : FontStyle.Normal)
           .letterSpacing(span.spacing === undefined ? 0 : `${span.spacing}px`)
-      }, (span: HighlightedSpan): string =>
-        span.end.toString() + ':' + span.lightColor + ':' + span.darkColor + ':' +
-        span.lightFlags.toString() + ':' + span.darkFlags.toString() + ':' + span.spacing + ':' + span.text)
+      }, (span: HighlightedSpan): string => span.spanKey)
     }
     .fontFamily(CODE_FONT)
     .fontSize(13 * this.fontScale)

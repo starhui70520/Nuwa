@@ -74,7 +74,9 @@ import { NativeVoiceSpectrum } from '../native/NativeVoiceSpectrum';
 import { NativeToolTimeline, NativeToolTimelineStep, NativeToolTimelineView } from '../native/NativeToolTimeline';
 import { NativeToolTimelinePanel } from '../native/NativeToolTimelinePanel';
 import { NativeChatStorage } from '../native/NativeChatStorage';
+import { clearNativeCodeHighlightCache } from '../native/NativeCodeHighlightQueue';
 import { NativeConversationCache } from '../native/NativeConversationCache';
+import { isHarmonyLowPerfDevice, onHarmonyLowMemory } from '../native/NativeDevicePerf';
 import {
   appendBranch, createConversation, createConversationMessage, deleteConversations, groupConversations,
   messageVersions, NativeConversation, NativeConversationGroup, NativeConversationMessage, NativeConversationState,
@@ -83,6 +85,7 @@ import {
   unloadedConversation, updateConversationMessage, upsertConversation, visibleMessages,
 } from '../native/NativeConversation';
 import { NativeMarkdown } from '../native/NativeMarkdown';
+import { clearNativeMarkdownBlockCache } from '../native/NativeMarkdownStructure';
 import { NativeMathRendererHost } from '../native/NativeMathRendererHost';
 import { NativeDraftStorage, NativeStoredDraft } from '../native/NativeDraftStorage';
 import { CHAT_PAGE_SIZE, nativeMessageRange, NativeMessageList, NativeMessageRange, NativeMessageRow } from '../native/NativeMessageList';
@@ -105,7 +108,7 @@ import {
 } from '../native/NativeLocation';
 import { NativeApiCredentialDraft, NativeSettings, NativeSettingsController, NATIVE_CHAT_FONT_SIZES } from '../native/NativeSettings';
 import {
-  createSidebarRows, createSidebarSections, filterSidebarGroups, NativeSidebarRow, NativeSidebarSearch,
+  createSidebarRows, createSidebarSections, filterSidebarGroups, matchesSidebarBody, NativeSidebarRow, NativeSidebarSearch,
   NativeSidebarSection, NativeSidebarSession, normalizeSidebarQuery, SIDEBAR_HISTORY_PAGE_SIZE, visibleSidebarRowIndex,
 } from '../native/NativeSidebarHistory';
 
@@ -255,6 +258,7 @@ struct NativeChat {
   private readonly settingsScroll = new Scroller();
   private settingsTouchDownAt: number = 0;
   private settingsDragStartedAt: number = 0;
+  private unsubscribeLowMemory?: () => void;
   @State private migrationPromptVisible: boolean = false;
   @State private migrationChoice: NativeMigrationChoiceModel | null = null;
   private readonly migrationChoiceController = new CustomDialogController({
@@ -522,6 +526,11 @@ struct NativeChat {
   aboutToAppear(): void {
     this.balanceRefreshEnabled = true;
     this.getUIContext().setKeyboardAvoidMode(KeyboardAvoidMode.RESIZE);
+    this.unsubscribeLowMemory = onHarmonyLowMemory((): void => {
+      clearNativeMarkdownBlockCache();
+      clearNativeCodeHighlightCache();
+      this.trimConversationCache(1);
+    });
     void this.load();
     void getNativeCurrentVersion().then((version: string) => { this.appVersion = version; }).catch(() => {});
     void this.startUpdateChecks();
@@ -622,6 +631,8 @@ struct NativeChat {
   }
 
   aboutToDisappear(): void {
+    this.unsubscribeLowMemory?.();
+    this.unsubscribeLowMemory = undefined;
     this.onPageHide();
     this.closeDeleteNotice();
     this.closeUpdateNotice(false);
@@ -853,11 +864,12 @@ struct NativeChat {
 
   private paintLiveReplies(): void {
     if (!this.visible || this.streamFrame >= 0) return;
+    const interval = isHarmonyLowPerfDevice() ? 40 : 16;
     this.streamFrame = setTimeout(() => {
       this.streamFrame = -1;
       this.replies = Array.from(this.replies);
       if (this.reply() && this.followLatest && this.laterCount === 0) this.scrollToLatest();
-    }, 16);
+    }, interval);
   }
 
   private scheduleStreamCheckpoint(context: common.UIAbilityContext): void {
@@ -1204,7 +1216,7 @@ struct NativeChat {
   private restoreAuthorizationSettings(): void {
     if (!this.authorizationReturnToAccount) return;
     this.authorizationReturnToAccount = false;
-    this.settingsSection = 'account';
+    this.switchSettingsSection('account');
     this.settingsVisible = true;
   }
 
@@ -1385,7 +1397,7 @@ struct NativeChat {
     return this.history.sessions.find((item: NativeConversation): boolean => item.id === id);
   }
 
-  private trimConversationCache(): void {
+  private trimConversationCache(limitOverride?: number): void {
     if (!this.loaded || !this.visible || this.backupBusy || this.migrationInProgress || this.reloadingMigratedHistory ||
       this.deletingSessions || this.signingOut || this.draftSaving || this.selecting || this.sidebarMetadataLoads > 0 ||
       this.historyWritesPending > 0 || this.hasPendingHistorySave()) return;
@@ -1395,7 +1407,7 @@ struct NativeChat {
     if (this.renamingId) protectedIds.add(this.renamingId);
     for (const reply of this.replies) protectedIds.add(reply.sessionId);
     this.stoppedUploadReplies.forEach((reply: NativeReply): void => { protectedIds.add(reply.sessionId); });
-    const ids = this.conversationCache.evictable(this.history.sessions, protectedIds);
+    const ids = this.conversationCache.evictable(this.history.sessions, protectedIds, limitOverride);
     if (!ids.length) return;
     for (const id of ids) this.conversationCache.forget(id);
     this.storage.forgetConversationImageCache(this.host(), ids);
@@ -1731,11 +1743,23 @@ struct NativeChat {
   }
 
   private scheduleSidebarSearch(): void {
-    this.sidebarSearch.schedule(this.history.sessions, this.sidebarQuery, (matches: Set<string>): void => {
+    const skipIds = new Set<string>();
+    const query = this.sidebarQuery;
+    if (query) {
+      const untitled = this.label('新对话', 'New chat').toLowerCase();
+      for (const session of this.history.sessions) {
+        const title = session.title ? session.title.toLowerCase() : untitled;
+        if (title.includes(query)) skipIds.add(session.id);
+      }
+    }
+    this.sidebarSearch.schedule(this.history.sessions, query, (matches: Set<string>): void => {
       this.sidebarMatches = matches;
       this.refreshSidebarResults();
     }, (session: NativeConversation): Promise<NativeConversation> =>
-      this.storage.loadConversation(this.host(), session.id, true));
+      this.storage.loadConversation(this.host(), session.id, true), skipIds,
+      (ids: string[], targetQuery: string): Promise<string[]> =>
+        this.storage.searchConversationMatches(this.host(), ids, targetQuery,
+          (loaded: NativeConversation): boolean => matchesSidebarBody(loaded, targetQuery)));
   }
 
   private refreshSidebarResults(): void {
@@ -4607,13 +4631,26 @@ struct NativeChat {
     .width('100%').offset({ x: -6 }).padding({ top: 12, bottom: 10 })
   }
 
+  private resetSettingsScroll(): void {
+    try {
+      this.settingsScroll.scrollEdge(Edge.Top);
+    } catch {
+      // 尚未挂载 Scroll 时忽略。
+    }
+  }
+
+  private switchSettingsSection(section: string): void {
+    this.settingsSection = section;
+    this.resetSettingsScroll();
+  }
+
   private openSettings(section: string = 'root'): void {
     this.dismissComposerTooltip();
     if (section === 'account') {
       this.prepareCredentialSettings();
     }
     void this.refreshBalance();
-    this.settingsSection = section;
+    this.switchSettingsSection(section);
     this.settingsDragOffset = 0;
     this.settingsVisible = true;
   }
@@ -4623,7 +4660,7 @@ struct NativeChat {
     triggerNativeHaptic('light');
     if (this.settingsSection === 'account') this.finishCredentialSettings();
     this.getUIContext().animateTo({ curve: nativeSpringCurve(0.28, 0.88) }, () => {
-      this.settingsSection = 'root';
+      this.switchSettingsSection('root');
     });
   }
 
@@ -5700,7 +5737,7 @@ struct NativeChat {
       this.settingsRow($r('app.media.native_settings_data'), () => this.label('数据管理', 'Data management'),
         () => this.loaded ? this.label(`${this.history.sessions.length} 条对话`,
           this.history.sessions.length === 1 ? '1 chat' : `${this.history.sessions.length} chats`) : '',
-        () => { this.settingsSection = 'data'; }, () => this.loaded)
+        () => { this.switchSettingsSection('data'); }, () => this.loaded)
     }
     .width('100%').borderRadius(16).clip(true).backgroundColor($r('app.color.native_chat_surface'))
     this.settingsLabel(() => this.label('应用', 'App'))
@@ -5816,10 +5853,10 @@ struct NativeChat {
         () => '', () => { void this.checkUpdate(); }, () => !this.checkingUpdate)
       Divider().color($r('app.color.native_chat_stroke'))
       this.settingsRow($r('app.media.native_settings_document'), () => this.label('更新日志', 'Release notes'), () => '',
-        () => { this.settingsSection = 'notes'; void this.loadReleaseNotes(); })
+        () => { this.switchSettingsSection('notes'); void this.loadReleaseNotes(); })
       Divider().color($r('app.color.native_chat_stroke'))
       this.settingsRow($r('app.media.native_settings_info'),
-        () => this.label('问题反馈与日志上报', 'Feedback & Diagnostics'), () => '', () => { this.settingsSection = 'feedback'; })
+        () => this.label('问题反馈与日志上报', 'Feedback & Diagnostics'), () => '', () => { this.switchSettingsSection('feedback'); })
       Divider().color($r('app.color.native_chat_stroke'))
       this.settingsRow($r('app.media.native_settings_document'), () => this.label('隐私政策', 'Privacy policy'), () => '', () => {
         void openNuwaPrivacyPolicy(this.host()).catch(() => {

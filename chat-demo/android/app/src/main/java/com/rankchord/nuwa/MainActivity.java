@@ -6,6 +6,7 @@ import android.app.ActivityManager;
 import android.content.ComponentCallbacks2;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
@@ -93,13 +94,27 @@ public class MainActivity extends BridgeActivity {
     @SuppressWarnings("deprecation")
     public void onTrimMemory(int level) {
         super.onTrimMemory(level);
-        if ((level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL
-            || level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND)
+        boolean foregroundLow = level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW
+            || level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL;
+        boolean backgroundPressure = level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND;
+        if ((foregroundLow || backgroundPressure)
             && getBridge() != null
             && getBridge().getWebView() != null) {
+            final boolean isForeground = foregroundLow;
+            final boolean clearHttpCache = level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL
+                || backgroundPressure;
             runOnUiThread(() -> {
                 if (getBridge() != null && getBridge().getWebView() != null) {
-                    getBridge().getWebView().clearCache(false);
+                    WebView webView = getBridge().getWebView();
+                    webView.evaluateJavascript(
+                        "window.dispatchEvent(new CustomEvent('dsapp:low-memory',{detail:{foreground:"
+                            + (isForeground ? "true" : "false")
+                            + "}}));",
+                        null
+                    );
+                    if (clearHttpCache) {
+                        webView.clearCache(false);
+                    }
                 }
             });
         }
@@ -207,14 +222,19 @@ public class MainActivity extends BridgeActivity {
             return;
         }
         WebView webView = getBridge().getWebView();
-        WebView.setWebContentsDebuggingEnabled(true);
+        boolean debuggable = (getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+        WebView.setWebContentsDebuggingEnabled(debuggable);
         webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
         webView.setOverScrollMode(View.OVER_SCROLL_NEVER);
+
+        int initialMajor = getCurrentWebViewMajorVersion(webView);
+        boolean initialLowPerf = isLowPerformanceDevice(initialMajor);
 
         WebSettings settings = webView.getSettings();
         settings.setMediaPlaybackRequiresUserGesture(false);
         settings.setTextZoom(100);
-        settings.setOffscreenPreRaster(true);
+        // 低内存 / 旧系统设备关闭离屏预光栅化，避免额外占用 GPU 瓦片显存
+        settings.setOffscreenPreRaster(!initialLowPerf);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             settings.setAlgorithmicDarkeningAllowed(false);
         }
@@ -266,10 +286,10 @@ public class MainActivity extends BridgeActivity {
                     return;
                 }
                 int major = getCurrentWebViewMajorVersion(view);
-                boolean lowRam = isLowRamDevice();
-                if ((major > 0 && major < 115) || lowRam) {
+                boolean lowPerf = isLowPerformanceDevice(major);
+                if (lowPerf) {
                     view.evaluateJavascript(
-                        "document.body && document.body.setAttribute('data-low-webview','true');",
+                        "(function(){if(!document.body)return;document.body.setAttribute('data-low-webview','true');document.body.setAttribute('data-perf-tier','low');})();",
                         null
                     );
                 }
@@ -318,7 +338,33 @@ public class MainActivity extends BridgeActivity {
     private boolean isLowRamDevice() {
         try {
             ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
-            return am != null && am.isLowRamDevice();
+            if (am == null) {
+                return false;
+            }
+            if (am.isLowRamDevice()) {
+                return true;
+            }
+            ActivityManager.MemoryInfo info = new ActivityManager.MemoryInfo();
+            am.getMemoryInfo(info);
+            // 4GB 及以下物理内存机型（含 4GB 标称约 3.8-4.2GB）纳入低内存优化档位
+            return info.totalMem > 0L && info.totalMem <= 4_600_000_000L;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private boolean isLowPerformanceDevice(int webViewMajor) {
+        if (isLowRamDevice()) {
+            return true;
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            return true;
+        }
+        if (webViewMajor > 0 && webViewMajor < 115) {
+            return true;
+        }
+        try {
+            return Runtime.getRuntime().availableProcessors() <= 4;
         } catch (Exception ignored) {
             return false;
         }

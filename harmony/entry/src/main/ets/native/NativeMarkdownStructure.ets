@@ -1,5 +1,7 @@
 import { url } from '@kit.ArkTS';
-import { NativeMarkdownAstNode, toNativeMarkdownAst } from './markdown/NativeMarkdownAst';
+import {
+  clearNativeMarkdownAstCache, NativeMarkdownAstNode, toNativeMarkdownAst,
+} from './markdown/NativeMarkdownAst';
 import { NativeMathSpan, nativeMathSpans, parseNativeMath } from './NativeMarkdownMath';
 
 export interface NativeMarkdownPart {
@@ -110,30 +112,62 @@ function blockHash(hash: number, value: string): number {
   return hash;
 }
 
+function hashSep(hash: number, code: number): number {
+  return Math.imul(hash ^ code, 16777619);
+}
+
 function partsHash(hash: number, parts: NativeMarkdownPart[]): number {
-  for (const part of parts) {
-    hash = blockHash(hash, [
-      part.text, part.target ?? '', part.formula ?? '', String(part.citation ?? ''),
-      part.strong ? 'strong' : '', part.italic ? 'italic' : '', part.code ? 'code' : '',
-    ].join('\u0000'));
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    hash = blockHash(hash, part.text);
+    hash = hashSep(hash, 0);
+    if (part.target) hash = blockHash(hash, part.target);
+    hash = hashSep(hash, 0);
+    if (part.formula) hash = blockHash(hash, part.formula);
+    hash = hashSep(hash, 0);
+    if (part.citation !== undefined) hash = hashSep(hash, part.citation);
+    hash = hashSep(hash, (part.strong ? 1 : 0) | (part.italic ? 2 : 0) | (part.code ? 4 : 0));
   }
   return hash;
 }
 
 function withKey(block: NativeMarkdownBlock): NativeMarkdownBlock {
-  let hash = blockHash(2166136261, [
-    block.kind, block.marker ?? '', block.lang ?? '', block.text ?? '',
-    (block.level ?? 0).toString(),
-  ].join('\u0000'));
+  let hash = blockHash(2166136261, block.kind);
+  hash = hashSep(hash, 0);
+  if (block.marker) hash = blockHash(hash, block.marker);
+  hash = hashSep(hash, 0);
+  if (block.lang) hash = blockHash(hash, block.lang);
+  hash = hashSep(hash, 0);
+  if (block.text) hash = blockHash(hash, block.text);
+  hash = hashSep(hash, block.level ?? 0);
   if (block.parts) hash = partsHash(hash, block.parts);
-  for (const row of block.rows ?? []) {
-    hash = blockHash(hash, '\u0001');
-    for (const cell of row) hash = partsHash(blockHash(hash, '\u0002'), cell);
+  const rows = block.rows;
+  if (rows) {
+    for (let r = 0; r < rows.length; r++) {
+      hash = hashSep(hash, 1);
+      const row = rows[r];
+      for (let c = 0; c < row.length; c++) {
+        hash = partsHash(hashSep(hash, 2), row[c]);
+      }
+    }
   }
-  for (const child of block.children ?? []) hash = blockHash(hash, child.key);
+  const children = block.children;
+  if (children) {
+    for (let i = 0; i < children.length; i++) {
+      hash = blockHash(hash, children[i].key);
+    }
+  }
   block.key = (hash >>> 0).toString(36);
-  block.hasDiagram = block.lang?.toLowerCase() === 'mermaid' ||
-    block.children?.some((child: NativeMarkdownBlock): boolean => child.hasDiagram === true);
+  let hasDiagram = block.lang !== undefined && block.lang.toLowerCase() === 'mermaid';
+  if (!hasDiagram && children) {
+    for (let i = 0; i < children.length; i++) {
+      if (children[i].hasDiagram === true) {
+        hasDiagram = true;
+        break;
+      }
+    }
+  }
+  block.hasDiagram = hasDiagram;
   return block;
 }
 
@@ -201,12 +235,66 @@ function projectBlocks(nodes: NativeMarkdownAstNode[], listDepth: number = 0): N
   return blocks;
 }
 
+interface CachedMarkdownBlocks {
+  blocks: NativeMarkdownBlock[];
+  chars: number;
+}
+
+const MAX_BLOCK_CACHE_INPUT_CHARS = 24_000;
+const MAX_BLOCK_CACHE_ENTRIES = 64;
+const MAX_BLOCK_CACHE_CHARS = 180_000;
+const blockCache = new Map<string, CachedMarkdownBlocks>();
+let blockCacheChars = 0;
+
+/** 释放 Markdown 结构块与底层 AST 缓存（内存告警时调用）。 */
+export function clearNativeMarkdownBlockCache(): void {
+  blockCache.clear();
+  blockCacheChars = 0;
+  clearNativeMarkdownAstCache();
+}
+
+function getCachedBlocks(key: string): NativeMarkdownBlock[] | undefined {
+  const entry = blockCache.get(key);
+  if (!entry) return undefined;
+  blockCache.delete(key);
+  blockCache.set(key, entry);
+  return entry.blocks;
+}
+
+function setCachedBlocks(key: string, blocks: NativeMarkdownBlock[], chars: number): void {
+  const existing = blockCache.get(key);
+  if (existing) {
+    blockCacheChars -= existing.chars;
+    blockCache.delete(key);
+  }
+  blockCache.set(key, { blocks, chars });
+  blockCacheChars += chars;
+  while (blockCache.size > MAX_BLOCK_CACHE_ENTRIES || blockCacheChars > MAX_BLOCK_CACHE_CHARS) {
+    const oldest = blockCache.keys().next();
+    if (oldest.done) break;
+    const removed = blockCache.get(oldest.value);
+    if (removed) blockCacheChars -= removed.chars;
+    blockCache.delete(oldest.value);
+  }
+}
+
 export function nativeMarkdownBlocks(input: string, sourceIndices: number[] | undefined,
   disableLink: boolean): NativeMarkdownBlock[] {
   if (!input) return [];
+  const hasCitation = sourceIndices !== undefined && input.includes('[citation:');
+  const cacheable = !hasCitation && input.length <= MAX_BLOCK_CACHE_INPUT_CHARS;
+  const cacheKey = cacheable ? (disableLink ? '1:' : '0:') + input : '';
+  if (cacheable) {
+    const cached = getCachedBlocks(cacheKey);
+    if (cached) return cached;
+  }
   try {
     const ast = toNativeMarkdownAst(input, sourceIndices, disableLink);
-    return projectBlocks(ast.children ?? []);
+    const blocks = projectBlocks(ast.children ?? []);
+    if (cacheable) {
+      setCachedBlocks(cacheKey, blocks, input.length);
+    }
+    return blocks;
   } catch {
     return [withKey({ kind: 'paragraph', key: '', parts: [{ text: input, strong: false, italic: false }] })];
   }

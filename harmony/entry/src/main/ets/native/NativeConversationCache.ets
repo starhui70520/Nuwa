@@ -1,6 +1,8 @@
 import { NativeConversation } from './NativeConversation';
+import { isHarmonyLowPerfDevice } from './NativeDevicePerf';
 
 const CONVERSATION_CACHE_LIMIT = 5;
+const LOW_PERF_CONVERSATION_CACHE_LIMIT = 2;
 
 export class NativeConversationCache {
   private readonly saved = new WeakSet<NativeConversation>();
@@ -23,9 +25,11 @@ export class NativeConversationCache {
     }
   }
 
-  evictable(sessions: NativeConversation[], protectedIds: Set<string>): string[] {
+  evictable(sessions: NativeConversation[], protectedIds: Set<string>, limitOverride?: number): string[] {
     const loaded = sessions.filter((session: NativeConversation): boolean => !session.unloaded && !session.unreadable);
-    const excess = loaded.length - CONVERSATION_CACHE_LIMIT;
+    const limit = limitOverride !== undefined ? limitOverride :
+      (isHarmonyLowPerfDevice() ? LOW_PERF_CONVERSATION_CACHE_LIMIT : CONVERSATION_CACHE_LIMIT);
+    const excess = loaded.length - limit;
     if (excess <= 0) return [];
     // A saved revision can be discarded once it has no remaining in-flight users.
     return loaded.filter((session: NativeConversation): boolean =>

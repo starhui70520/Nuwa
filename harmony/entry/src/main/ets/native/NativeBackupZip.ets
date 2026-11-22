@@ -1,5 +1,6 @@
 import { util } from '@kit.ArkTS';
 import { zlib } from '@kit.BasicServicesKit';
+import { yieldNativeTurn } from './NativeDevicePerf';
 
 export interface NativeBackupZipEntry {
   name: string;
@@ -42,6 +43,9 @@ export const MAX_BACKUP_ENTRY_BYTES = 64 * 1024 * 1024;
 // The central directory start and size are independent ZIP32 fields.
 export const MAX_FILE_BACKUP_BYTES = 2 * (ZIP64_SIZE - 1) + MAX_END_RECORD_BYTES;
 const CHUNK_BYTES = 256 * 1024;
+const INFLATE_INPUT_CHUNK_BYTES = 64 * 1024;
+const LOCAL_HEADER_PREFETCH_EXTRA = 64;
+const EMPTY_ARRAY_BUFFER = new ArrayBuffer(0);
 // A JSON escape can occupy six bytes per UTF-16 code unit.
 const TEXT_CHUNK_CHARS = 32 * 1024;
 const LOCAL_HEADER = 0x04034b50;
@@ -53,26 +57,44 @@ const DESCRIPTOR_FLAG = 8;
 const STORED = 0;
 const DEFLATE = 8;
 
-function crcTable(): Uint32Array {
-  const table = new Uint32Array(256);
-  for (let index = 0; index < table.length; index++) {
-    let value = index;
-    for (let bit = 0; bit < 8; bit++) {
-      value = (value >>> 1) ^ ((value & 1) ? 0xedb88320 : 0);
-    }
-    table[index] = value;
+const CRC_TABLE0 = new Uint32Array(256);
+const CRC_TABLE1 = new Uint32Array(256);
+const CRC_TABLE2 = new Uint32Array(256);
+const CRC_TABLE3 = new Uint32Array(256);
+for (let index = 0; index < 256; index++) {
+  let value = index;
+  for (let bit = 0; bit < 8; bit++) {
+    value = (value >>> 1) ^ ((value & 1) ? 0xedb88320 : 0);
   }
-  return table;
+  CRC_TABLE0[index] = value >>> 0;
 }
-
-const CRC_TABLE = crcTable();
+for (let index = 0; index < 256; index++) {
+  const t1 = (CRC_TABLE0[index] >>> 8) ^ CRC_TABLE0[CRC_TABLE0[index] & 0xff];
+  const t2 = (t1 >>> 8) ^ CRC_TABLE0[t1 & 0xff];
+  const t3 = (t2 >>> 8) ^ CRC_TABLE0[t2 & 0xff];
+  CRC_TABLE1[index] = t1 >>> 0;
+  CRC_TABLE2[index] = t2 >>> 0;
+  CRC_TABLE3[index] = t3 >>> 0;
+}
 
 function accumulateCrc(crc: number, data: Uint8Array): number {
-  for (const byte of data) {
-    crc = (crc >>> 8) ^ CRC_TABLE[(crc ^ byte) & 0xff];
+  let c = crc;
+  let i = 0;
+  const end4 = data.length - 3;
+  while (i < end4) {
+    c ^= data[i] | (data[i + 1] << 8) | (data[i + 2] << 16) | (data[i + 3] << 24);
+    c = CRC_TABLE3[c & 0xff] ^ CRC_TABLE2[(c >>> 8) & 0xff] ^
+      CRC_TABLE1[(c >>> 16) & 0xff] ^ CRC_TABLE0[c >>> 24];
+    i += 4;
   }
-  return crc;
+  while (i < data.length) {
+    c = (c >>> 8) ^ CRC_TABLE0[(c ^ data[i++]) & 0xff];
+  }
+  return c;
 }
+
+const SHARED_TEXT_ENCODER = new util.TextEncoder();
+const SHARED_TEXT_DECODER = util.TextDecoder.create('utf-8', { fatal: true });
 
 function completeCrc(crc: number): number {
   return (crc ^ 0xffffffff) >>> 0;
@@ -116,11 +138,11 @@ async function checkedRead(input: NativeBackupZipInput, offset: number, length: 
 }
 
 export function backupUtf8(value: string): Uint8Array {
-  return new util.TextEncoder().encodeInto(value);
+  return SHARED_TEXT_ENCODER.encodeInto(value);
 }
 
 export function backupText(bytes: Uint8Array): string {
-  return util.TextDecoder.create('utf-8', { fatal: true }).decodeToString(bytes);
+  return SHARED_TEXT_DECODER.decodeToString(bytes);
 }
 
 function endOfTextChunk(text: string, start: number): number {
@@ -131,12 +153,11 @@ function endOfTextChunk(text: string, start: number): number {
 
 async function writeBackupText(text: string, write: (chunk: Uint8Array) => Promise<void>,
   escape: boolean = false): Promise<void> {
-  const encoder = new util.TextEncoder();
   let start = 0;
   while (start < text.length) {
     const end = endOfTextChunk(text, start);
     const part = text.slice(start, end);
-    await write(encoder.encodeInto(escape ? JSON.stringify(part).slice(1, -1) : part));
+    await write(SHARED_TEXT_ENCODER.encodeInto(escape ? JSON.stringify(part).slice(1, -1) : part));
     start = end;
   }
 }
@@ -224,7 +245,12 @@ async function readDirectory(input: NativeBackupZipInput, limit?: number): Promi
   const names = new Set<string>();
   let total = 0;
   let offset = 0;
+  let lastYieldAt = Date.now();
   for (let i = 0; i < count; i++) {
+    if ((i & 0xff) === 0 && i > 0 && Date.now() - lastYieldAt >= 16) {
+      await yieldNativeTurn();
+      lastYieldAt = Date.now();
+    }
     if (offset + 46 > size) {
       return invalidZip();
     }
@@ -299,7 +325,9 @@ async function localData(input: NativeBackupZipInput, entry: DirectoryEntry, bou
   if (entry.offset + 30 > boundary) {
     return invalidZip();
   }
-  const view = viewOf(await checkedRead(input, entry.offset, 30));
+  const prefetchLen = Math.min(boundary - entry.offset, 30 + entry.nameBytes.length + LOCAL_HEADER_PREFETCH_EXTRA);
+  const head = await checkedRead(input, entry.offset, prefetchLen);
+  const view = viewOf(head);
   const nameStart = entry.offset + 30;
   const nameLength = view.getUint16(26, true);
   const extraLength = view.getUint16(28, true);
@@ -310,11 +338,17 @@ async function localData(input: NativeBackupZipInput, entry: DirectoryEntry, bou
     nameLength !== entry.nameBytes.length) {
     return invalidZip();
   }
-  const metadata = await checkedRead(input, nameStart, nameLength + extraLength);
-  if (entry.nameBytes.some((byte: number, index: number): boolean => byte !== metadata[index])) {
-    return invalidZip();
+  const metaLen = nameLength + extraLength;
+  const metadata = 30 + metaLen <= head.length ?
+    head.subarray(30, 30 + metaLen) : await checkedRead(input, nameStart, metaLen);
+  for (let i = 0; i < entry.nameBytes.length; i++) {
+    if (entry.nameBytes[i] !== metadata[i]) {
+      return invalidZip();
+    }
   }
-  validateExtra(viewOf(metadata), nameLength, metadata.length);
+  if (extraLength > 0) {
+    validateExtra(viewOf(metadata), nameLength, metadata.length);
+  }
   const descriptor = (entry.flags & DESCRIPTOR_FLAG) !== 0;
   const crc = view.getUint32(14, true);
   const compressed = view.getUint32(18, true);
@@ -331,20 +365,21 @@ async function localData(input: NativeBackupZipInput, entry: DirectoryEntry, bou
 }
 
 async function inflateRaw(input: NativeBackupZipInput, offset: number, entry: DirectoryEntry,
-  write: (chunk: Uint8Array) => Promise<void>): Promise<void> {
+  write: (chunk: Uint8Array) => Promise<void>, output: ArrayBuffer): Promise<void> {
   const zip = await zlib.createZip();
   const stream: zlib.ZStream = {};
   if (await zip.inflateInit2(stream, -15) !== zlib.ReturnStatus.OK) {
     return invalidZip();
   }
   try {
-    const output = new ArrayBuffer(CHUNK_BYTES);
-    let pending = new ArrayBuffer(0);
+    let pending: ArrayBuffer = EMPTY_ARRAY_BUFFER;
     let cursor = 0;
     let written = 0;
+    let lastYieldAt = Date.now();
     while (true) {
-      if (!pending.byteLength && cursor < entry.compressedSize) {
-        const chunk = await checkedRead(input, offset + cursor, Math.min(CHUNK_BYTES, entry.compressedSize - cursor));
+      if (pending.byteLength === 0 && cursor < entry.compressedSize) {
+        const chunk = await checkedRead(input, offset + cursor,
+          Math.min(INFLATE_INPUT_CHUNK_BYTES, entry.compressedSize - cursor));
         pending = chunk.byteOffset === 0 && chunk.byteLength === chunk.buffer.byteLength ?
           chunk.buffer as ArrayBuffer : chunk.slice().buffer as ArrayBuffer;
         cursor += chunk.byteLength;
@@ -369,8 +404,8 @@ async function inflateRaw(input: NativeBackupZipInput, offset: number, entry: Di
         return invalidZip();
       }
       if (length) {
-        // Keep the emitted bytes valid after the destination buffer is reused.
-        await write(new Uint8Array(output.slice(0, length)));
+        // 复用共享输出缓冲区避免逐条目分配 256KB Native ArrayBuffer；消费方在 await write 返回前完成读取或拷贝。
+        await write(new Uint8Array(output, 0, length));
       }
       if (result === zlib.ReturnStatus.STREAM_END) {
         return;
@@ -379,8 +414,14 @@ async function inflateRaw(input: NativeBackupZipInput, offset: number, entry: Di
         return invalidZip();
       }
       // The runtime maintains the zlib state. Carry only the unconsumed input into the next call.
-      if (availableIn !== pending.byteLength) {
+      if (availableIn === 0) {
+        pending = EMPTY_ARRAY_BUFFER;
+      } else if (availableIn < pending.byteLength) {
         pending = pending.slice(pending.byteLength - availableIn);
+      }
+      if (Date.now() - lastYieldAt >= 20) {
+        await yieldNativeTurn();
+        lastYieldAt = Date.now();
       }
     }
   } finally {
@@ -413,7 +454,7 @@ export async function readBackupZipEntry(entry: NativeBackupZipStreamEntry): Pro
       return invalidZip();
     }
     if (offset === 0 && chunk.length === entry.size) {
-      data = chunk;
+      data = chunk.slice();
     } else {
       data = data ?? new Uint8Array(entry.size);
       data.set(chunk, offset);
@@ -455,6 +496,7 @@ export async function readBackupZipEntries(input: NativeBackupZipInput,
     return tooLarge();
   }
   const directory = await readDirectory(input, limit);
+  const sharedInflateOutput = new ArrayBuffer(CHUNK_BYTES);
   for (let i = 0; i < directory.entries.length; i++) {
     const entry = directory.entries[i];
     const boundary = directory.entries[i + 1]?.offset ?? directory.offset;
@@ -475,7 +517,7 @@ export async function readBackupZipEntries(input: NativeBackupZipInput,
           await append(chunk);
         }
       } else {
-        await inflateRaw(input, offset, entry, append);
+        await inflateRaw(input, offset, entry, append, sharedInflateOutput);
       }
       if (completeCrc(crc) !== entry.crc) {
         return invalidZip();

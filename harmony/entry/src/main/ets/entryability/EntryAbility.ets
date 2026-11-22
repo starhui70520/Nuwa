@@ -1,6 +1,7 @@
 import { AbilityConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { window } from '@kit.ArkUI';
 import { prepareNativeContinuation, restoreNativeContinuationFromWant } from '../native/NativeContinuity';
+import { notifyHarmonyMemoryLevel } from '../native/NativeDevicePerf';
 import { parseIncomingShareWant, publishIncomingSharePayload } from '../native/NativeHarmonyShare';
 
 export const NUWA_MAIN_WINDOW_ID_KEY: string = 'nuwa_main_window_id';
@@ -53,5 +54,9 @@ export default class EntryAbility extends UIAbility {
 
   async onContinue(wantParam: Record<string, Object>): Promise<AbilityConstant.OnContinueResult> {
     return prepareNativeContinuation(this.context, wantParam);
+  }
+
+  onMemoryLevel(level: AbilityConstant.MemoryLevel): void {
+    notifyHarmonyMemoryLevel(level);
   }
 }

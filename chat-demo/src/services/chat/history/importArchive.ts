@@ -1,3 +1,4 @@
+import { isLowPerfDevice } from '../../../app/devicePerf.js'
 import * as db from '../db.js'
 import { BackupError, fail } from './errors.js'
 import type { SessionIndexEntry } from './format.js'
@@ -9,46 +10,90 @@ import {
   isZipFile,
   readArchive,
   readEntry,
+  readEntryText,
   skipEntry,
   type ArchiveEntry,
 } from './zipReader.js'
 
-/** 从原件字节补充图片 MIME；无法识别时为空字符串，图片身份仍由归档的 is_image 决定。 */
+/** 从原件前 16 字节补充图片 MIME（零对象分配）；无法识别时为空字符串，图片身份仍由归档的 is_image 决定。 */
 const imageType = (bytes: Uint8Array): string => {
-  const startsWith = (...prefix: number[]) => prefix.every((byte, index) => bytes[index] === byte)
-  const header = new TextDecoder('ascii').decode(bytes.subarray(0, 12))
-  if (startsWith(0xff, 0xd8, 0xff)) {
+  const len = bytes.length
+  if (len >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
     return 'image/jpeg'
   }
-  if (startsWith(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)) {
+  if (
+    len >= 8 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47 &&
+    bytes[4] === 0x0d &&
+    bytes[5] === 0x0a &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0x0a
+  ) {
     return 'image/png'
   }
-  if (header.startsWith('GIF87a') || header.startsWith('GIF89a')) {
+  if (
+    len >= 6 &&
+    bytes[0] === 0x47 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x38 &&
+    (bytes[4] === 0x37 || bytes[4] === 0x39) &&
+    bytes[5] === 0x61
+  ) {
     return 'image/gif'
   }
-  if (header.startsWith('RIFF') && header.slice(8, 12) === 'WEBP') {
+  if (
+    len >= 12 &&
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50
+  ) {
     return 'image/webp'
   }
-  if (startsWith(0x42, 0x4d)) {
+  if (len >= 2 && bytes[0] === 0x42 && bytes[1] === 0x4d) {
     return 'image/bmp'
   }
-  if (startsWith(0x49, 0x49, 0x2a, 0) || startsWith(0x4d, 0x4d, 0, 0x2a)) {
+  if (
+    len >= 4 &&
+    ((bytes[0] === 0x49 && bytes[1] === 0x49 && bytes[2] === 0x2a && bytes[3] === 0x00) ||
+      (bytes[0] === 0x4d && bytes[1] === 0x4d && bytes[2] === 0x00 && bytes[3] === 0x2a))
+  ) {
     return 'image/tiff'
   }
-  if (header.slice(4, 8) === 'ftyp' && ['avif', 'avis'].includes(header.slice(8, 12))) {
+  if (
+    len >= 12 &&
+    bytes[4] === 0x66 &&
+    bytes[5] === 0x74 &&
+    bytes[6] === 0x79 &&
+    bytes[7] === 0x70 &&
+    bytes[8] === 0x61 &&
+    bytes[9] === 0x76 &&
+    bytes[10] === 0x69 &&
+    (bytes[11] === 0x66 || bytes[11] === 0x73)
+  ) {
     return 'image/avif'
   }
   return ''
 }
 
 const readJson = async (entry: ArchiveEntry): Promise<unknown> => {
-  const text = await (await readEntry(entry)).text()
+  const text = await readEntryText(entry)
   try {
     return JSON.parse(text)
   } catch {
     return fail('backupInvalidJson')
   }
 }
+
+const SESSION_FILES_DIR_PATTERN = /^chat_sessions\/([^/]+)_files\//
 
 /**
  * 检查 ZIP 格式、首个 manifest 条目及格式版本。
@@ -75,7 +120,7 @@ export const checkArchiveFormat = async (file: File): Promise<void> => {
 /**
  * 流式导入：manifest → user（不导入）→ 全部会话 JSON → index → 全部图片。
  * 也支持会话与图片交错排列、index 位于末尾的条目顺序。
- * 会话读完立即暂存，只保留图片路径映射；图片全部读完后逐会话回填 MIME，不改变图片身份。
+ * 会话读完立即暂存，只保留图片路径映射；图片全部读完后仅对含图片会话回填 MIME，不改变图片身份。
  * 写入导入暂存存储；调用方负责先清空暂存，成功后替换正式数据，失败时清理暂存。
  */
 export const importArchive = async (
@@ -85,15 +130,34 @@ export const importArchive = async (
   if (!(await isZipFile(file))) {
     fail('backupUnrecognized')
   }
+  const lowPerf = isLowPerfDevice()
   const imported = new Set<string>()
+  const sessionsWithImages = new Set<string>()
   const images = new Map<string, string>()
   /** 已保存的原件：文件 ID → MIME。同一图片出现在多个会话目录时只保存一次。 */
   const stored = new Map<string, string>()
   let manifest = false
   let index: SessionIndexEntry[] | undefined
   let currentSessionId: string | undefined
+  let currentSessionDir = ''
   const stagingBatch: Awaited<ReturnType<typeof toLocalSession>>['session'][] = []
-  const STAGING_BATCH_SIZE = 20
+  const STAGING_BATCH_SIZE = lowPerf ? 12 : 24
+  const imageBatch: db.StoredFile[] = []
+  let imageBatchBytes = 0
+  const IMAGE_BATCH_COUNT = lowPerf ? 8 : 16
+  const IMAGE_BATCH_BYTES = lowPerf ? 3 * 1024 * 1024 : 8 * 1024 * 1024
+  let lastProgressAt = 0
+
+  const emitProgress = (force = false) => {
+    if (!onProgress) {
+      return
+    }
+    const now = Date.now()
+    if (force || now - lastProgressAt >= 100) {
+      lastProgressAt = now
+      onProgress({ sessions: imported.size, images: stored.size })
+    }
+  }
 
   const flushSessions = async () => {
     if (stagingBatch.length === 0) {
@@ -101,7 +165,17 @@ export const importArchive = async (
     }
     const batch = stagingBatch.splice(0, stagingBatch.length)
     await db.addStagingSessions(batch)
-    onProgress?.({ sessions: imported.size, images: stored.size })
+    emitProgress()
+  }
+
+  const flushImages = async () => {
+    if (imageBatch.length === 0) {
+      return
+    }
+    const batch = imageBatch.splice(0, imageBatch.length)
+    imageBatchBytes = 0
+    await db.saveStagingFiles(batch)
+    emitProgress()
   }
 
   const saveImage = async (entry: ArchiveEntry, id: string) => {
@@ -109,11 +183,19 @@ export const importArchive = async (
       await skipEntry(entry)
       return
     }
-    const data = await readEntry(entry)
-    const type = imageType(new Uint8Array(await data.slice(0, 16).arrayBuffer()))
-    await db.saveStagingFiles([{ id, blob: new Blob([data], { type }) }])
-    stored.set(id, type)
-    onProgress?.({ sessions: imported.size, images: stored.size })
+    let detectedType = ''
+    const blob = await readEntry(entry, (head) => {
+      detectedType = imageType(head)
+      return detectedType
+    })
+    stored.set(id, detectedType)
+    imageBatch.push({ id, blob })
+    imageBatchBytes += entry.size
+    if (imageBatch.length >= IMAGE_BATCH_COUNT || imageBatchBytes >= IMAGE_BATCH_BYTES) {
+      await flushImages()
+    } else {
+      emitProgress()
+    }
   }
 
   try {
@@ -139,8 +221,12 @@ export const importArchive = async (
         }
         imported.add(sessionId)
         currentSessionId = sessionId
-        for (const [imagePath, id] of local.images) {
-          images.set(imagePath, id)
+        currentSessionDir = sessionFilesDir(sessionId)
+        if (local.images.size > 0) {
+          sessionsWithImages.add(sessionId)
+          for (const [imagePath, id] of local.images) {
+            images.set(imagePath, id)
+          }
         }
         stagingBatch.push(local.session)
         if (stagingBatch.length >= STAGING_BATCH_SIZE) {
@@ -151,8 +237,8 @@ export const importArchive = async (
         index = readSessionIndex(await readJson(entry))
       } else if (
         index
-          ? imported.has(/^chat_sessions\/([^/]+)_files\//.exec(path)?.[1] ?? '')
-          : currentSessionId && path.startsWith(sessionFilesDir(currentSessionId))
+          ? imported.has(SESSION_FILES_DIR_PATTERN.exec(path)?.[1] ?? '')
+          : currentSessionId !== undefined && path.startsWith(currentSessionDir)
       ) {
         await flushSessions()
         // 没有被引用的条目不保存，引用了但缺失的图片只展示文件名。
@@ -163,6 +249,8 @@ export const importArchive = async (
       }
     }
     await flushSessions()
+    await flushImages()
+    emitProgress(true)
   } catch (error) {
     throw error instanceof ArchiveError ? new BackupError('backupIncomplete') : error
   }
@@ -170,14 +258,21 @@ export const importArchive = async (
     fail('backupUnrecognized')
   }
   // index 只列出成功写出的会话，与会话文件一一对应。
-  const listed = new Set(index?.map((entry) => entry.id))
-  if (
-    !index ||
-    listed.size !== index.length ||
-    listed.size !== imported.size ||
-    [...imported].some((id) => !listed.has(id))
-  ) {
+  const listed = new Set<string>()
+  if (index) {
+    for (let i = 0; i < index.length; i++) {
+      listed.add(index[i].id)
+    }
+  }
+  let missingInIndex = false
+  for (const id of imported) {
+    if (!listed.has(id)) {
+      missingInIndex = true
+      break
+    }
+  }
+  if (!index || listed.size !== index.length || listed.size !== imported.size || missingInIndex) {
     fail('backupIncomplete')
   }
-  await db.updateStagingFileTypes(stored)
+  await db.updateStagingFileTypes(stored, sessionsWithImages)
 }

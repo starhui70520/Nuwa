@@ -1,5 +1,7 @@
 import { create } from 'zustand'
+import { isLowPerfDevice, onLowMemory } from '../../app/devicePerf.js'
 import { showToast } from '../../components/base/toastState.js'
+import { clearMdAstCache } from '../markdown/parse.js'
 import { createId } from '../../utils/id.js'
 import { refreshBalanceAfterReply } from '../api/balance.js'
 import { ApiError, streamMessage } from '../api/client.js'
@@ -51,8 +53,10 @@ import {
 const MODEL: ChatModel = 'deepseek-flash'
 /** 所有生成请求统一携带的助手身份说明 */
 const SYSTEM_PROMPT = '该助手为DeepSeek，由深度求索公司创造。'
-/** 保留最近打开的详情；当前会话、生成中及尚未成功保存的会话不淘汰。 */
+/** 保留最近打开的详情；当前会话、生成中及尚未成功保存的会话不淘汰。低性能设备缩减缓存上限降低常驻内存。 */
 const SESSION_CACHE_LIMIT = 5
+const LOW_PERF_SESSION_CACHE_LIMIT = 2
+const LOW_PERF_STREAM_COALESCE_MS = 48
 /** 安全审核默认 high（走扩展模式）；走 1M 长上下文通道时降为 low（官方默认审查），避免触发 32K 上限 */
 const SAFETY_CHECK_HIGH = { level: 'high' } as const
 const SAFETY_CHECK_LOW = { level: 'low' } as const
@@ -370,10 +374,12 @@ const sessionLoads = new Map<string, { promise: Promise<void> }>()
 
 const touchSession = (id: string) => sessionAccess.set(id, ++accessSequence)
 
-const trimSessionCache = () => {
+const trimSessionCache = (limitOverride?: number) => {
   const state = get()
+  const limit =
+    limitOverride ?? (isLowPerfDevice() ? LOW_PERF_SESSION_CACHE_LIMIT : SESSION_CACHE_LIMIT)
   const ids = Object.keys(state.sessionCache)
-  if (ids.length <= SESSION_CACHE_LIMIT) {
+  if (ids.length <= limit) {
     return
   }
   const removable = ids
@@ -385,7 +391,7 @@ const trimSessionCache = () => {
         !deletingSessions.has(id)
     )
     .sort((a, b) => (sessionAccess.get(a) ?? 0) - (sessionAccess.get(b) ?? 0))
-  const evicted = new Set(removable.slice(0, ids.length - SESSION_CACHE_LIMIT))
+  const evicted = new Set(removable.slice(0, ids.length - limit))
   for (const id of evicted) {
     sessionAccess.delete(id)
   }
@@ -421,14 +427,38 @@ const updateSession = (id: string, update: (session: Session) => Session) =>
   })
 
 const updateReply = (sessionId: string, reply: AssistantMessage) =>
-  updateSession(sessionId, (session) => ({
-    ...session,
-    messages: session.messages.map((message) =>
-      message.id === reply.id
-        ? { ...reply, parentId: message.parentId, selectedChildId: message.selectedChildId }
-        : message
-    ),
-  }))
+  updateSession(sessionId, (session) => {
+    const messages = session.messages
+    const lastIndex = messages.length - 1
+    if (lastIndex >= 0 && messages[lastIndex].id === reply.id) {
+      const target = messages[lastIndex]
+      const nextMessages = messages.slice()
+      nextMessages[lastIndex] = {
+        ...reply,
+        parentId: target.parentId,
+        selectedChildId: target.selectedChildId,
+      }
+      return { ...session, messages: nextMessages }
+    }
+    let found = -1
+    for (let i = lastIndex - 1; i >= 0; i--) {
+      if (messages[i].id === reply.id) {
+        found = i
+        break
+      }
+    }
+    if (found < 0) {
+      return session
+    }
+    const target = messages[found]
+    const nextMessages = messages.slice()
+    nextMessages[found] = {
+      ...reply,
+      parentId: target.parentId,
+      selectedChildId: target.selectedChildId,
+    }
+    return { ...session, messages: nextMessages }
+  })
 
 const savingSessions = new Set<string>()
 const pendingPersistAgain = new Set<string>()
@@ -557,10 +587,15 @@ export const bindChatPersistence = () => {
       onResume()
     }
   }
+  const offLowMemory = onLowMemory(() => {
+    clearMdAstCache()
+    trimSessionCache(1)
+  })
   document.addEventListener('visibilitychange', onVisibilityChange)
   window.addEventListener('pagehide', save)
   window.addEventListener('dsapp:native-resume', onResume)
   return () => {
+    offLowMemory()
     document.removeEventListener('visibilitychange', onVisibilityChange)
     window.removeEventListener('pagehide', save)
     window.removeEventListener('dsapp:native-resume', onResume)
@@ -1592,14 +1627,24 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
   set((state) => ({ streaming: { ...state.streaming, [sessionId]: controller } }))
   let reply = initial
   let frame = 0
+  let flushTimer: ReturnType<typeof setTimeout> | null = null
   let dropExtendedFor1M = false
   let skippedBadImages = 0
   let imageCap = MAX_REQUEST_IMAGES
   let sentMessages: MessageParam[] = []
   let cachedPrepared: Request | null = null
+  const cancelScheduledFlush = () => {
+    if (frame) {
+      cancelAnimationFrame(frame)
+      frame = 0
+    }
+    if (flushTimer !== null) {
+      clearTimeout(flushTimer)
+      flushTimer = null
+    }
+  }
   const flush = () => {
-    cancelAnimationFrame(frame)
-    frame = 0
+    cancelScheduledFlush()
     updateReply(sessionId, reply)
   }
   streamFlushes.set(sessionId, flush)
@@ -1683,6 +1728,10 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
           reply = applyEvent(reply, event, Date.now(), blockIndexes)
           if (document.visibilityState === 'hidden') {
             flush()
+          } else if (isLowPerfDevice()) {
+            if (flushTimer === null) {
+              flushTimer = setTimeout(flush, LOW_PERF_STREAM_COALESCE_MS)
+            }
           } else {
             frame ||= requestAnimationFrame(flush)
           }
@@ -1786,7 +1835,7 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
   } finally {
     titleRequests.delete(controller)
     streamFlushes.delete(sessionId)
-    cancelAnimationFrame(frame)
+    cancelScheduledFlush()
     updateReply(sessionId, reply)
     set((state) => ({
       streaming: Object.fromEntries(

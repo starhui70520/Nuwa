@@ -25,8 +25,9 @@ import {
 } from './NativeBackupZip';
 import {
   backupAvifPreviewPath, backupImageIds, backupImagePath, copyBackupFile, removeBackupImage, stageBackupBlob,
-  stageBackupImage, withBackupInput, writeBackupFile,
+  stageBackupImageWithHeader, withBackupInput, writeBackupFile,
 } from './NativeBackupFiles';
+import { isHarmonyLowPerfDevice, yieldNativeTurn } from './NativeDevicePerf';
 
 const MANIFEST = 'manifest.json';
 const SESSION_INDEX = 'chat_session_index.json';
@@ -37,9 +38,13 @@ export const NATIVE_BACKUP_UNREADABLE_CONVERSATION = 'NATIVE_BACKUP_UNREADABLE_C
 const MAX_INLINE_IMAGE_BYTES = 16 * 1024 * 1024;
 const MAX_PREVIEW_BYTES = 1024 * 1024;
 const MAX_EMBEDDED_ARCHIVE_BYTES = 16 * 1024 * 1024;
+const MAX_EMBEDDED_ARCHIVE_BYTES_LOW_PERF = 2 * 1024 * 1024;
 const ARCHIVE_TEXT_READ_CHUNK = 256 * 1024;
 const MAX_PORTABLE_SOURCES = 256;
 const MAX_PORTABLE_CITATIONS = 4_096;
+const SESSION_PATH_PATTERN = /^chat_sessions\/[^/]+\.json$/;
+const IMAGE_OWNER_PATTERN = /^chat_sessions\/([^/]+)_files\/[^/]/;
+const DAYS_IN_MONTH: number[] = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 const base64 = new util.Base64Helper();
 
 interface ArchiveManifest {
@@ -156,8 +161,10 @@ interface ArchiveSourceReference {
 
 interface PreparedSession {
   session: NativeConversation;
-  origin: ArchiveOrigin;
+  origin?: ArchiveOrigin;
   imagePaths: Map<string, string>;
+  hasImageFiles: boolean;
+  fragmentsModified: boolean;
   archiveSize: number;
 }
 
@@ -195,14 +202,59 @@ function count(value: number): boolean {
   return Number.isSafeInteger(value) && value >= 0;
 }
 
+function digit2(value: string, offset: number): number {
+  const a = value.charCodeAt(offset) - 48;
+  const b = value.charCodeAt(offset + 1) - 48;
+  return (a | b) < 0 || a > 9 || b > 9 ? -1 : a * 10 + b;
+}
+
+function digit4(value: string, offset: number): number {
+  const hi = digit2(value, offset);
+  const lo = digit2(value, offset + 2);
+  return hi < 0 || lo < 0 ? -1 : hi * 100 + lo;
+}
+
 function parseArchiveTime(value: string): number | undefined {
   if (typeof value !== 'string') return undefined;
-  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$/.exec(value);
-  if (!match) return undefined;
-  const normalized = match[1] + '.' + (match[2] ?? '').padEnd(3, '0').slice(0, 3) + 'Z';
-  const date = new Date(normalized);
-  const time = date.getTime();
-  return count(time) && date.toISOString() === normalized ? time : undefined;
+  const len = value.length;
+  if (len < 20 || value.charCodeAt(4) !== 45 || value.charCodeAt(7) !== 45 ||
+    value.charCodeAt(10) !== 84 || value.charCodeAt(13) !== 58 ||
+    value.charCodeAt(16) !== 58 || value.charCodeAt(len - 1) !== 90) {
+    return undefined;
+  }
+  let ms = 0;
+  if (len === 20) {
+    // No fractional seconds.
+  } else if (len >= 22 && value.charCodeAt(19) === 46) {
+    for (let i = 20; i < len - 1; i++) {
+      const c = value.charCodeAt(i);
+      if (c < 48 || c > 57) return undefined;
+    }
+    const fracLen = len - 21;
+    const d1 = value.charCodeAt(20) - 48;
+    const d2 = fracLen > 1 ? value.charCodeAt(21) - 48 : 0;
+    const d3 = fracLen > 2 ? value.charCodeAt(22) - 48 : 0;
+    ms = d1 * 100 + d2 * 10 + d3;
+  } else {
+    return undefined;
+  }
+  const year = digit4(value, 0);
+  const month = digit2(value, 5);
+  const day = digit2(value, 8);
+  const hour = digit2(value, 11);
+  const minute = digit2(value, 14);
+  const second = digit2(value, 17);
+  if (year < 1970 || month < 1 || month > 12 || hour < 0 || hour > 23 ||
+    minute < 0 || minute > 59 || second < 0 || second > 59) {
+    return undefined;
+  }
+  let maxDay = DAYS_IN_MONTH[month];
+  if (month === 2 && ((year % 4 === 0 && year % 100 !== 0) || year % 400 === 0)) {
+    maxDay = 29;
+  }
+  if (day < 1 || day > maxDay) return undefined;
+  const time = Date.UTC(year, month - 1, day, hour, minute, second, ms);
+  return count(time) ? time : undefined;
 }
 
 function timestamp(value: string): number {
@@ -653,12 +705,11 @@ function retainedArchiveFragments(fragments: ArchiveFragment[]): ArchiveFragment
   return retained;
 }
 
-async function retainArchiveOrigin(prepared: PreparedSession, context: common.UIAbilityContext,
+async function retainArchiveOrigin(origin: ArchiveOrigin, archiveSize: number, context: common.UIAbilityContext,
   staged: string[]): Promise<string> {
-  const origin = prepared.origin;
   const digest = cryptoFramework.createMd('SHA256');
   let size = 0;
-  const blobId = await stageBackupBlob(context, prepared.archiveSize,
+  const blobId = await stageBackupBlob(context, archiveSize,
     (write: (chunk: Uint8Array) => Promise<void>): Promise<void> =>
       writeBackupJson(origin.session, async (chunk: Uint8Array): Promise<void> => {
         digest.updateSync({ data: chunk });
@@ -878,13 +929,27 @@ function nativeSession(source: ArchiveSession, archiveSize: number): PreparedSes
   }
   const byId = new Map<string, NativeConversationMessage>();
   const imagePaths = new Map<string, string>();
-  source.messages.forEach(validateMessage);
-  const ordered = source.messages.slice().sort((left: ArchiveMessage, right: ArchiveMessage): number =>
-    left.id - right.id);
+  let hasImageFiles = false;
+  let fragmentsModified = false;
+  let alreadySorted = true;
+  for (let i = 0; i < source.messages.length; i++) {
+    validateMessage(source.messages[i]);
+    if (i > 0 && source.messages[i - 1].id > source.messages[i].id) {
+      alreadySorted = false;
+    }
+  }
+  const ordered = alreadySorted ? source.messages :
+    source.messages.slice().sort((left: ArchiveMessage, right: ArchiveMessage): number => left.id - right.id);
   const messages: NativeConversationMessage[] = [];
   for (const raw of ordered) {
     // A malformed content fragment must not hide otherwise usable messages in this session.
-    raw.fragments = raw.fragments.filter(readableArchiveFragment);
+    const prevFragCount = raw.fragments.length;
+    const filteredFrags = raw.fragments.filter(readableArchiveFragment);
+    if (filteredFrags.length !== prevFragCount) {
+      raw.fragments = filteredFrags;
+      fragmentsModified = true;
+    }
+    forEachArchiveImageFile(raw, (): void => { hasImageFiles = true; });
     registerArchiveImages(raw, source.id, imagePaths);
     const id = raw.id.toString();
     const parentId = raw.parent_id === null ? null : raw.parent_id.toString();
@@ -946,7 +1011,8 @@ function nativeSession(source: ArchiveSession, archiveSize: number): PreparedSes
     messages: messages,
   };
   return {
-    session: session, origin: { session: source, images: [] }, imagePaths: imagePaths, archiveSize: archiveSize,
+    session: session, origin: { session: source, images: [] }, imagePaths: imagePaths,
+    hasImageFiles: hasImageFiles, fragmentsModified: fragmentsModified, archiveSize: archiveSize,
   };
 }
 
@@ -1007,9 +1073,20 @@ async function readChatBackup(input: NativeBackupZipInput, context?: common.UIAb
   const wantedImages = new Map<string, string>();
   const loadedImages = new Map<string, ArchiveImage>();
   const staged: string[] = [];
+  const embeddedArchiveLimit = isHarmonyLowPerfDevice() ?
+    MAX_EMBEDDED_ARCHIVE_BYTES_LOW_PERF : MAX_EMBEDDED_ARCHIVE_BYTES;
   let inlineBytes = 0;
   let manifest = false;
   let index: ArchiveIndexEntry[] | undefined;
+  let lastProgressAt = 0;
+  const emitProgress = (force: boolean = false): void => {
+    if (!onProgress) return;
+    const now = Date.now();
+    if (force || now - lastProgressAt >= 100) {
+      lastProgressAt = now;
+      onProgress(sessions.length, loadedImages.size);
+    }
+  };
   try {
     await readBackupZipEntries(input, async (entry: NativeBackupZipStreamEntry): Promise<void> => {
       const path = entry.name;
@@ -1035,19 +1112,27 @@ async function readChatBackup(input: NativeBackupZipInput, context?: common.UIAb
         }
         return;
       }
-      if (/^chat_sessions\/[^/]+\.json$/.test(path) && !index) {
-        const original = JSON.parse(await readBackupZipText(entry)) as ArchiveSession;
+      if (SESSION_PATH_PATTERN.test(path) && !index) {
+        const rawText = await readBackupZipText(entry);
+        const original = JSON.parse(rawText) as ArchiveSession;
         if (!original || !validId(original.id) || sessionPath(original.id) !== path || ids.has(original.id)) {
           return invalidArchive();
         }
         const prepared = nativeSession(original, entry.size);
+        // 无图片引用且未过滤片段的会话直接复用原始 JSON 文本，免去整会话 JSON.stringify 并立即释放 AST。
+        if (!prepared.hasImageFiles && prepared.origin) {
+          prepared.session.archiveJson = context && prepared.archiveSize > embeddedArchiveLimit ?
+            await retainArchiveOrigin(prepared.origin, prepared.archiveSize, context, staged) :
+            (!prepared.fragmentsModified ? '{"session":' + rawText + ',"images":[]}' : JSON.stringify(prepared.origin));
+          prepared.origin = undefined;
+        }
         sessions.push(prepared);
         ids.add(original.id);
         prepared.imagePaths.forEach((id: string, imagePath: string): void => { wantedImages.set(imagePath, id); });
-        onProgress?.(sessions.length, loadedImages.size);
+        emitProgress();
         return;
       }
-      const imageOwner = /^chat_sessions\/([^/]+)_files\/[^/]/.exec(path)?.[1];
+      const imageOwner = IMAGE_OWNER_PATTERN.exec(path)?.[1];
       if (!imageOwner || (index ? !ids.has(imageOwner) : sessions[sessions.length - 1]?.session.id !== imageOwner)) {
         return invalidArchive();
       }
@@ -1057,11 +1142,13 @@ async function readChatBackup(input: NativeBackupZipInput, context?: common.UIAb
         return;
       }
       if (context) {
-        const id = await stageBackupImage(context, entry);
-        staged.push(id);
-        const preview = await fileBackedPreviewInfo(backupImagePath(context, id));
-        loadedImages.set(imageId, { path: path, blobId: id, size: entry.size, crc: entry.crc,
-          mimeType: preview.mimeType, softwareAvifPreview: preview.softwareAvifPreview });
+        const stagedImg = await stageBackupImageWithHeader(context, entry, 64 * 1024);
+        staged.push(stagedImg.id);
+        const imgPath = backupImagePath(context, stagedImg.id);
+        const mimeType = await fileAttachmentRasterMime(imgPath, stagedImg.header);
+        const softwareAvifPreview = !mimeType && attachmentUploadImageMime(stagedImg.header) === 'image/avif';
+        loadedImages.set(imageId, { path: path, blobId: stagedImg.id, size: entry.size, crc: entry.crc,
+          mimeType: mimeType, softwareAvifPreview: softwareAvifPreview || undefined });
       } else {
         inlineBytes += entry.size;
         if (inlineBytes > MAX_INLINE_IMAGE_BYTES) {
@@ -1070,8 +1157,9 @@ async function readChatBackup(input: NativeBackupZipInput, context?: common.UIAb
         const bytes = await readBackupZipEntry(entry);
         loadedImages.set(imageId, { path: path, bytes: base64.encodeToStringSync(bytes), size: entry.size, crc: entry.crc });
       }
-      onProgress?.(sessions.length, loadedImages.size);
+      emitProgress();
     }, limit);
+    emitProgress(true);
     if (!manifest || !index || index.length !== sessions.length) {
       return invalidArchive();
     }
@@ -1082,11 +1170,21 @@ async function readChatBackup(input: NativeBackupZipInput, context?: common.UIAb
       }
     }
     const imported: NativeConversation[] = [];
-    for (const prepared of sessions) {
-      restoreArchiveImages(prepared.origin, prepared.imagePaths, loadedImages);
-      prepared.session.archiveJson = context && prepared.archiveSize > MAX_EMBEDDED_ARCHIVE_BYTES ?
-        await retainArchiveOrigin(prepared, context, staged) : JSON.stringify(prepared.origin);
+    let lastYieldAt = Date.now();
+    for (let i = 0; i < sessions.length; i++) {
+      const prepared = sessions[i];
+      if (prepared.origin) {
+        restoreArchiveImages(prepared.origin, prepared.imagePaths, loadedImages);
+        prepared.session.archiveJson = context && prepared.archiveSize > embeddedArchiveLimit ?
+          await retainArchiveOrigin(prepared.origin, prepared.archiveSize, context, staged) :
+          JSON.stringify(prepared.origin);
+        prepared.origin = undefined;
+      }
       imported.push(prepared.session);
+      if ((i & 0x0f) === 0x0f && Date.now() - lastYieldAt >= 20) {
+        await yieldNativeTurn();
+        lastYieldAt = Date.now();
+      }
     }
     return imported;
   } catch (error) {
@@ -1457,11 +1555,10 @@ function copyMerged(session: NativeConversation, id: string, title: string, pinn
   };
 }
 
-function unusedConversationId(sessions: NativeConversation[]): string {
-  const ids = new Set<string>();
-  for (const session of sessions) ids.add(session.id);
+function allocateConversationId(usedIds: Set<string>): string {
   let id = util.generateRandomUUID(true);
-  while (ids.has(id)) id = util.generateRandomUUID(true);
+  while (usedIds.has(id)) id = util.generateRandomUUID(true);
+  usedIds.add(id);
   return id;
 }
 
@@ -1488,11 +1585,45 @@ function sameArchiveSource(first: ArchiveOrigin, second: ArchiveOrigin): boolean
   return second.images.every((image: ArchiveImage): boolean => imageKeys.get(image.path) === retainedImageKey(image));
 }
 
+function extractArchiveSessionId(session: NativeConversation): string | undefined {
+  const json = session.archiveJson;
+  if (!json) return undefined;
+  // 常见归档格式固定以 {"session":{"id":"..." 开头，零分配提取原归档 ID；非标准顺序再回退 JSON.parse。
+  const prefix = '{"session":{"id":"';
+  if (json.startsWith(prefix)) {
+    const start = prefix.length;
+    let end = start;
+    while (end < json.length) {
+      const ch = json.charCodeAt(end);
+      if (ch === 34) {
+        const extracted = json.slice(start, end);
+        return extracted || undefined;
+      }
+      if (ch === 92) break;
+      end++;
+    }
+  }
+  return original(session)?.session.id;
+}
+
+function sameArchiveConversation(stored: NativeConversation, incoming: NativeConversation,
+  incomingParsed?: ArchiveOrigin): boolean {
+  if (!stored.archiveJson || !incoming.archiveJson) return false;
+  // 字节完全一致的 archiveJson 必然拥有完全一致的 session/images/source，直接零解析短路。
+  if (stored.archiveJson === incoming.archiveJson) return true;
+  const first = original(stored);
+  const second = incomingParsed ?? original(incoming);
+  return !!(first && second && sameArchiveSource(first, second));
+}
+
 function restoreMergedArchiveImages(sessions: NativeConversation[], existing: NativeConversation[],
   imported: NativeConversation[]): void {
   const images = new Map<string, ArchiveImage>();
   for (const source of [existing, imported]) {
     for (const session of source) {
+      if (!session.archiveJson || (!session.archiveJson.includes('"blobId":') && !session.archiveJson.includes('"bytes":'))) {
+        continue;
+      }
       const origin = original(session);
       if (!origin?.images.length) continue;
       archiveImagesById(origin, archiveImagePaths(origin.session)).forEach((image: ArchiveImage, id: string): void => {
@@ -1503,6 +1634,9 @@ function restoreMergedArchiveImages(sessions: NativeConversation[], existing: Na
   if (!images.size) return;
   for (let index = 0; index < sessions.length; index++) {
     const session = sessions[index];
+    if (!session.archiveJson || !session.archiveJson.includes('"is_image":true')) {
+      continue;
+    }
     const origin = original(session);
     if (origin && restoreArchiveImages(origin, archiveImagePaths(origin.session), images)) {
       const restored = copyMerged(session, session.id, session.title, session.pinnedAt);
@@ -1514,25 +1648,48 @@ function restoreMergedArchiveImages(sessions: NativeConversation[], existing: Na
 
 export function mergeChatBackup(history: NativeConversationState, imported: NativeConversation[]): NativeBackupMergeResult {
   const sessions = history.sessions.slice();
-  const priorArchives = new Map<string, ArchiveOrigin[]>();
-  for (const stored of sessions) {
-    const archive = original(stored);
-    if (archive) {
-      const sameId = priorArchives.get(archive.session.id) ?? [];
-      sameId.push(archive);
-      priorArchives.set(archive.session.id, sameId);
+  const indexById = new Map<string, number>();
+  const usedIds = new Set<string>();
+  const priorArchiveSessions = new Map<string, NativeConversation[]>();
+  for (let i = 0; i < sessions.length; i++) {
+    const stored = sessions[i];
+    indexById.set(stored.id, i);
+    usedIds.add(stored.id);
+    const archiveId = extractArchiveSessionId(stored);
+    if (archiveId) {
+      const sameId = priorArchiveSessions.get(archiveId) ?? [];
+      sameId.push(stored);
+      priorArchiveSessions.set(archiveId, sameId);
     }
   }
   let total = 0;
   for (const incoming of imported) {
     // A previously diverged import retains the source archive ID and payload.
-    const source = priorArchives.size > 0 ? original(incoming) : undefined;
-    const existingSources = source ? priorArchives.get(source.session.id) : undefined;
-    if (source && existingSources?.some((stored: ArchiveOrigin): boolean => sameArchiveSource(stored, source))) {
-      continue;
+    const incomingArchiveId = priorArchiveSessions.size > 0 ? extractArchiveSessionId(incoming) : undefined;
+    const existingCandidates = incomingArchiveId ? priorArchiveSessions.get(incomingArchiveId) : undefined;
+    if (existingCandidates && existingCandidates.length > 0) {
+      let matched = false;
+      let incomingParsed: ArchiveOrigin | undefined = undefined;
+      for (let k = 0; k < existingCandidates.length; k++) {
+        const stored = existingCandidates[k];
+        if (stored.archiveJson === incoming.archiveJson) {
+          matched = true;
+          break;
+        }
+        if (!incomingParsed) incomingParsed = original(incoming);
+        if (sameArchiveConversation(stored, incoming, incomingParsed)) {
+          matched = true;
+          break;
+        }
+      }
+      if (matched) {
+        continue;
+      }
     }
-    const index = sessions.findIndex((stored: NativeConversation): boolean => stored.id === incoming.id);
-    if (index < 0) {
+    const index = indexById.get(incoming.id);
+    if (index === undefined) {
+      indexById.set(incoming.id, sessions.length);
+      usedIds.add(incoming.id);
       sessions.push(incoming);
       total++;
       continue;
@@ -1542,7 +1699,9 @@ export function mergeChatBackup(history: NativeConversationState, imported: Nati
       // Keep the exact unreadable placeholder and its metadata. Never compare an empty
       // fallback snapshot against the incoming paths; preserve the imported branch separately.
       total++;
-      sessions.push(copyMerged(incoming, unusedConversationId(sessions), withPrefix(incoming.title, 'D分支·')));
+      const newId = allocateConversationId(usedIds);
+      indexById.set(newId, sessions.length);
+      sessions.push(copyMerged(incoming, newId, withPrefix(incoming.title, 'D分支·')));
       continue;
     }
     const localPaths = messagePaths(existing);
@@ -1556,7 +1715,9 @@ export function mergeChatBackup(history: NativeConversationState, imported: Nati
       continue;
     }
     sessions[index] = copyMerged(existing, existing.id, withPrefix(existing.title, 'N分支·'), existing.pinnedAt);
-    sessions.push(copyMerged(incoming, unusedConversationId(sessions), withPrefix(incoming.title, 'D分支·')));
+    const branchId = allocateConversationId(usedIds);
+    indexById.set(branchId, sessions.length);
+    sessions.push(copyMerged(incoming, branchId, withPrefix(incoming.title, 'D分支·')));
   }
   restoreMergedArchiveImages(sessions, history.sessions, imported);
   return { history: { sessions: sessions, activeId: history.activeId }, importedCount: total };

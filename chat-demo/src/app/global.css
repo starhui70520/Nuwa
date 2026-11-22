@@ -57,6 +57,23 @@ body.change-theme *::after {
   transition: none !important;
 }
 
+/* 样式隔离减少长对话流式重绘时的跨节点样式重算范围（Chrome 52+ / Android 7 原生支持） */
+.ds-markdown {
+  contain: style;
+}
+
+/* 低性能 / 旧版 WebView 设备关闭昂贵的全局毛玻璃模糊与常驻 GPU 图层提升，显著降低掉帧与显存峰值 */
+body[data-low-webview='true'] *,
+body[data-perf-tier='low'] * {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+body[data-low-webview='true'] *,
+body[data-perf-tier='low'] * {
+  will-change: auto !important;
+}
+
 @media not all and (min-width: 768px) {
   html,
   body,

@@ -1,4 +1,5 @@
 import { MessageEvents, worker } from '@kit.ArkTS';
+import { isHarmonyLowPerfDevice } from './NativeDevicePerf';
 
 export interface NativeCodeHighlightRequest {
   id: number;
@@ -36,8 +37,10 @@ const MAX_SOURCE = 32_768;
 const MAX_RUNS = 8192;
 const MAX_QUEUE = 24;
 const MAX_CACHE = 640_000;
+const LOW_PERF_MAX_CACHE = 240_000;
 const JOB_TIMEOUT = 2500;
 const IDLE_TIMEOUT = 45_000;
+const LOW_PERF_IDLE_TIMEOUT = 20_000;
 const cache = new Map<string, CachedHighlight>();
 const pending = new Map<string, HighlightJob>();
 const waiting: HighlightJob[] = [];
@@ -52,11 +55,21 @@ export function nativeCodeHighlightKey(language: string, source: string): string
   return language.length.toString() + ':' + language + source;
 }
 
+/** 释放代码高亮缓存并回收空闲 Worker（低内存告警时调用）。 */
+export function clearNativeCodeHighlightCache(): void {
+  cache.clear();
+  cost = 0;
+  if (!current && waiting.length === 0) {
+    stopWorker();
+  }
+}
+
 function remember(job: HighlightJob, runs: NativeCodeHighlightRun[] | null): void {
   const entry: CachedHighlight = { runs: runs, cost: job.key.length + (runs?.length ?? 0) * 40 };
   cache.set(job.key, entry);
   cost += entry.cost;
-  while (cost > MAX_CACHE) {
+  const maxCache = isHarmonyLowPerfDevice() ? LOW_PERF_MAX_CACHE : MAX_CACHE;
+  while (cost > maxCache) {
     const first = cache.keys().next();
     if (first.done) break;
     const oldest = cache.get(first.value);
@@ -139,7 +152,10 @@ function drain(): void {
   clearTimeout(idleTimer);
   const next = waiting.shift();
   if (!next) {
-    if (thread) idleTimer = setTimeout((): void => { stopWorker(); }, IDLE_TIMEOUT);
+    if (thread) {
+      idleTimer = setTimeout((): void => { stopWorker(); },
+        isHarmonyLowPerfDevice() ? LOW_PERF_IDLE_TIMEOUT : IDLE_TIMEOUT);
+    }
     return;
   }
   current = next;

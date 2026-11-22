@@ -1,6 +1,7 @@
 import { useTranslate } from '../../i18n/index.js'
 import clsx from 'clsx'
 import { memo, useEffect } from 'react'
+import { isLowPerfDevice } from '../../app/devicePerf.js'
 import { IconRefreshOutline16, IconWarningOutline16 } from '../base/icons.js'
 import { describeReply } from '../../services/chat/describe.js'
 import { canContinueReply } from '../../services/chat/reply.js'
@@ -46,7 +47,8 @@ export const AssistantMessage = memo(function AssistantMessage({
 }) {
   const t = useTranslate()
   const view = useReplyView(message, streaming)
-  const panelEntry = useSearchPanel((state) => state.entry)
+  const summaryEntry = `${message.id}-summary`
+  const isSummaryActive = useSearchPanel((state) => state.entry === summaryEntry)
   const notice = streaming ? null : describeReply(message)
   // 安全拒绝：已下发的思考与正文按协议丢弃，只显示模板答复。
   const refused = message.stopReason === 'refusal'
@@ -56,15 +58,17 @@ export const AssistantMessage = memo(function AssistantMessage({
     .join('\n\n')
   const copyText = responseText || notice?.text
   const waiting = streaming && view.steps.length === 0 && !view.answer && !message.thinking
-  const summaryEntry = `${message.id}-summary`
 
   useEffect(() => {
+    if (streaming || isLowPerfDevice()) {
+      return
+    }
     const items = view.sources.length > 0 ? view.sources : view.searchResults
     if (items.length === 0) {
       return
     }
     prewarmExternalUrls(items.slice(0, 4).map((item) => item.url))
-  }, [view.sources, view.searchResults])
+  }, [streaming, view.sources, view.searchResults])
 
   return (
     <div className={styles.message}>
@@ -136,7 +140,7 @@ export const AssistantMessage = memo(function AssistantMessage({
       ) : null}
       {!streaming && !refused && view.searchResults.length > 0 ? (
         <div
-          className={clsx(styles.summary, panelEntry === summaryEntry && styles.summaryActive)}
+          className={clsx(styles.summary, isSummaryActive && styles.summaryActive)}
           onClick={() => toggleSearchPanel(summaryEntry, view.searchResults)}
         >
           <SiteThumbnails sources={view.searchResults} />
