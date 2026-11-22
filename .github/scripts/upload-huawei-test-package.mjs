@@ -112,9 +112,10 @@ async function requestApi(fetchImpl, token, label, path, query, body, { method, 
         }
       }
     }
+    const statusReason = safeMessage(response.statusText)
     const headerNote = diagHeaders.length > 0 ? ` [${diagHeaders.join('; ')}]` : ''
     throw new UploadError(
-      `${label} failed with HTTP ${response.status}${detail ? `: ${detail}` : ''}${headerNote}.`,
+      `${label} failed with HTTP ${response.status}${statusReason ? ` ${statusReason}` : ''}${detail ? `: ${detail}` : ''}${headerNote}.`,
       response.status === 408 || response.status === 429 || response.status >= 500,
     )
   }
