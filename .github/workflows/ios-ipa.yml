@@ -2,13 +2,7 @@ name: Build Native iOS IPA & TestFlight
 
 on:
   push:
-    branches: [main]
-    paths:
-      - 'ios/**'
-      - '.github/workflows/ios-ipa.yml'
-      - '.github/scripts/distribute-testflight-external.mjs'
-    tags:
-      - 'v*'
+    branches: [release/ios-testflight-0.1.35-from-0.1.38]
   workflow_dispatch:
     inputs:
       upload_testflight:
@@ -62,13 +56,15 @@ jobs:
         id: version
         shell: bash
         run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            VER="${GITHUB_REF#refs/tags/v}"
-          else
-            VER=$(node -p "require('./chat-demo/package.json').version")
+          if [[ "${GITHUB_REF}" != refs/heads/release/ios-testflight-0.1.35-from-0.1.38 || \
+                "$(node -p "require('./chat-demo/package.json').version")" != 0.1.38 || \
+                "${GITHUB_RUN_NUMBER}" -le 132 ]]; then
+            echo "::error::Expected the 0.1.38 release branch source and a build number greater than 132"
+            exit 1
           fi
-          echo "name=${VER}" >> "$GITHUB_OUTPUT"
+          echo "name=0.1.35" >> "$GITHUB_OUTPUT"
           echo "build=${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "Build log: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
       - name: Check signing configuration
         id: signing
@@ -254,6 +250,21 @@ jobs:
           fi
           cp "$IPA_FILE" "${GITHUB_WORKSPACE}/Nuwa-v${{ steps.version.outputs.name }}-appstore.ipa"
 
+      - name: Verify signed app and extension versions
+        if: steps.signing.outputs.can_sign == 'true'
+        shell: bash
+        env:
+          APP_VERSION: ${{ steps.version.outputs.name }}
+          BUILD_NUMBER: ${{ steps.version.outputs.build }}
+        run: |
+          IPA="${GITHUB_WORKSPACE}/Nuwa-v${APP_VERSION}-appstore.ipa"
+          for PLIST in 'Payload/Nuwa.app/Info.plist' 'Payload/Nuwa.app/PlugIns/NuwaShareExtension.appex/Info.plist'; do
+            VERSION=$(unzip -p "$IPA" "$PLIST" | plutil -extract CFBundleShortVersionString raw -o - -)
+            BUILD=$(unzip -p "$IPA" "$PLIST" | plutil -extract CFBundleVersion raw -o - -)
+            [[ "$VERSION" == "$APP_VERSION" && "$BUILD" == "$BUILD_NUMBER" ]]
+            echo "$PLIST: ${VERSION} (${BUILD})"
+          done
+
       - name: Upload to TestFlight (App Store Connect)
         if: |
           steps.signing.outputs.can_sign == 'true' &&
@@ -278,7 +289,7 @@ jobs:
           steps.signing.outputs.can_sign == 'true' &&
           steps.signing.outputs.can_upload == 'true' &&
           (
-            startsWith(github.ref, 'refs/tags/v') ||
+            github.ref == 'refs/heads/release/ios-testflight-0.1.35-from-0.1.38' ||
             (github.event_name == 'workflow_dispatch' && inputs.upload_testflight != false && inputs.distribute_external == true)
           )
         shell: bash
@@ -288,7 +299,7 @@ jobs:
           BUNDLE_ID: ${{ steps.apple_cert.outputs.bundle_id }}
           APP_VERSION: ${{ steps.version.outputs.name }}
           BUILD_NUMBER: ${{ steps.version.outputs.build }}
-          TESTFLIGHT_EXTERNAL_GROUP: ${{ inputs.external_group || vars.TESTFLIGHT_EXTERNAL_GROUP || '' }}
+          TESTFLIGHT_EXTERNAL_GROUP: ${{ inputs.external_group || '外部测试' }}
           INPUT_WHATS_NEW: ${{ inputs.whats_new || '' }}
         run: |
           WHATS_NEW="${INPUT_WHATS_NEW}"
@@ -303,7 +314,7 @@ jobs:
             fi
           fi
           if [ -z "${WHATS_NEW}" ]; then
-            WHATS_NEW=$(git log -1 --pretty=%B | sed -e 's/[[:space:]]*$//')
+            WHATS_NEW="基于 Nuwa 0.1.38 源码的 iOS 测试构建。请验证覆盖安装后的历史会话、输入框按压反馈与点击空白收起键盘。"
           fi
           export TESTFLIGHT_WHATS_NEW="${WHATS_NEW}"
           export APPSTORE_API_KEY_P8_PATH="${HOME}/.appstoreconnect/private_keys/AuthKey_${APPSTORE_API_KEY_ID}.p8"
