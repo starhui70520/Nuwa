@@ -476,8 +476,8 @@ struct IncomingFileActionSheet: View {
         .padding(.horizontal, 20)
         .padding(.top, 14)
         .padding(.bottom, 12)
-        .presentationDetents([.height(min(440, max(336, 250 + 86 * fontScale))), .medium])
-        .presentationDragIndicator(.visible)
+        .nuwaPresentationDetents(height: min(440, max(336, 250 + 86 * fontScale)), includeMedium: true)
+        .nuwaPresentationDragIndicatorVisible()
     }
 
     @ViewBuilder

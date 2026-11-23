@@ -72,7 +72,7 @@ final class AppUpdateMonitor: ObservableObject {
         let interval = pollIntervalSeconds
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(interval))
+                try? await Task.sleep(nanoseconds: UInt64(max(0, interval) * 1_000_000_000))
                 guard !Task.isCancelled, let self else { return }
                 await self.checkSilently(promptOnFound: false)
             }

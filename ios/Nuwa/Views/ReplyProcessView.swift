@@ -173,7 +173,7 @@ private struct ActiveSearchQuery: View {
                 index = 0
                 guard queries.count > 1 else { return }
                 while !Task.isCancelled {
-                    do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                    do { try await Task.sleep(nanoseconds: 2_000_000_000) } catch { return }
                     withAnimation(reduceMotion ? nil : .easeIn(duration: 0.22)) {
                         index = (index + 1) % queries.count
                     }

@@ -197,7 +197,7 @@ final class SessionListStore: ObservableObject {
             let pinA = lhs.isPinned ? (lhs.pinnedAt ?? lhs.updatedAt).timeIntervalSince1970 : 0
             let pinB = rhs.isPinned ? (rhs.pinnedAt ?? rhs.updatedAt).timeIntervalSince1970 : 0
             if pinA != pinB { return pinA > pinB }
-            return lhs.updatedAt > rhs.updatedAt
+            return lhs.updatedAt.timeIntervalSinceReferenceDate > rhs.updatedAt.timeIntervalSinceReferenceDate
         }.map { s in
             SessionSummaryItem(
                 id: s.id,
@@ -866,8 +866,7 @@ final class ChatStore: ObservableObject {
 
         activeTask = Task {
             let supportsReplyHaptics = UIDevice.current.userInterfaceIdiom == .phone
-            let hapticClock = ContinuousClock()
-            var lastReplyHaptic: ContinuousClock.Instant?
+            var lastReplyHaptic: TimeInterval?
             var replyHaptics: UIImpactFeedbackGenerator?
             var omitExtendedFor1M = false
             var fileRetryAttempt = 0
@@ -948,8 +947,8 @@ final class ChatStore: ObservableObject {
                                 receivedContent = true
                                 if supportsReplyHaptics, settings.hapticFeedbackEnabled, !delta.isEmpty,
                                    activeSessionId == sessionId, UIApplication.shared.applicationState == .active {
-                                    let now = hapticClock.now
-                                    if lastReplyHaptic.map({ $0.duration(to: now) >= .milliseconds(300) }) ?? true {
+                                    let now = ProcessInfo.processInfo.systemUptime
+                                    if lastReplyHaptic.map({ now - $0 >= 0.3 }) ?? true {
                                         if replyHaptics == nil { replyHaptics = UIImpactFeedbackGenerator(style: .medium) }
                                         replyHaptics?.impactOccurred()
                                         lastReplyHaptic = now
@@ -1014,7 +1013,7 @@ final class ChatStore: ObservableObject {
                                 publishDraft()
                             } else if pendingFlush == nil {
                                 pendingFlush = Task { @MainActor in
-                                    try? await Task.sleep(for: .milliseconds(60))
+                                    try? await Task.sleep(nanoseconds: 60_000_000)
                                     guard !Task.isCancelled else { return }
                                     pendingFlush = nil
                                     publishDraft()
@@ -1076,7 +1075,7 @@ final class ChatStore: ObservableObject {
                         cachedPrepared = nil
                         let delayMs = 1000 * (1 << fileRetryAttempt)
                         fileRetryAttempt += 1
-                        try? await Task.sleep(for: .milliseconds(delayMs))
+                        try? await Task.sleep(nanoseconds: UInt64(delayMs) * 1_000_000)
                         guard generationID == generation else { return }
                         continue
                     }
@@ -1138,7 +1137,7 @@ final class ChatStore: ObservableObject {
             toastMessage = message
         }
         toastTask = Task {
-            try? await Task.sleep(for: .seconds(2.2))
+            try? await Task.sleep(nanoseconds: 2_200_000_000)
             guard !Task.isCancelled else { return }
             withAnimation(.easeOut(duration: 0.2)) {
                 toastMessage = nil
@@ -1314,7 +1313,7 @@ final class ChatStore: ObservableObject {
                     guard let self else { return }
                     if !self.historyLoaded {
                         for _ in 0..<40 where !self.historyLoaded {
-                            try? await Task.sleep(for: .milliseconds(100))
+                            try? await Task.sleep(nanoseconds: 100_000_000)
                         }
                     }
                     var totalAdded = 0
@@ -1686,7 +1685,7 @@ final class ChatStore: ObservableObject {
         defer { request.cleanup() }
         if !historyLoaded {
             for _ in 0..<40 where !historyLoaded {
-                try? await Task.sleep(for: .milliseconds(100))
+                try? await Task.sleep(nanoseconds: 100_000_000)
             }
         }
         do {

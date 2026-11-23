@@ -391,36 +391,81 @@ private struct TimelineCellKey: Equatable {
 private final class TimelineCell<Row: View>: UICollectionViewCell {
     private(set) var key: TimelineCellKey?
 
+    private var legacyHost: UIHostingController<AnyView>?
+
     override func preferredLayoutAttributesFitting(
         _ layoutAttributes: UICollectionViewLayoutAttributes
     ) -> UICollectionViewLayoutAttributes {
         let proposedHeight = layoutAttributes.size.height
-        let fitted = super.preferredLayoutAttributesFitting(layoutAttributes)
-        let scale = max(1, traitCollection.displayScale)
-        let deltaInPixels = abs(fitted.size.height - proposedHeight) * scale
-        // SwiftUI can round differently by one pixel as UIKit settles the scroll bounds.
-        if proposedHeight > 0, deltaInPixels <= 1.001 {
-            fitted.size.height = proposedHeight
+        if #available(iOS 16.0, *) {
+            let fitted = super.preferredLayoutAttributesFitting(layoutAttributes)
+            let scale = max(1, traitCollection.displayScale)
+            let deltaInPixels = abs(fitted.size.height - proposedHeight) * scale
+            // SwiftUI can round differently by one pixel as UIKit settles the scroll bounds.
+            if proposedHeight > 0, deltaInPixels <= 1.001 {
+                fitted.size.height = proposedHeight
+            }
+            return fitted
+        } else {
+            let fitted = super.preferredLayoutAttributesFitting(layoutAttributes)
+            if let host = legacyHost {
+                let targetWidth = layoutAttributes.size.width
+                if targetWidth > 1 {
+                    let measured = host.sizeThatFits(in: CGSize(width: targetWidth, height: CGFloat.greatestFiniteMagnitude))
+                    fitted.size.width = targetWidth
+                    fitted.size.height = max(1, ceil(measured.height))
+                }
+            }
+            let scale = max(1, traitCollection.displayScale)
+            let deltaInPixels = abs(fitted.size.height - proposedHeight) * scale
+            if proposedHeight > 0, deltaInPixels <= 1.001 {
+                fitted.size.height = proposedHeight
+            }
+            return fitted
         }
-        return fitted
     }
 
     override func prepareForReuse() {
         super.prepareForReuse()
         key = nil
-        contentConfiguration = nil
+        if #available(iOS 16.0, *) {
+            contentConfiguration = nil
+        } else {
+            legacyHost?.rootView = AnyView(EmptyView())
+        }
     }
 
     func update(key: TimelineCellKey, row: Row) {
         self.key = key
         contentView.clipsToBounds = false
-        contentConfiguration = UIHostingConfiguration {
-            row
-                .environment(\.colorScheme, key.colorScheme)
-                .environment(\.nuwaFontScale, CGFloat(key.fontSize / 16.0))
-                .id(key.message.id)
+        let wrapped = row
+            .environment(\.colorScheme, key.colorScheme)
+            .environment(\.nuwaFontScale, CGFloat(key.fontSize / 16.0))
+            .id(key.message.id)
+        if #available(iOS 16.0, *) {
+            contentConfiguration = UIHostingConfiguration {
+                wrapped
+            }
+            .margins(.all, 0)
+        } else {
+            let root = AnyView(wrapped)
+            if let host = legacyHost {
+                host.rootView = root
+                host.view.invalidateIntrinsicContentSize()
+            } else {
+                let host = UIHostingController(rootView: root)
+                host.view.backgroundColor = .clear
+                host.view.translatesAutoresizingMaskIntoConstraints = false
+                contentView.addSubview(host.view)
+                NSLayoutConstraint.activate([
+                    host.view.topAnchor.constraint(equalTo: contentView.topAnchor),
+                    host.view.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+                    host.view.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+                    host.view.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+                ])
+                legacyHost = host
+            }
         }
-        .margins(.all, 0)
     }
 }
 

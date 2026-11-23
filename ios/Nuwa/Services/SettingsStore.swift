@@ -340,7 +340,7 @@ final class SettingsStore: ObservableObject {
 
     func schedulePostReplyBalanceRefresh() {
         Task {
-            try? await Task.sleep(for: .milliseconds(2500))
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
             await refreshBalance(force: true)
         }
     }

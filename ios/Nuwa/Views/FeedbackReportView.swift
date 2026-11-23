@@ -102,11 +102,23 @@ struct FeedbackReportView: View {
                         Text("详细描述")
                             .font(NuwaFont.captionMedium(fontScale))
                             .foregroundStyle(Color.nuwaLabelSecondary)
-                        TextField("请描述复现步骤或异常现象...", text: $descriptionText, axis: .vertical)
-                            .lineLimit(3...6)
-                            .font(NuwaFont.sublabel(fontScale))
+                        if #available(iOS 16.0, *) {
+                            TextField("请描述复现步骤或异常现象...", text: $descriptionText, axis: .vertical)
+                                .lineLimit(3...6)
+                                .font(NuwaFont.sublabel(fontScale))
+                                .padding(12)
+                                .background(fieldBg, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        } else {
+                            NuwaLegacyMultilineTextField(
+                                placeholder: "请描述复现步骤或异常现象...",
+                                text: $descriptionText,
+                                uiFont: UIFont.systemFont(ofSize: 14 * fontScale),
+                                minLines: 3,
+                                maxLines: 6
+                            )
                             .padding(12)
                             .background(fieldBg, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
                     }
 
                     VStack(alignment: .leading, spacing: 6) {

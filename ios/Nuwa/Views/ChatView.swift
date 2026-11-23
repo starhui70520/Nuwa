@@ -189,7 +189,7 @@ struct ChatView: View {
                             .zIndex(60)
                         }
                     }
-                    .onChange(of: wide) { _, isWide in
+                    .nuwaOnChange(of: wide) { isWide in
                         closeDrawer()
                         if !isWide {
                             wideSidebarSearchFocused = false
@@ -211,7 +211,7 @@ struct ChatView: View {
                 chatStore.maybeAutoBackupToIcloud(settings: settings)
                 syncProximityShare()
             }
-            .onChange(of: scenePhase) { _, phase in
+            .nuwaOnChange(of: scenePhase) { phase in
                 if phase == .active {
                     chatStore.checkPendingMigration()
                     chatStore.maybeAutoBackupToIcloud(settings: settings)
@@ -220,19 +220,19 @@ struct ChatView: View {
                     chatStore.flushPendingSave()
                 }
             }
-            .onChange(of: chatStore.activeSessionId) { _, _ in
+            .nuwaOnChange(of: chatStore.activeSessionId) { _ in
                 speech.stopSpeaking()
                 editingMessageId = nil
                 isAtBottom = true
                 disclosureOverrides.removeAll()
                 disclosureAnchorID = nil
             }
-            .onChange(of: showSettings) { _, open in
+            .nuwaOnChange(of: showSettings) { open in
                 if open || !sidebarSearchFocus.isFocused {
                     dismissKeyboard()
                 }
             }
-            .onChange(of: drawerOpen) { wasOpen, isOpen in
+            .nuwaOnChange(of: drawerOpen) { wasOpen, isOpen in
                 if wasOpen && !isOpen {
                     if sidebarSearchFocus.isFocused || sidebarSearchFocus.wasRecentlyDismissed {
                         freezeKeyboardBriefly()
@@ -253,14 +253,14 @@ struct ChatView: View {
             .onDisappear {
                 proximityShareCoordinator.update(session: nil, eligible: false)
             }
-            .onChange(of: proximityShareKey) { _, _ in
+            .nuwaOnChange(of: proximityShareKey) { _ in
                 syncProximityShare()
             }
-            .onChange(of: chatStore.pendingIncomingFile) { _, incoming in
+            .nuwaOnChange(of: chatStore.pendingIncomingFile) { incoming in
                 guard incoming != nil else { return }
                 resetOverlaysForIncomingShare()
             }
-            .onChange(of: chatStore.shareToChatFocusToken) { _, _ in
+            .nuwaOnChange(of: chatStore.shareToChatFocusToken) { _ in
                 resetOverlaysForIncomingShare()
             }
     }
@@ -304,7 +304,7 @@ struct ChatView: View {
                         searchPanelResults = nil
                     }
                     .environment(\.nuwaFontScale, fontScale)
-                    .presentationDragIndicator(.visible)
+                    .nuwaPresentationDragIndicatorVisible()
                     .padding(.top, 12)
                 }
             }
@@ -489,13 +489,22 @@ struct ChatView: View {
     ) -> some View {
         Group {
             if chatStore.historyLoadFailed {
-                ContentUnavailableView(
-                    settings.locale == .enUS ? "Couldn’t load conversations" : "无法读取对话记录",
-                    systemImage: "exclamationmark.triangle",
-                    description: Text(settings.locale == .enUS
+                VStack(spacing: 12) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.system(size: 36, weight: .medium))
+                        .foregroundStyle(Color.nuwaLabelSecondary)
+                    Text(settings.locale == .enUS ? "Couldn’t load conversations" : "无法读取对话记录")
+                        .font(NuwaFont.navTitle(fontScale))
+                        .foregroundStyle(Color.nuwaLabelPrimary)
+                    Text(settings.locale == .enUS
                         ? "Your data hasn’t been changed. Reopen Nuwa to try again."
                         : "数据未被修改，请重新打开 Nuwa 后重试。")
-                )
+                        .font(NuwaFont.sublabel(fontScale))
+                        .foregroundStyle(Color.nuwaLabelSecondary)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(.horizontal, 28)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(.top, usesSystemSafeAreaBars ? 0 : topSafe + headerHeight)
                 .padding(.bottom, usesSystemSafeAreaBars ? 0 : bottomSafe + composerHeight)
             } else if chatStore.activeSessionLoadFailed, let id = session?.id {
@@ -722,7 +731,7 @@ struct ChatView: View {
         GeometryReader { proxy in
             Color.clear
                 .onAppear { onChange(proxy.size.height) }
-                .onChange(of: proxy.size.height) { _, newHeight in
+                .nuwaOnChange(of: proxy.size.height) { newHeight in
                     onChange(newHeight)
                 }
         }
@@ -819,12 +828,24 @@ struct ChatView: View {
 
                 if isEditing {
                     VStack(alignment: .trailing, spacing: 10) {
-                        TextField("修改提问内容", text: $editDraftText, axis: .vertical)
-                            .lineLimit(1...8)
-                            .font(.system(size: settings.chatFontSize))
-                            .foregroundStyle(Color.nuwaLabelPrimary)
+                        if #available(iOS 16.0, *) {
+                            TextField("修改提问内容", text: $editDraftText, axis: .vertical)
+                                .lineLimit(1...8)
+                                .font(.system(size: settings.chatFontSize))
+                                .foregroundStyle(Color.nuwaLabelPrimary)
+                                .padding(12)
+                                .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        } else {
+                            NuwaLegacyMultilineTextField(
+                                placeholder: "修改提问内容",
+                                text: $editDraftText,
+                                uiFont: UIFont.systemFont(ofSize: settings.chatFontSize),
+                                minLines: 1,
+                                maxLines: 8
+                            )
                             .padding(12)
                             .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        }
 
                         HStack(spacing: 8) {
                             Button {
@@ -871,7 +892,7 @@ struct ChatView: View {
                                 .padding(.vertical, 10)
                                 .background(
                                     Color.nuwaBubbleFill,
-                                    in: UnevenRoundedRectangle(
+                                    in: NuwaUnevenRoundedRectangle(
                                         topLeadingRadius: 22, bottomLeadingRadius: 22,
                                         bottomTrailingRadius: 6, topTrailingRadius: 22
                                     )
@@ -1131,7 +1152,7 @@ struct ChatView: View {
         keyboardFreezeTask?.cancel()
         holdKeyboardFreeze = true
         keyboardFreezeTask = Task { @MainActor in
-            try? await Task.sleep(for: .seconds(duration))
+            try? await Task.sleep(nanoseconds: UInt64(max(0, duration) * 1_000_000_000))
             guard !Task.isCancelled else { return }
             holdKeyboardFreeze = false
         }
@@ -1241,14 +1262,14 @@ private struct ChatDrawerLayout<Sidebar: View, Surface: View>: View {
             } else {
                 layers
                     .simultaneousGesture(legacyPan, including: wide || !gestureEnabled ? .none : .all)
-                    .onChange(of: legacyTracking) { _, active in
+                    .nuwaOnChange(of: legacyTracking) { active in
                         guard !active else { return }
                         legacyRejectedDrag = false
                         cancelDrag()
                     }
             }
         }
-        .onChange(of: compactOpen) { _, _ in
+        .nuwaOnChange(of: compactOpen) { _ in
             guard !wide, hapticEnabled else { return }
             DrawerHaptics.impact.impactOccurred(intensity: 0.85)
         }
@@ -1301,13 +1322,13 @@ private struct ChatDrawerLayout<Sidebar: View, Surface: View>: View {
                         )
                 }
                 .scaleEffect(cardScale, anchor: .leading)
-                .geometryGroup()
+                .nuwaGeometryGroup()
                 .position(x: offset + surfaceWidth / 2, y: size.height / 2)
                 .animation(anim, value: compactOpen)
         }
         .frame(width: size.width, height: size.height)
-        .onChange(of: wide) { _, _ in dragOffset = nil }
-        .onChange(of: gestureEnabled) { _, enabled in
+        .nuwaOnChange(of: wide) { _ in dragOffset = nil }
+        .nuwaOnChange(of: gestureEnabled) { enabled in
             if !enabled { cancelDrag() }
         }
     }
@@ -1470,7 +1491,7 @@ private struct LiveReplyRow<Content: View>: View {
     var body: some View {
         content(store.message?.id == fallback.id ? store.message ?? fallback : fallback)
             .transaction { $0.animation = nil }
-            .onChange(of: store.revision) { _, _ in
+            .nuwaOnChange(of: store.revision) { _ in
                 onUpdate()
             }
     }
@@ -1633,28 +1654,22 @@ private struct ChatComposerContainer: View {
                 draftStore.removeAttachment(fileId: fileId, for: sessionId)
             }
         )
-        .onChange(of: speech.errorMessage) { _, newError in
+        .nuwaOnChange(of: speech.errorMessage) { newError in
             if let newError { onToast(newError) }
         }
     }
 
-    private func handlePickedPhotos(_ items: [PhotosPickerItem]) {
+    private func handlePickedPhotos(_ items: [NuwaLegacyPickedImage]) {
         let targetSession = sessionId
-        Task {
-            for (idx, item) in items.enumerated() {
-                if let data = try? await item.loadTransferable(type: Data.self) {
-                    let ext = item.supportedContentTypes.first?.preferredFilenameExtension ?? "jpg"
-                    let name = "photo_\(Int(Date().timeIntervalSince1970))_\(idx).\(ext)"
-                    draftStore.addFile(
-                        data: data,
-                        fileName: name,
-                        isImage: true,
-                        for: targetSession,
-                        settings: settings,
-                        onToast: onToast
-                    )
-                }
-            }
+        for item in items {
+            draftStore.addFile(
+                data: item.data,
+                fileName: item.fileName,
+                isImage: true,
+                for: targetSession,
+                settings: settings,
+                onToast: onToast
+            )
         }
     }
 }

@@ -57,6 +57,10 @@ struct SessionDrawerView: View {
         let yesterdayStart = calendar.date(byAdding: .day, value: -1, to: todayStart) ?? todayStart
         let weekStart = calendar.date(byAdding: .day, value: -7, to: todayStart) ?? todayStart
         let monthStart = calendar.date(byAdding: .day, value: -30, to: todayStart) ?? todayStart
+        let todayStartTs = todayStart.timeIntervalSinceReferenceDate
+        let yesterdayStartTs = yesterdayStart.timeIntervalSinceReferenceDate
+        let weekStartTs = weekStart.timeIntervalSinceReferenceDate
+        let monthStartTs = monthStart.timeIntervalSinceReferenceDate
         var pinned: [SessionSummaryItem] = []
         var today: [SessionSummaryItem] = []
         var yesterday: [SessionSummaryItem] = []
@@ -66,15 +70,16 @@ struct SessionDrawerView: View {
 
         let matches = searchResult?.query == query ? searchResult?.ids : nil
         for s in listStore.summaries where query.isEmpty || matches?.contains(s.id) == true {
+            let updatedTs = s.updatedAt.timeIntervalSinceReferenceDate
             if s.isPinned {
                 pinned.append(s)
-            } else if s.updatedAt >= todayStart {
+            } else if updatedTs >= todayStartTs {
                 today.append(s)
-            } else if s.updatedAt >= yesterdayStart {
+            } else if updatedTs >= yesterdayStartTs {
                 yesterday.append(s)
-            } else if s.updatedAt >= weekStart {
+            } else if updatedTs >= weekStartTs {
                 last7Days.append(s)
-            } else if s.updatedAt >= monthStart {
+            } else if updatedTs >= monthStartTs {
                 last30Days.append(s)
             } else {
                 earlier.append(s)
@@ -311,7 +316,7 @@ struct SessionDrawerView: View {
                     }
                     .padding(.horizontal, 12)
                 }
-                .scrollDismissesKeyboard(.interactively)
+                .nuwaScrollDismissesKeyboardInteractively()
                 .nuwaNoScrollEdgeEffect()
             }
 
@@ -435,12 +440,12 @@ struct SessionDrawerView: View {
                 searchResult = nil
                 return
             }
-            try? await Task.sleep(for: .milliseconds(180))
+            try? await Task.sleep(nanoseconds: 180_000_000)
             guard !Task.isCancelled else { return }
             let ids = await onSearch(searchInput.query)
             if !Task.isCancelled { searchResult = (searchInput.query, ids) }
         }
-        .onChange(of: isSearchFocused) { _, focused in
+        .nuwaOnChange(of: isSearchFocused) { focused in
             if focused && suppressSearchFocus {
                 dismissSearchFocus()
                 onSearchFocusChanged(false)
@@ -448,12 +453,12 @@ struct SessionDrawerView: View {
                 onSearchFocusChanged(focused)
             }
         }
-        .onChange(of: suppressSearchFocus) { _, suppressed in
+        .nuwaOnChange(of: suppressSearchFocus) { suppressed in
             if suppressed {
                 dismissSearchFocus()
             }
         }
-        .onChange(of: isOpen) { _, open in
+        .nuwaOnChange(of: isOpen) { open in
             if open {
                 Task { await settings.refreshBalance() }
             } else {

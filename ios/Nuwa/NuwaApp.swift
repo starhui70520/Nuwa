@@ -49,7 +49,7 @@ struct NuwaApp: App {
                 MarkdownMessageView.purgeRenderCaches()
                 LatexParser.purgeCache()
             }
-            .onChange(of: scenePhase) { _, phase in
+            .nuwaOnChange(of: scenePhase) { phase in
                 if phase == .active {
                     updateMonitor.handleForegroundActive()
                     ShareSuggestionDonor.donateDefaultSuggestionsIfNeeded()

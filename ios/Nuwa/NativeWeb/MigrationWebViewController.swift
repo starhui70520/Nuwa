@@ -577,7 +577,7 @@ final class MigrationWebViewController: UIViewController, WKNavigationDelegate, 
                 self.guideLabel.text = "网络波动，正在自动续传重试 (\(self.downloadRetryCount)/\(self.maxDownloadRetries))..."
                 let delaySeconds = self.downloadRetryCount
                 Task { @MainActor [weak self, weak webView] in
-                    try? await Task.sleep(for: .seconds(delaySeconds))
+                    try? await Task.sleep(nanoseconds: UInt64(max(0, delaySeconds) * 1_000_000_000))
                     guard let self, let webView, !self.completed else { return }
                     webView.resumeDownload(fromResumeData: resumeData) { [weak self] resumed in
                         self?.observeDownload(resumed)

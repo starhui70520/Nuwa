@@ -21,17 +21,17 @@ struct ChatComposerView: View {
     let onStop: () -> Void
     let onToggleVoice: () -> Void
     let onCancelVoice: () -> Void
-    let onPickPhotos: ([PhotosPickerItem]) -> Void
+    let onPickPhotos: ([NuwaLegacyPickedImage]) -> Void
     let onPickFiles: () -> Void
     let onRetryAttachment: (String) -> Void
     let onRemoveAttachment: (String) -> Void
 
     @FocusState private var isFocused: Bool
+    @State private var legacyFocused = false
     @State private var pressing = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.nuwaFontScale) private var fontScale
-    @State private var selectedPhotoItems: [PhotosPickerItem] = []
     @State private var showPhotoPicker = false
 
     private static let lightImpact = UIImpactFeedbackGenerator(style: .light)
@@ -56,7 +56,7 @@ struct ChatComposerView: View {
                 if isRecording {
                     VoiceSpectrumBar(level: audioLevel, seconds: recordingSeconds, onCancel: onCancelVoice)
                         .frame(minHeight: 40)
-                } else {
+                } else if #available(iOS 16.0, *) {
                     TextField(L10n.t("placeholder", locale: locale), text: $text, axis: .vertical)
                         .focused($isFocused)
                         .lineLimit(1...6)
@@ -75,6 +75,18 @@ struct ChatComposerView: View {
                                 }
                             )
                         }
+                } else {
+                    NuwaLegacyMultilineTextField(
+                        placeholder: L10n.t("placeholder", locale: locale),
+                        text: $text,
+                        uiFont: UIFont.systemFont(ofSize: 16 * fontScale),
+                        minLines: 1,
+                        maxLines: 6,
+                        isFocused: $legacyFocused
+                    )
+                    .frame(minHeight: max(38, 22 + 16 * fontScale), alignment: .topLeading)
+                    .padding(.horizontal, 6)
+                    .padding(.top, 4)
                 }
 
                 // Bottom action row — lightweight crisp native controls inside ONE Liquid Glass card
@@ -128,11 +140,12 @@ struct ChatComposerView: View {
                 // Keep the text editor's hit area and selection geometry stationary.
                 Color.clear
                     .nuwaGlassCard(cornerRadius: 28, tint: colorScheme == .dark ? .white.opacity(0.08) : nil)
-                    .animation(pressing ? .easeOut(duration: 0.065) : .spring(duration: 0.34, bounce: 0.34)) { card in
-                        card
-                            .brightness(pressing ? (colorScheme == .dark ? 0.035 : -0.015) : 0)
-                            .scaleEffect(pressing && !reduceMotion ? 0.96 : 1)
-                    }
+                    .brightness(pressing ? (colorScheme == .dark ? 0.035 : -0.015) : 0)
+                    .scaleEffect(pressing && !reduceMotion ? 0.96 : 1)
+                    .animation(
+                        pressing ? .easeOut(duration: 0.065) : .spring(response: 0.34, dampingFraction: 0.66),
+                        value: pressing
+                    )
                     .allowsHitTesting(false)
             }
             .contentShape(RoundedRectangle(cornerRadius: 28))
@@ -140,21 +153,10 @@ struct ChatComposerView: View {
         .padding(.horizontal, 22)
         .padding(.top, 6)
         .padding(.bottom, 10)
-        .onChange(of: allowPressEffect && !isRecording) { _, enabled in
+        .nuwaOnChange(of: allowPressEffect && !isRecording) { enabled in
             if !enabled { pressing = false }
         }
-        .photosPicker(
-            isPresented: $showPhotoPicker,
-            selection: $selectedPhotoItems,
-            maxSelectionCount: 9,
-            matching: .images
-        )
-        .onChange(of: selectedPhotoItems) { _, items in
-            guard !items.isEmpty else { return }
-            let batch = items
-            selectedPhotoItems = []
-            onPickPhotos(batch)
-        }
+        .modifier(ComposerPhotoPickerModifier(isPresented: $showPhotoPicker, onPicked: onPickPhotos))
     }
 
     @ViewBuilder
@@ -556,5 +558,55 @@ private final class ComposerPressRecognizer: UIGestureRecognizer, UIGestureRecog
             releaseWorkItem = item
             DispatchQueue.main.asyncAfter(deadline: .now() + remaining, execute: item)
         }
+    }
+}
+
+private struct ComposerPhotoPickerModifier: ViewModifier {
+    @Binding var isPresented: Bool
+    let onPicked: ([NuwaLegacyPickedImage]) -> Void
+
+    func body(content: Content) -> some View {
+        if #available(iOS 16.0, *) {
+            content.modifier(ModernPhotoPickerModifier(isPresented: $isPresented, onPicked: onPicked))
+        } else {
+            content.sheet(isPresented: $isPresented) {
+                NuwaLegacyPhotoPicker(selectionLimit: 9, onPicked: onPicked)
+            }
+        }
+    }
+}
+
+@available(iOS 16.0, *)
+private struct ModernPhotoPickerModifier: ViewModifier {
+    @Binding var isPresented: Bool
+    let onPicked: ([NuwaLegacyPickedImage]) -> Void
+    @State private var selectedPhotoItems: [PhotosPickerItem] = []
+
+    func body(content: Content) -> some View {
+        content
+            .photosPicker(
+                isPresented: $isPresented,
+                selection: $selectedPhotoItems,
+                maxSelectionCount: 9,
+                matching: .images
+            )
+            .nuwaOnChange(of: selectedPhotoItems) { items in
+                guard !items.isEmpty else { return }
+                let batch = items
+                selectedPhotoItems = []
+                Task {
+                    var loaded: [NuwaLegacyPickedImage] = []
+                    for (idx, item) in batch.enumerated() {
+                        if let data = try? await item.loadTransferable(type: Data.self) {
+                            let ext = item.supportedContentTypes.first?.preferredFilenameExtension ?? "jpg"
+                            let name = "photo_\(Int(Date().timeIntervalSince1970))_\(idx).\(ext)"
+                            loaded.append(NuwaLegacyPickedImage(data: data, fileName: name))
+                        }
+                    }
+                    if !loaded.isEmpty {
+                        await MainActor.run { onPicked(loaded) }
+                    }
+                }
+            }
     }
 }

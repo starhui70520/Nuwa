@@ -246,7 +246,7 @@ struct SettingsView: View {
             }
         }
         .environment(\.nuwaFontScale, fontScale)
-        .onChange(of: page) { _, _ in
+        .nuwaOnChange(of: page) { _ in
             activeDropdown = nil
         }
         .task {
@@ -353,7 +353,7 @@ struct SettingsView: View {
                 }
             }
         }
-        .presentationDragIndicator(.visible)
+        .nuwaPresentationDragIndicatorVisible()
     }
 
     // MARK: - Root Settings Page (1:1 SettingsDialog.tsx)
