@@ -53,6 +53,7 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
   const [batchDeleting, setBatchDeleting] = useState(false)
   const [renderLimit, setRenderLimit] = useState(getSiderBatchSize)
+  const listRef = useRef<HTMLDivElement | null>(null)
   const sessionsRef = useRef(sessions)
   sessionsRef.current = sessions
 
@@ -116,6 +117,21 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
   )
 
   const groups = useMemo(() => groupSessions(visibleSessions, now, t), [visibleSessions, now, t])
+
+  // 大屏或低性能档位初始 30 条尚未填满视口时自动补齐，避免无法触发滚动导致剩余对话不可见
+  useEffect(() => {
+    if (renderLimit >= filteredSessions.length) {
+      return
+    }
+    const el = listRef.current
+    if (!el || el.clientHeight === 0) {
+      return
+    }
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 320) {
+      const step = getSiderBatchSize()
+      setRenderLimit((prev) => Math.min(filteredSessions.length, prev + step))
+    }
+  }, [renderLimit, filteredSessions.length, mobileOpen])
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout>
@@ -282,19 +298,7 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
         </>
       )}
 
-      <div
-        className={styles.listWrap}
-        onScroll={(event) => {
-          if (renderLimit >= filteredSessions.length) {
-            return
-          }
-          const el = event.currentTarget
-          if (el.scrollHeight - el.scrollTop - el.clientHeight < 320) {
-            const step = getSiderBatchSize()
-            setRenderLimit((prev) => Math.min(filteredSessions.length, prev + step))
-          }
-        }}
-      >
+      <div className={styles.listWrap}>
         {sessions.length === 0 ? (
           <div className={styles.emptyState}>
             <div className={styles.emptyTitle}>{t('siderEmptyTitle')}</div>
@@ -313,7 +317,20 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
         ) : filteredSessions.length === 0 ? (
           <div className={styles.emptySearch}>{t('siderSearchEmpty')}</div>
         ) : (
-          <div className={styles.list}>
+          <div
+            ref={listRef}
+            className={styles.list}
+            onScroll={(event) => {
+              if (renderLimit >= filteredSessions.length) {
+                return
+              }
+              const el = event.currentTarget
+              if (el.scrollHeight - el.scrollTop - el.clientHeight < 320) {
+                const step = getSiderBatchSize()
+                setRenderLimit((prev) => Math.min(filteredSessions.length, prev + step))
+              }
+            }}
+          >
             {groups.map((group) => (
               <div key={group.key} className={styles.section}>
                 <div className={styles.sectionHeader}>{group.label}</div>

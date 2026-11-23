@@ -6630,6 +6630,9 @@ struct NativeChat {
             if (!desktop) this.sidebarDrawerFirst = first;
             this.maybeLoadSidebarPage(visibleSidebarRowIndex(this.sidebarSections, last.index, last.itemIndexInGroup));
           })
+          .onReachEnd(() => {
+            this.maybeLoadSidebarPage(this.sidebarRows.length - 1);
+          })
         }
         .mode(NavigationMode.Stack)
         .titleMode(NavigationTitleMode.Mini)
