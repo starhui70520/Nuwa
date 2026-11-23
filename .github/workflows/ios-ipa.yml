@@ -2,12 +2,7 @@ name: Build Native iOS IPA & TestFlight
 
 on:
   push:
-    branches: [main]
-    paths:
-      - 'ios/**'
-      - '.github/workflows/ios-ipa.yml'
-    tags:
-      - 'v*'
+    branches: [release/ios-testflight-0.1.35-rebuild]
   workflow_dispatch:
     inputs:
       upload_testflight:
@@ -15,6 +10,21 @@ on:
         required: false
         default: true
         type: boolean
+      distribute_external:
+        description: 'Attach build to External TestFlight group & submit for Beta Review'
+        required: false
+        default: true
+        type: boolean
+      external_group:
+        description: 'External TestFlight group name(s), comma-separated (blank = all external groups)'
+        required: false
+        default: ''
+        type: string
+      whats_new:
+        description: 'TestFlight "What to Test" notes (blank = git tag notes / default)'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: write
@@ -28,7 +38,7 @@ jobs:
     runs-on: xcode-27
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
-    timeout-minutes: 25
+    timeout-minutes: 35
 
     steps:
       - name: Checkout repository
@@ -50,6 +60,10 @@ jobs:
             VER="${GITHUB_REF#refs/tags/v}"
           else
             VER=$(node -p "require('./chat-demo/package.json').version")
+          fi
+          if [[ "$VER" != 0.1.35 || "$GITHUB_RUN_NUMBER" -le 120 ]]; then
+            echo "::error::Expected version 0.1.35 and a build number greater than 120"
+            exit 1
           fi
           echo "name=${VER}" >> "$GITHUB_OUTPUT"
           echo "build=${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
@@ -256,6 +270,42 @@ jobs:
             --file "${GITHUB_WORKSPACE}/Nuwa-v${{ steps.version.outputs.name }}-appstore.ipa" \
             --apiKey "$APPSTORE_API_KEY_ID" \
             --apiIssuer "$APPSTORE_API_ISSUER_ID"
+
+      - name: Distribute to External TestFlight & submit Beta Review
+        if: |
+          steps.signing.outputs.can_sign == 'true' &&
+          steps.signing.outputs.can_upload == 'true' &&
+          (
+            github.ref == 'refs/heads/release/ios-testflight-0.1.35-rebuild' ||
+            (github.event_name == 'workflow_dispatch' && inputs.upload_testflight != false && inputs.distribute_external == true)
+          )
+        shell: bash
+        env:
+          APPSTORE_API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          APPSTORE_API_ISSUER_ID: ${{ secrets.APPSTORE_API_ISSUER_ID }}
+          BUNDLE_ID: ${{ steps.apple_cert.outputs.bundle_id }}
+          APP_VERSION: ${{ steps.version.outputs.name }}
+          BUILD_NUMBER: ${{ steps.version.outputs.build }}
+          TESTFLIGHT_EXTERNAL_GROUP: ${{ inputs.external_group || '外部测试' }}
+          INPUT_WHATS_NEW: ${{ inputs.whats_new || '' }}
+        run: |
+          WHATS_NEW="${INPUT_WHATS_NEW}"
+          if [ -z "${WHATS_NEW}" ] && [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TAG_NAME="${GITHUB_REF#refs/tags/}"
+            TAG_BODY=$(git tag -l --format='%(contents:body)' "${TAG_NAME}" | sed -e 's/[[:space:]]*$//')
+            TAG_SUBJECT=$(git tag -l --format='%(contents:subject)' "${TAG_NAME}" | sed -e 's/[[:space:]]*$//')
+            if [ -n "${TAG_BODY}" ]; then
+              WHATS_NEW="${TAG_BODY}"
+            elif [ -n "${TAG_SUBJECT}" ] && [ "${TAG_SUBJECT}" != "${TAG_NAME}" ]; then
+              WHATS_NEW="${TAG_SUBJECT}"
+            fi
+          fi
+          if [ -z "${WHATS_NEW}" ]; then
+            WHATS_NEW="Nuwa 0.1.35 同版本构建，请验证覆盖安装、冷启动和历史会话是否可正常打开。"
+          fi
+          export TESTFLIGHT_WHATS_NEW="${WHATS_NEW}"
+          export APPSTORE_API_KEY_P8_PATH="${HOME}/.appstoreconnect/private_keys/AuthKey_${APPSTORE_API_KEY_ID}.p8"
+          node .github/scripts/distribute-testflight-external.mjs
 
       - name: Clean up signing keychain and keys
         if: always()
