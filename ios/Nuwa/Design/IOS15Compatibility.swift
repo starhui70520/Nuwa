@@ -3,6 +3,56 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
+private struct LegacyGridColumnWidths: PreferenceKey {
+    static var defaultValue: [Int: CGFloat] { [:] }
+
+    static func reduce(value: inout [Int: CGFloat], nextValue: () -> [Int: CGFloat]) {
+        value.merge(nextValue(), uniquingKeysWith: max)
+    }
+}
+
+struct NuwaLegacyGrid<Content: View>: View {
+    let verticalSpacing: CGFloat
+    @ViewBuilder let content: () -> Content
+    @State private var columnWidths: [Int: CGFloat] = [:]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: verticalSpacing, content: content)
+            .environment(\.legacyGridColumnWidths, columnWidths)
+            .onPreferenceChange(LegacyGridColumnWidths.self) { columnWidths = $0 }
+            .transformPreference(LegacyGridColumnWidths.self) { $0.removeAll() }
+    }
+}
+
+private struct LegacyGridColumnWidthsKey: EnvironmentKey {
+    static let defaultValue: [Int: CGFloat] = [:]
+}
+
+private extension EnvironmentValues {
+    var legacyGridColumnWidths: [Int: CGFloat] {
+        get { self[LegacyGridColumnWidthsKey.self] }
+        set { self[LegacyGridColumnWidthsKey.self] = newValue }
+    }
+}
+
+struct NuwaLegacyGridCell<Content: View>: View {
+    let column: Int
+    var alignment: Alignment = .leading
+    @ViewBuilder let content: () -> Content
+    @Environment(\.legacyGridColumnWidths) private var columnWidths
+
+    var body: some View {
+        content()
+            .fixedSize(horizontal: true, vertical: false)
+            .background {
+                GeometryReader { geometry in
+                    Color.clear.preference(key: LegacyGridColumnWidths.self, value: [column: geometry.size.width])
+                }
+            }
+            .frame(minWidth: columnWidths[column], alignment: alignment)
+    }
+}
+
 // MARK: - onChange compatibility (iOS 15 - 26)
 
 private struct LegacyOnChangeWithOldModifier<Value: Equatable>: ViewModifier {

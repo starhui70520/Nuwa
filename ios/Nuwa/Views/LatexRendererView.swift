@@ -1495,36 +1495,74 @@ private struct LatexArrayView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(alignment: .center, spacing: 4) {
                     leftBracketView
-                    Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 6) {
-                        ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                            switch row {
-                            case .hline:
-                                Divider().gridCellUnsizedAxes(.horizontal)
-                            case .cells(let cells, let extraSpacing):
-                                GridRow {
-                                    ForEach(0..<maxCols, id: \.self) { colIdx in
-                                        let align = colIdx < columns.count ? columns[colIdx] : (columns.last ?? .center)
-                                        let cellNodes = colIdx < cells.count ? cells[colIdx] : []
-                                        LatexInlineRowView(
-                                            nodes: cellNodes,
-                                            style: style,
-                                            baseFontSize: baseFontSize,
-                                            alignment: align,
-                                            darkMode: darkMode,
-                                            renderDepth: renderDepth + 1
-                                        )
-                                        .gridColumnAlignment(align.horizontalAlignment)
-                                    }
-                                }
-                                .padding(.bottom, extraSpacing)
-                            }
-                        }
+                    if #available(iOS 16.0, *) {
+                        nativeGrid
+                    } else {
+                        legacyGrid
                     }
                     rightBracketView
                 }
                 .padding(.vertical, 4)
             }
         }
+    }
+
+    @available(iOS 16.0, *)
+    private var nativeGrid: some View {
+        Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 6) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                switch row {
+                case .hline:
+                    Divider().gridCellUnsizedAxes(.horizontal)
+                case .cells(let cells, let extraSpacing):
+                    GridRow {
+                        ForEach(0..<maxCols, id: \.self) { column in
+                            arrayCell(cells, column: column)
+                                .gridColumnAlignment(columnAlignment(column).horizontalAlignment)
+                        }
+                    }
+                    .padding(.bottom, extraSpacing)
+                }
+            }
+        }
+    }
+
+    private var legacyGrid: some View {
+        NuwaLegacyGrid(verticalSpacing: 6) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                switch row {
+                case .hline(let dashed):
+                    HorizontalLineShape()
+                        .stroke(style: StrokeStyle(lineWidth: 0.75, dash: dashed ? [4, 3] : []))
+                        .foregroundStyle(Color.nuwaControlBorder)
+                        .frame(height: 1)
+                case .cells(let cells, let extraSpacing):
+                    HStack(spacing: 12) {
+                        ForEach(0..<maxCols, id: \.self) { column in
+                            NuwaLegacyGridCell(column: column, alignment: columnAlignment(column).frameAlignment) {
+                                arrayCell(cells, column: column)
+                            }
+                        }
+                    }
+                    .padding(.bottom, extraSpacing)
+                }
+            }
+        }
+    }
+
+    private func columnAlignment(_ column: Int) -> LatexColumnAlign {
+        column < columns.count ? columns[column] : (columns.last ?? .center)
+    }
+
+    private func arrayCell(_ cells: [[LatexNode]], column: Int) -> some View {
+        LatexInlineRowView(
+            nodes: column < cells.count ? cells[column] : [],
+            style: style,
+            baseFontSize: baseFontSize,
+            alignment: columnAlignment(column),
+            darkMode: darkMode,
+            renderDepth: renderDepth + 1
+        )
     }
 
     @ViewBuilder

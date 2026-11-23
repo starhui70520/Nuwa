@@ -765,33 +765,11 @@ private struct MarkdownTableView: View {
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
-                GridRow {
-                    ForEach(Array(headers.enumerated()), id: \.offset) { _, h in
-                        Text(MarkdownParseCache.inlineAttributed(h, darkMode: darkMode))
-                            .font(.system(size: fontSize, weight: .semibold))
-                            .foregroundStyle(Color.nuwaLabelPrimary)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 8)
-                            .frame(minWidth: 90, maxWidth: .infinity, alignment: .leading)
-                    }
-                }
-                .background(Color.primary.opacity(0.05))
-
-                ForEach(Array(rows.enumerated()), id: \.offset) { rIdx, row in
-                    Divider().gridCellUnsizedAxes(.horizontal)
-                    GridRow {
-                        ForEach(0..<max(headers.count, row.count), id: \.self) { cIdx in
-                            let val = cIdx < row.count ? row[cIdx] : ""
-                            Text(MarkdownParseCache.inlineAttributed(val, darkMode: darkMode))
-                                .font(.system(size: fontSize))
-                                .foregroundStyle(Color.nuwaLabelPrimary)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 7)
-                                .frame(minWidth: 90, maxWidth: .infinity, alignment: .leading)
-                        }
-                    }
-                    .background(rIdx % 2 == 1 ? Color.primary.opacity(0.02) : Color.clear)
+            Group {
+                if #available(iOS 16.0, *) {
+                    nativeGrid
+                } else {
+                    legacyGrid
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -800,6 +778,64 @@ private struct MarkdownTableView: View {
                     .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.75)
             )
         }
+    }
+
+    @available(iOS 16.0, *)
+    private var nativeGrid: some View {
+        Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
+            GridRow {
+                ForEach(Array(headers.enumerated()), id: \.offset) { _, header in
+                    tableCell(header, isHeader: true)
+                }
+            }
+            .background(Color.primary.opacity(0.05))
+
+            ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
+                Divider().gridCellUnsizedAxes(.horizontal)
+                GridRow {
+                    ForEach(0..<max(headers.count, row.count), id: \.self) { column in
+                        tableCell(column < row.count ? row[column] : "")
+                    }
+                }
+                .background(rowBackground(index))
+            }
+        }
+    }
+
+    private var legacyGrid: some View {
+        let columns = rows.reduce(headers.count) { max($0, $1.count) }
+        return NuwaLegacyGrid(verticalSpacing: 0) {
+            legacyRow(headers, columns: columns, isHeader: true)
+                .background(Color.primary.opacity(0.05))
+            ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
+                legacyRow(row, columns: columns)
+                    .background(rowBackground(index))
+                    .overlay(alignment: .top) { Divider() }
+            }
+        }
+    }
+
+    private func legacyRow(_ values: [String], columns: Int, isHeader: Bool = false) -> some View {
+        HStack(spacing: 0) {
+            ForEach(0..<columns, id: \.self) { column in
+                NuwaLegacyGridCell(column: column) {
+                    tableCell(column < values.count ? values[column] : "", isHeader: isHeader)
+                }
+            }
+        }
+    }
+
+    private func tableCell(_ value: String, isHeader: Bool = false) -> some View {
+        Text(MarkdownParseCache.inlineAttributed(value, darkMode: darkMode))
+            .font(.system(size: fontSize, weight: isHeader ? .semibold : .regular))
+            .foregroundStyle(Color.nuwaLabelPrimary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, isHeader ? 8 : 7)
+            .frame(minWidth: 90, maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func rowBackground(_ index: Int) -> Color {
+        index % 2 == 1 ? Color.primary.opacity(0.02) : .clear
     }
 }
 

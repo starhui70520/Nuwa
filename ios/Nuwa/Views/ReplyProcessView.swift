@@ -319,7 +319,7 @@ struct SearchSourcesPanel: View {
                                     HStack(spacing: 6) {
                                         Text("\(index + 1)").monospacedDigit()
                                         SourceLogo(item: item)
-                                        Text(item.siteName ?? url.host() ?? "").lineLimit(1)
+                                        Text(item.siteName ?? URLComponents(url: url, resolvingAgainstBaseURL: false)?.host ?? "").lineLimit(1)
                                         if let age = item.pageAge, !age.isEmpty {
                                             Text("·").accessibilityHidden(true)
                                             Text(age).lineLimit(1)

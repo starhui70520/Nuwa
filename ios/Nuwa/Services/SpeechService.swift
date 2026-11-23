@@ -249,7 +249,16 @@ final class SpeechService: NSObject, ObservableObject, AVSpeechSynthesizerDelega
             }
         }
 
-        let micGranted = await AVAudioApplication.requestRecordPermission()
+        let micGranted: Bool
+        if #available(iOS 17.0, *) {
+            micGranted = await AVAudioApplication.requestRecordPermission()
+        } else {
+            micGranted = await withCheckedContinuation { continuation in
+                AVAudioSession.sharedInstance().requestRecordPermission { allowed in
+                    continuation.resume(returning: allowed)
+                }
+            }
+        }
         guard micGranted else {
             errorMessage = "请在系统设置中开启麦克风权限。"
             return

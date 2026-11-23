@@ -1409,9 +1409,16 @@ struct SettingsView: View {
                 .onTapGesture { showMigrationChooser = false }
                 .accessibilityHidden(true)
 
-            ViewThatFits(in: .vertical) {
-                content.fixedSize(horizontal: false, vertical: true)
-                ScrollView { content }
+            Group {
+                if #available(iOS 16.0, *) {
+                    ViewThatFits(in: .vertical) {
+                        content.fixedSize(horizontal: false, vertical: true)
+                        ScrollView { content }
+                    }
+                } else {
+                    ScrollView { content }
+                        .frame(maxHeight: 420)
+                }
             }
             .frame(maxWidth: 380)
             .background(cardBg, in: RoundedRectangle(cornerRadius: 24))

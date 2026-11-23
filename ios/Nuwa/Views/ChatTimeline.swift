@@ -133,7 +133,9 @@ private struct TimelineCollection<Row: View>: UIViewRepresentable {
         view.backgroundColor = .clear
         view.alwaysBounceVertical = true
         view.keyboardDismissMode = .interactive
-        view.selfSizingInvalidation = .enabled
+        if #available(iOS 16.0, *) {
+            view.selfSizingInvalidation = .enabled
+        }
         view.allowsSelection = false
         view.usesSystemSafeAreaBars = usesSystemSafeAreaBars
 
