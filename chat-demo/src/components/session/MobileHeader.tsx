@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import { useTranslate } from '../../i18n/index.js'
 import { newChat } from '../../services/chat/store.js'
 import { setTtsMuted, useSettings } from '../../services/settings.js'
@@ -16,9 +17,11 @@ import styles from './MobileHeader.module.css'
 export const MobileHeader = ({
   title,
   onTitleTap,
+  statusSlot,
 }: {
   title?: string
   onTitleTap?: () => void
+  statusSlot?: ReactNode
 }) => {
   const t = useTranslate()
   const reading = useReadAloud((state) => state.status !== 'idle')
@@ -54,6 +57,7 @@ export const MobileHeader = ({
         <div className={styles.spacer} />
       )}
       <div className={styles.capsule}>
+        {statusSlot}
         <button
           type="button"
           className={styles.capsuleAction}

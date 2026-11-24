@@ -5,7 +5,7 @@ import { isLowPerfDevice } from '../../app/devicePerf.js'
 import { IconRefreshOutline16, IconWarningOutline16 } from '../base/icons.js'
 import { describeReply } from '../../services/chat/describe.js'
 import { canContinueReply } from '../../services/chat/reply.js'
-import { continueReply, regenerateReply } from '../../services/chat/store.js'
+import { continueReply, regenerateReply, useChatStore } from '../../services/chat/store.js'
 import { prewarmExternalUrls } from '../../services/externalLink.js'
 import { stopReadAloud } from '../../services/speech/readAloud.js'
 import type { AssistantMessage as AssistantMessageType } from '../../services/chat/types.js'
@@ -57,7 +57,12 @@ export const AssistantMessage = memo(function AssistantMessage({
     .filter(Boolean)
     .join('\n\n')
   const copyText = responseText || notice?.text
-  const waiting = streaming && view.steps.length === 0 && !view.answer && !message.thinking
+  const compactProgress = useChatStore((state) =>
+    streaming ? state.compacting[sessionId] : undefined
+  )
+  const compactingBeforeReply = Boolean(compactProgress) && !answer
+  const waiting =
+    streaming && !compactingBeforeReply && view.steps.length === 0 && !view.answer && !message.thinking
 
   useEffect(() => {
     if (streaming || isLowPerfDevice()) {
@@ -72,6 +77,16 @@ export const AssistantMessage = memo(function AssistantMessage({
 
   return (
     <div className={styles.message}>
+      {message.recalledMemory && message.recalledMemory.roundNumbers.length > 0 ? (
+        <div
+          className={styles.recalledBadge}
+          title={message.recalledMemory.spanTitles.join(' · ')}
+        >
+          {t('recalledMemoryBadge', {
+            rounds: message.recalledMemory.roundNumbers.join('、'),
+          })}
+        </div>
+      ) : null}
       {refused ? null : (
         <ReplyArea
           message={message}
@@ -89,6 +104,19 @@ export const AssistantMessage = memo(function AssistantMessage({
           disableLink={false}
           sources={view.sources}
         />
+      ) : null}
+      {compactingBeforeReply && compactProgress ? (
+        <div className={styles.compactingStatus}>
+          <span className={styles.compactingSpinner} aria-hidden />
+          <span>
+            {compactProgress.total > 1
+              ? t('replyCompactingContextProgress', {
+                  done: compactProgress.done,
+                  total: compactProgress.total,
+                })
+              : t('replyCompactingContext')}
+          </span>
+        </div>
       ) : null}
       {waiting ? (
         <div className={styles.waiting}>

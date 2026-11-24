@@ -1,5 +1,5 @@
 import clsx from 'clsx'
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { isLowPerfDevice } from '../../app/devicePerf.js'
 import { useIsMobile } from '../../app/viewport.js'
 import {
@@ -7,13 +7,15 @@ import {
   getVisibleMessages,
   type MessageVersions,
 } from '../../services/chat/branches.js'
+import { resolveActiveCompactions } from '../../services/chat/compaction.js'
+import { getContextRounds } from '../../services/chat/reply.js'
 import { selectMessageVersion } from '../../services/chat/store.js'
-import type { Session } from '../../services/chat/types.js'
+import type { CompactionSpan, Message, Session } from '../../services/chat/types.js'
 import { closeSearchPanel } from '../search/searchPanelState.js'
 import { AssistantMessage } from './AssistantMessage.js'
+import { CompactionCard } from './CompactionCard.js'
 import { ScrollToBottomContext } from './scrollContext.js'
 import { UserMessage } from './UserMessage.js'
-import type { Message } from '../../services/chat/types.js'
 
 /**
  * 会话共用可重试的附件上传失败入口，覆盖当前提问与历史消息中的附件。
@@ -324,6 +326,20 @@ export const MessageList = ({
 
   const lastIndex = messages.length - 1
   const uploadRetryId = getUploadRetryId(messages, streaming)
+  const compactionByEndId = useMemo(() => {
+    if (!session.compactions?.length) {
+      return null
+    }
+    const active = resolveActiveCompactions(getContextRounds(messages), session.compactions)
+    if (active.length === 0) {
+      return null
+    }
+    const map = new Map<string, CompactionSpan>()
+    for (const item of active) {
+      map.set(item.span.endMessageId, item.span)
+    }
+    return map
+  }, [messages, session.compactions])
   return (
     <ScrollToBottomContext.Provider value={scrollToBottom}>
       <div ref={isMobile ? undefined : scrollRef} className={styles.container}>
@@ -342,29 +358,35 @@ export const MessageList = ({
             ) : null}
             {visibleMessages.map((message, offset) => {
               const index = startIndex + offset
-              return message.role === 'user' ? (
-                <UserMessage
-                  key={message.id}
-                  sessionId={session.id}
-                  message={message}
-                  retryUploadId={uploadRetryId}
-                  isFirst={index === 0}
-                  isLast={index === lastIndex || index === lastIndex - 1}
-                  busy={streaming}
-                  versions={versions.get(message.id) ?? EMPTY_VERSIONS}
-                  onSelectVersion={selectVersion}
-                />
-              ) : (
-                <AssistantMessage
-                  key={message.id}
-                  sessionId={session.id}
-                  message={message}
-                  isLast={index === lastIndex}
-                  streaming={streaming && index === lastIndex}
-                  busy={streaming}
-                  versions={versions.get(message.id) ?? EMPTY_VERSIONS}
-                  onSelectVersion={selectVersion}
-                />
+              if (message.role === 'user') {
+                return (
+                  <UserMessage
+                    key={message.id}
+                    sessionId={session.id}
+                    message={message}
+                    retryUploadId={uploadRetryId}
+                    isFirst={index === 0}
+                    isLast={index === lastIndex || index === lastIndex - 1}
+                    busy={streaming}
+                    versions={versions.get(message.id) ?? EMPTY_VERSIONS}
+                    onSelectVersion={selectVersion}
+                  />
+                )
+              }
+              const compaction = compactionByEndId?.get(message.id)
+              return (
+                <Fragment key={message.id}>
+                  <AssistantMessage
+                    sessionId={session.id}
+                    message={message}
+                    isLast={index === lastIndex}
+                    streaming={streaming && index === lastIndex}
+                    busy={streaming}
+                    versions={versions.get(message.id) ?? EMPTY_VERSIONS}
+                    onSelectVersion={selectVersion}
+                  />
+                  {compaction ? <CompactionCard sessionId={session.id} span={compaction} /> : null}
+                </Fragment>
               )
             })}
             {hiddenBelowCount > 0 ? (

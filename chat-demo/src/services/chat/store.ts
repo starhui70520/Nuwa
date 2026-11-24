@@ -20,7 +20,13 @@ import {
   uploadAttachment,
   useUploads,
 } from '../attachments.js'
-import { getActiveSecret, isUsingDeepSeekAccount, useSettings } from '../settings.js'
+import { recordAppLog } from '../errorLog.js'
+import {
+  getActiveSecret,
+  hasActiveCredential,
+  isUsingDeepSeekAccount,
+  useSettings,
+} from '../settings.js'
 import { appendBranch, getVisibleMessages, normalizeSession, selectVersion } from './branches.js'
 import * as db from './db.js'
 import {
@@ -38,10 +44,24 @@ import {
   getReplyText,
   settleReply,
   toRequestMessages,
+  type RequestHistoryItem,
 } from './reply.js'
+import {
+  estimateTextTokens,
+  generateCompactionSpan,
+  projectContextItems,
+  recallRelevantHistory,
+  removeCompactionSpan,
+  selectBatchCompactionTargets,
+  selectCompactionTarget,
+  toCompactionMessagePair,
+  upsertCompactionSpan,
+} from './compaction.js'
 import {
   toSessionSummary,
   type AssistantMessage,
+  type CompactionSource,
+  type CompactionSpan,
   type FileAttachment,
   type Message,
   type Session,
@@ -313,6 +333,8 @@ type ChatState = {
   activeId: string | null
   /** 正在生成回复的会话 */
   streaming: Record<string, AbortController>
+  /** 正在后台整理记忆的会话进度 */
+  compacting: Record<string, { done: number; total: number }>
 }
 
 export const useChatStore = create<ChatState>(() => ({
@@ -326,6 +348,7 @@ export const useChatStore = create<ChatState>(() => ({
   sessionSaveErrors: {},
   activeId: null,
   streaming: {},
+  compacting: {},
 }))
 
 export const setImportProgress = (importProgress: ImportProgress | null) => {
@@ -1334,9 +1357,10 @@ const buildOpenAIRequestMessages = async (
   sessionId: string,
   request: Request,
   signal: AbortSignal,
-  imageCap: number
+  imageCap: number,
+  compactions?: CompactionSpan[]
 ): Promise<MessageParam[]> => {
-  const rounds = getContextRounds(request.history)
+  const projected = projectContextItems(request.history, compactions)
   let remaining = Math.min(MAX_OPENAI_INLINE_IMAGES, Math.max(0, imageCap))
   const questionBlocks: InlineImageBlockParam[] = []
   for (const file of request.question.files) {
@@ -1351,9 +1375,13 @@ const buildOpenAIRequestMessages = async (
     }
   }
 
-  const historyBlocksByRound = new Map<number, InlineImageBlockParam[]>()
-  for (let i = rounds.length - 1; i >= 0 && remaining > 0; i--) {
-    const [user] = rounds[i]
+  const historyBlocksByItem = new Map<number, InlineImageBlockParam[]>()
+  for (let i = projected.length - 1; i >= 0 && remaining > 0; i--) {
+    const item = projected[i]
+    if (item.type !== 'round') {
+      continue
+    }
+    const { user } = item
     if (!user.files.some((file) => file.isImage)) {
       continue
     }
@@ -1371,14 +1399,20 @@ const buildOpenAIRequestMessages = async (
       }
     }
     if (collected.length > 0) {
-      historyBlocksByRound.set(i, collected.reverse())
+      historyBlocksByItem.set(i, collected.reverse())
     }
   }
 
   const messages: MessageParam[] = []
-  for (let i = 0; i < rounds.length; i++) {
-    const [user, reply] = rounds[i]
-    const imageBlocks = historyBlocksByRound.get(i) ?? []
+  for (let i = 0; i < projected.length; i++) {
+    const item = projected[i]
+    if (item.type === 'compaction') {
+      const [userMem, assistantAck] = toCompactionMessagePair(item.span)
+      messages.push(userMem, assistantAck)
+      continue
+    }
+    const { user, reply } = item
+    const imageBlocks = historyBlocksByItem.get(i) ?? []
     if (!user.content && imageBlocks.length === 0) {
       continue
     }
@@ -1669,16 +1703,67 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
           updateReply(sessionId, reply)
           persist(sessionId)
         }
+        const initialCompactions = get().sessionCache[sessionId]?.compactions
+        // 发送前检查：若上下文达到自动整理阈值，先在回复气泡内展示「正在整理上下文」，
+        // 批量压缩完全部超限历史后再携带精简上下文正式生成回复（支持随时点击停止中止）。
+        if (
+          firstPrepared &&
+          !prepared.prefix &&
+          selectCompactionTarget(prepared.history, initialCompactions, 'auto') !== null
+        ) {
+          await compactSession(sessionId, 'auto', controller.signal, prepared.history)
+          assertNotAborted(controller.signal)
+        }
+        const sessionCompactions = get().sessionCache[sessionId]?.compactions
+        // V1 纯本地 0 延迟记忆回溯：仅对当前请求在 Zone 4 临时注入，不修改本地原消息，不破坏 Prefix Cache
+        const recalled = prepared.prefix
+          ? null
+          : recallRelevantHistory(prepared.question.content, prepared.history, sessionCompactions)
+        if (firstPrepared && recalled) {
+          reply = {
+            ...reply,
+            recalledMemory: {
+              roundNumbers: recalled.roundNumbers,
+              spanTitles: recalled.spanTitles,
+            },
+          }
+          updateReply(sessionId, reply)
+          persist(sessionId)
+        }
+        const requestQuestion: UserMessage = recalled
+          ? {
+              ...prepared.question,
+              content: `${recalled.blockText}\n\n${prepared.question.content}`,
+            }
+          : prepared.question
+        const requestForSend: Request = recalled
+          ? { ...prepared, question: requestQuestion }
+          : prepared
+        const projectedHistory: RequestHistoryItem[] = projectContextItems(
+          prepared.history,
+          sessionCompactions
+        ).map((item) =>
+          item.type === 'compaction'
+            ? { type: 'compaction', pair: toCompactionMessagePair(item.span) }
+            : item
+        )
         const messages = isOpenAIProtocolActive()
-          ? await buildOpenAIRequestMessages(sessionId, prepared, controller.signal, imageCap)
+          ? await buildOpenAIRequestMessages(
+              sessionId,
+              requestForSend,
+              controller.signal,
+              imageCap,
+              sessionCompactions
+            )
           : limitRequestImages(
               stripRejectedImages(
                 toRequestMessages(
                   prepared.history,
-                  prepared.question,
+                  requestQuestion,
                   prepared.prefix,
                   initial.thinking ?? false,
-                  latestReminder
+                  latestReminder,
+                  projectedHistory
                 ),
                 rejectedHistoryImageIds
               ),
@@ -1845,4 +1930,145 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
     persist(sessionId)
     refreshBalanceAfterReply()
   }
+}
+
+const compactionControllers = new Map<string, AbortController>()
+const BATCH_COMPACT_CONCURRENCY = 3
+
+/** 中止指定会话正在进行的批量记忆整理（已完成的块保留落盘） */
+export const stopCompaction = (sessionId: string): void => {
+  compactionControllers.get(sessionId)?.abort()
+}
+
+/**
+ * 触发非破坏性记忆整理：
+ * - auto / manual 均支持超长历史自动分块 3 路并发追赶（每块完成立即落盘并更新进度）；
+ * - 传入 externalSignal 时与当前发送请求的停止按钮联动，停止回复会同步中止整理。
+ */
+export const compactSession = async (
+  sessionId: string,
+  source: CompactionSource = 'manual',
+  externalSignal?: AbortSignal,
+  historyOverride?: Message[]
+): Promise<boolean> => {
+  if (compactionControllers.has(sessionId) || get().importingHistory || !hasActiveCredential()) {
+    return false
+  }
+  const session = get().sessionCache[sessionId]
+  if (!session) {
+    return false
+  }
+  const visible = historyOverride ?? getVisibleMessages(session)
+  if (source === 'auto' && selectCompactionTarget(visible, session.compactions, 'auto') === null) {
+    return false
+  }
+  const targets = selectBatchCompactionTargets(visible, session.compactions)
+  if (targets.length === 0) {
+    return false
+  }
+
+  const controller = new AbortController()
+  const onExternalAbort = () => controller.abort()
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      return false
+    }
+    externalSignal.addEventListener('abort', onExternalAbort, { once: true })
+  }
+  compactionControllers.set(sessionId, controller)
+  let completed = 0
+  let succeeded = 0
+  const total = targets.length
+  const updateProgress = () => {
+    set((state) => ({
+      compacting: { ...state.compacting, [sessionId]: { done: completed, total } },
+    }))
+  }
+  updateProgress()
+
+  try {
+    let nextIndex = 0
+    const workerCount = Math.min(BATCH_COMPACT_CONCURRENCY, total)
+    const runWorker = async () => {
+      while (nextIndex < total && !controller.signal.aborted) {
+        const currentIdx = nextIndex++
+        const target = targets[currentIdx]
+        try {
+          const span = await generateCompactionSpan(target, source, controller.signal, MODEL)
+          if (controller.signal.aborted || !get().sessionCache[sessionId] || get().importingHistory) {
+            return
+          }
+          updateSession(sessionId, (current) => upsertCompactionSpan(current, span))
+          persist(sessionId)
+          succeeded += 1
+        } catch (error) {
+          if (!controller.signal.aborted) {
+            recordAppLog(
+              'error',
+              'chat.compaction',
+              `compaction (${source}) chunk ${currentIdx + 1}/${total} failed for session ${sessionId}`,
+              error instanceof Error ? error.message : String(error)
+            )
+          }
+        } finally {
+          completed += 1
+          if (!controller.signal.aborted) {
+            updateProgress()
+          }
+        }
+      }
+    }
+
+    await Promise.all(Array.from({ length: workerCount }, () => runWorker()))
+    return succeeded > 0
+  } finally {
+    externalSignal?.removeEventListener('abort', onExternalAbort)
+    compactionControllers.delete(sessionId)
+    set((state) => ({
+      compacting: Object.fromEntries(
+        Object.entries(state.compacting).filter(([id]) => id !== sessionId)
+      ),
+    }))
+  }
+}
+
+/** 用户手动编辑某条剧情记忆摘要内容，自动标记 editedByUser 防止后续覆盖 */
+export const updateCompactionSummary = (
+  sessionId: string,
+  spanId: string,
+  summary: string,
+  title?: string
+): void => {
+  const cleaned = summary.trim()
+  if (!cleaned) {
+    return
+  }
+  updateSession(sessionId, (session) => {
+    const list = session.compactions
+    if (!list) {
+      return session
+    }
+    return {
+      ...session,
+      compactions: list.map((span) =>
+        span.id === spanId
+          ? {
+              ...span,
+              title: title?.trim() || span.title,
+              summary: cleaned,
+              summaryTokensEstimate: estimateTextTokens(cleaned),
+              editedByUser: true,
+              updatedAt: Date.now(),
+            }
+          : span
+      ),
+    }
+  })
+  persist(sessionId)
+}
+
+/** 撤销某条剧情记忆折叠（完全无损，原对话恢复进入请求上下文） */
+export const deleteCompactionSpan = (sessionId: string, spanId: string): void => {
+  updateSession(sessionId, (session) => removeCompactionSpan(session, spanId))
+  persist(sessionId)
 }

@@ -92,6 +92,11 @@ export type AssistantMessage = MessageBranch & {
   stopDetails?: StopDetails
   /** 最近一次请求的用量，续写后更新 */
   usage?: MessageUsage
+  /** 本轮请求自动回溯的历史原文轮次（仅用于 UI 微提示） */
+  recalledMemory?: {
+    roundNumbers: number[]
+    spanTitles: string[]
+  }
   error?: {
     /** upload：发送前补传附件失败，请求没有发出 */
     kind: ApiErrorKind | 'upload'
@@ -105,6 +110,36 @@ export type AssistantMessage = MessageBranch & {
 
 export type Message = UserMessage | AssistantMessage
 
+/** 上下文压缩触发来源 */
+export type CompactionSource = 'auto' | 'manual'
+
+/**
+ * 非破坏性剧情记忆压缩块（借鉴 DeepSeek Harness 的 surfaceOp 区间替换思想）：
+ * 本地消息树保持完整，仅在组装 API 请求时将 [startMessageId..endMessageId] 投影替换为该摘要。
+ */
+export type CompactionSpan = {
+  id: string
+  /** 覆盖区间的首条消息 ID（UserMessage） */
+  startMessageId: string
+  /** 覆盖区间的末条消息 ID（AssistantMessage） */
+  endMessageId: string
+  /** 折叠卡片标题，如「第 1–12 轮剧情记忆」 */
+  title: string
+  /** 写作/角色扮演结构化记忆正文，支持用户直接编辑 */
+  summary: string
+  /** 本段核心专有名词/物品/地点索引词，供纯本地 0 延迟回溯使用 */
+  keywords?: string[]
+  /** 是否经用户手动编辑（编辑后锁定内容） */
+  editedByUser?: boolean
+  source: CompactionSource
+  coveredRounds: number
+  originalTokensEstimate: number
+  summaryTokensEstimate: number
+  model?: string
+  createdAt: number
+  updatedAt: number
+}
+
 export type Session = {
   id: string
   title: string
@@ -112,6 +147,8 @@ export type Session = {
   updatedAt: number
   /** 包含所有分支的消息，按创建顺序存储。 */
   messages: Message[]
+  /** 非破坏性上下文压缩块列表；按分支路径锚定，不影响原消息展示与导出。 */
+  compactions?: CompactionSpan[]
   /** undefined 表示线性消息列表；null 表示空会话。 */
   rootMessageId?: string | null
   /** 置顶时间戳（毫秒）；缺省或 undefined 表示未置顶。 */

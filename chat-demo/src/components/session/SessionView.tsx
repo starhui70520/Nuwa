@@ -5,6 +5,7 @@ import { useTranslate } from '../../i18n/index.js'
 import type { Session } from '../../services/chat/types.js'
 import { ChatInput } from '../chatInput/ChatInput.js'
 import { MessageList } from '../messages/MessageList.js'
+import { ContextStatus } from './ContextStatus.js'
 import { MobileHeader } from './MobileHeader.js'
 import styles from './SessionView.module.css'
 
@@ -37,10 +38,12 @@ export const SessionView = ({
     lastTitleTapRef.current = now
   }, [])
 
+  const contextStatusNode = <ContextStatus session={session} streaming={streaming} />
+
   return (
     <div className={styles.view}>
       {isMobile ? (
-        <MobileHeader title={title} onTitleTap={onTitleTap} />
+        <MobileHeader title={title} onTitleTap={onTitleTap} statusSlot={contextStatusNode} />
       ) : (
         <div className={styles.header}>
           <div
@@ -49,6 +52,7 @@ export const SessionView = ({
           >
             {title}
           </div>
+          <div style={{ marginLeft: 'auto' }}>{contextStatusNode}</div>
         </div>
       )}
       <MessageList

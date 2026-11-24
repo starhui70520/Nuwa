@@ -296,8 +296,13 @@ export const getContextRounds = (history: Message[]): [UserMessage, AssistantMes
   return rounds
 }
 
+export type RequestHistoryItem =
+  | { type: 'compaction'; pair: [MessageParam, MessageParam] }
+  | { type: 'round'; user: UserMessage; reply: AssistantMessage }
+
 /**
  * 把会话转成请求的 messages：只保留「提问 + 有回答的回复」成对的轮次，最后接上本轮提问。
+ * 若传入投影后的历史（含剧情记忆压缩块），则按投影序列组装，不改动本地原消息。
  * 失败或没有回答的轮次不进上下文。续写时末尾再带上本轮 assistant。
  */
 export const toRequestMessages = (
@@ -305,7 +310,8 @@ export const toRequestMessages = (
   question: UserMessage,
   prefix?: AssistantMessage,
   thinking = prefix?.thinking ?? false,
-  latestReminder?: string
+  latestReminder?: string,
+  projectedHistory?: RequestHistoryItem[]
 ): MessageParam[] => {
   const messages: MessageParam[] = []
   let previousReminder: string | undefined
@@ -316,7 +322,15 @@ export const toRequestMessages = (
       previousReminder = reminder
     }
   }
-  for (const [user, reply] of getContextRounds(history)) {
+  const items: RequestHistoryItem[] =
+    projectedHistory ??
+    getContextRounds(history).map(([user, reply]) => ({ type: 'round', user, reply }))
+  for (const item of items) {
+    if (item.type === 'compaction') {
+      messages.push(item.pair[0], item.pair[1])
+      continue
+    }
+    const { user, reply } = item
     // 历史提问没有文字、附件也都没有 serverId 时，提问为空，连同回答一起省略。
     if (!user.content && toFileBlocks(user.files).length === 0) {
       continue

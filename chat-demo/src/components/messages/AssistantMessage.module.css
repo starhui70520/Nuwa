@@ -147,3 +147,47 @@
     transform: translateY(10px);
   }
 }
+
+.recalledBadge {
+  display: inline-flex;
+  align-items: center;
+  margin-bottom: 8px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 1.5;
+  width: fit-content;
+}
+
+.compactingStatus {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-2);
+  border: 1px solid var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 13px;
+  line-height: 1.4;
+  width: fit-content;
+}
+
+.compactingSpinner {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 2px solid var(--dsw-alias-border-l2);
+  border-top-color: var(--dsw-alias-brand-primary);
+  animation: replyCompactSpin 0.85s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes replyCompactSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}

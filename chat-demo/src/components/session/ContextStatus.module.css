@@ -1,0 +1,338 @@
+/* 移动端直接嵌在右上角 capsule 内，复用 capsuleAction 的无边框透明圆形点击热区 */
+.trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+  outline: none;
+  transition: background-color var(--ds-transition-duration) var(--ds-ease-in-out);
+}
+
+.trigger:hover,
+.trigger:active {
+  background-color: var(--dsw-alias-interactive-bg-hover);
+}
+
+@media not all and (min-width: 768px) {
+  .trigger {
+    width: 38px;
+    height: 34px;
+  }
+}
+
+@media (max-width: 340px) {
+  .trigger {
+    width: 28px;
+    height: 26px;
+  }
+}
+
+.ring {
+  flex-shrink: 0;
+  transform: rotate(-90deg);
+}
+
+.ringSpinning {
+  animation: ctxSpin 1.1s linear infinite;
+}
+
+@keyframes ctxSpin {
+  from {
+    transform: rotate(-90deg);
+  }
+  to {
+    transform: rotate(270deg);
+  }
+}
+
+.ringTrack {
+  stroke: var(--dsw-alias-border-l2);
+}
+
+.ringFill {
+  transition:
+    stroke-dashoffset 0.25s var(--ds-ease-in-out),
+    stroke 0.25s var(--ds-ease-in-out);
+}
+
+.levelGreen {
+  stroke: #22c55e;
+}
+
+.levelYellow {
+  stroke: #eab308;
+}
+
+.levelOrange {
+  stroke: #f97316;
+}
+
+.levelRed {
+  stroke: #ef4444;
+}
+
+/* 弹窗主体：克制留白、弱化边框、清晰层级 */
+.modal {
+  width: min(460px, calc(100vw - 32px));
+  max-height: min(78vh, 620px);
+}
+
+.modalMain {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding-top: 4px;
+  overflow-y: auto;
+}
+
+.overview {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tokenLine {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-primary);
+}
+
+.barTrack {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--dsw-alias-border-l1);
+  overflow: hidden;
+}
+
+.barFill {
+  height: 100%;
+  border-radius: 999px;
+  transition:
+    width 0.25s var(--ds-ease-in-out),
+    background-color 0.25s var(--ds-ease-in-out);
+}
+
+.barGreen {
+  background: #22c55e;
+}
+
+.barYellow {
+  background: #eab308;
+}
+
+.barOrange {
+  background: #f97316;
+}
+
+.barRed {
+  background: #ef4444;
+}
+
+.subMeta {
+  font-size: 12px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.divider {
+  height: 1px;
+  background: var(--dsw-alias-border-l1);
+}
+
+.sectionTitle {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.emptyState {
+  padding: 24px 12px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 13px;
+  line-height: 1.65;
+  text-align: center;
+}
+
+.memoryList {
+  display: flex;
+  flex-direction: column;
+}
+
+.memoryItem {
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+}
+
+.memoryItem:last-child {
+  border-bottom: none;
+}
+
+.memoryHeader {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 4px;
+  border: none;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font-size: 13.5px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 8px;
+  transition: background-color var(--ds-transition-duration) var(--ds-ease-in-out);
+}
+
+.memoryHeader:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.memoryTitleWrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.memoryTitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editedDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--dsw-alias-brand-primary);
+  flex-shrink: 0;
+}
+
+.memoryMeta {
+  font-size: 12px;
+  color: var(--dsw-alias-label-tertiary);
+  white-space: nowrap;
+}
+
+.memoryBody {
+  padding: 4px 4px 14px;
+}
+
+.keywordsRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.keywordChip {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+}
+
+.summaryText {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--dsw-alias-label-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--dsw-font-family);
+}
+
+.editor {
+  width: 100%;
+  min-height: 150px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-specific-input-major);
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  line-height: 1.65;
+  font-family: var(--dsw-font-family);
+  resize: vertical;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.editor:focus {
+  border-color: var(--dsw-alias-brand-primary);
+}
+
+.itemActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.btn {
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: none;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background-color var(--ds-transition-duration) var(--ds-ease-in-out),
+    color var(--ds-transition-duration) var(--ds-ease-in-out);
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btnPrimary {
+  background: var(--dsw-alias-brand-primary);
+  color: #fff;
+}
+
+.btnPrimary:hover:not(:disabled) {
+  background: var(--dsw-alias-button-primary-hover);
+  color: #fff;
+}
+
+.btnGhostDanger {
+  background: transparent;
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.btnGhostDanger:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover-danger);
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.modalFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+}
+
+.footerHint {
+  font-size: 12px;
+  color: var(--dsw-alias-label-tertiary);
+}
