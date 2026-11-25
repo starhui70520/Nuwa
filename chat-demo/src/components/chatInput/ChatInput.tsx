@@ -26,6 +26,7 @@ import {
   useDrafts,
 } from '../../services/chat/drafts.js'
 import { stopReadAloud } from '../../services/speech/readAloud.js'
+import { registerModalBackHandler } from '../base/Modal.js'
 import { Tooltip } from '../base/Tooltip.js'
 import { ensureApiKey } from '../settings/settingsDialogState.js'
 import { DragMask, useFileDrop } from './DragMask.js'
@@ -77,9 +78,11 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
   const [attachSheetOpen, setAttachSheetOpen] = useState(false)
   const [recentPhotos, setRecentPhotos] = useState<RecentPhotoItem[]>([])
   const [recentLoading, setRecentLoading] = useState(false)
-  const [pickedPhotoIds, setPickedPhotoIds] = useState<string[]>([])
+  /** 最近相册照片 ID → 已添加到草稿的附件 ID，用于支持再次点击取消选中与双向同步 */
+  const [pickedPhotoMap, setPickedPhotoMap] = useState<Record<string, string>>({})
   const [pickingPhotoIds, setPickingPhotoIds] = useState<string[]>([])
   const search = useSettings((state) => state.search)
+  const composerRootRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const galleryInputRef = useRef<HTMLInputElement>(null)
   const cameraInputRef = useRef<HTMLInputElement>(null)
@@ -88,10 +91,34 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
 
   const isNativeMobile = isNativeAndroid() || isNativeIos()
 
+  // 切换会话时重置最近相册的勾选映射
+  useEffect(() => {
+    setPickedPhotoMap({})
+    setPickingPhotoIds([])
+  }, [sessionId])
+
+  // 点击底栏与输入框外的空白区域，或按系统返回键时，收起移动端附件面板
+  useEffect(() => {
+    if (!isMobile || !attachSheetOpen) {
+      return
+    }
+    const onPointerDown = (event: PointerEvent) => {
+      const root = composerRootRef.current
+      if (root && event.target instanceof Node && !root.contains(event.target)) {
+        setAttachSheetOpen(false)
+      }
+    }
+    document.addEventListener('pointerdown', onPointerDown, true)
+    const unregisterBack = registerModalBackHandler(() => setAttachSheetOpen(false))
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown, true)
+      unregisterBack()
+    }
+  }, [isMobile, attachSheetOpen])
+
   // 打开移动端附件面板时加载原生最近相册缩略图
   useEffect(() => {
     if (!attachSheetOpen) {
-      setPickedPhotoIds([])
       setPickingPhotoIds([])
       return
     }
@@ -401,7 +428,7 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
   }
 
   return (
-    <div className={styles.composerRoot}>
+    <div ref={composerRootRef} className={styles.composerRoot}>
       <div
         className={clsx(styles.wrapper, sessionId === null ? styles.home : styles.session)}
         onClick={(event) => {
@@ -583,7 +610,10 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
                     <div key={idx} className={clsx(styles.recentPhotoItem, styles.recentPhotoSkeleton)} />
                   ))
                 : recentPhotos.map((photo) => {
-                    const picked = pickedPhotoIds.includes(photo.id)
+                    const mappedAttachmentId = pickedPhotoMap[photo.id]
+                    const picked = Boolean(
+                      mappedAttachmentId && attachments.some((item) => item.id === mappedAttachmentId)
+                    )
                     const picking = pickingPhotoIds.includes(photo.id)
                     return (
                       <button
@@ -594,17 +624,35 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
                         aria-pressed={picked}
                         disabled={picking}
                         onClick={() => {
-                          if (picked || picking || !ensureApiKey()) {
+                          if (picking) {
+                            return
+                          }
+                          if (picked && mappedAttachmentId) {
+                            removeFile(mappedAttachmentId)
+                            setPickedPhotoMap((prev) =>
+                              Object.fromEntries(
+                                Object.entries(prev).filter(([key]) => key !== photo.id)
+                              )
+                            )
+                            return
+                          }
+                          if (!ensureApiKey()) {
                             return
                           }
                           setPickingPhotoIds((prev) => [...prev, photo.id])
                           void DeepSeekMigration.readRecentPhoto({ id: photo.id })
                             .then((res) => {
                               const file = base64ToFile(res.data, res.name, res.mimeType)
-                              acceptFiles([file])
-                              setPickedPhotoIds((prev) =>
-                                prev.includes(photo.id) ? prev : [...prev, photo.id]
+                              const beforeIds = new Set(
+                                getDraft(sessionId).attachments.map((item) => item.id)
                               )
+                              acceptFiles([file])
+                              const added = getDraft(sessionId).attachments.find(
+                                (item) => !beforeIds.has(item.id)
+                              )
+                              if (added) {
+                                setPickedPhotoMap((prev) => ({ ...prev, [photo.id]: added.id }))
+                              }
                             })
                             .catch(() => {
                               // 读取失败时静默恢复可点击状态

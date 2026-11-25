@@ -513,6 +513,7 @@ public class DeepSeekMigrationPlugin: CAPPlugin, CAPBridgedPlugin {
         DispatchQueue.main.async {
             let name = (call.getString("name") ?? "").trimmingCharacters(in: .whitespaces)
             let base64 = call.getString("data") ?? ""
+            let mode = call.getString("mode") ?? "save"
             guard !name.isEmpty, let data = Data(base64Encoded: base64) else {
                 call.reject("INVALID_DATA")
                 return
@@ -532,9 +533,21 @@ public class DeepSeekMigrationPlugin: CAPPlugin, CAPBridgedPlugin {
             while let presented = presenter.presentedViewController {
                 presenter = presented
             }
-            let picker = UIDocumentPickerViewController(forExporting: [url])
-            presenter.present(picker, animated: true) {
-                call.resolve(["presented": true])
+            if mode == "share" {
+                let activity = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+                if let popover = activity.popoverPresentationController {
+                    popover.sourceView = presenter.view
+                    popover.sourceRect = CGRect(x: presenter.view.bounds.midX, y: presenter.view.bounds.midY, width: 1, height: 1)
+                    popover.permittedArrowDirections = []
+                }
+                presenter.present(activity, animated: true) {
+                    call.resolve(["presented": true])
+                }
+            } else {
+                let picker = UIDocumentPickerViewController(forExporting: [url])
+                presenter.present(picker, animated: true) {
+                    call.resolve(["presented": true])
+                }
             }
         }
     }

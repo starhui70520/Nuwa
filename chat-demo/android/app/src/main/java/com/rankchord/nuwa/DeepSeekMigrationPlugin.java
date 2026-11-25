@@ -1470,6 +1470,7 @@ public class DeepSeekMigrationPlugin extends Plugin {
     public void saveFileToDocuments(PluginCall call) {
         String rawName = call.getString("name", "");
         String base64 = call.getString("data", "");
+        final String mode = call.getString("mode", "save");
         if (rawName == null || rawName.trim().isEmpty() || base64 == null || base64.isEmpty()) {
             call.reject("INVALID_DATA");
             return;
@@ -1491,8 +1492,8 @@ public class DeepSeekMigrationPlugin extends Plugin {
                     return;
                 }
 
-                // Android 10+ (API 29+): 直接通过 MediaStore 写入系统公共「下载/Nuwa」目录，无需存储权限
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                // Android 10+ (API 29+) 且为「保存到本机」模式：直接通过 MediaStore 写入系统公共「下载/Nuwa」目录，无需存储权限
+                if (!"share".equals(mode) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     try {
                         ContentResolver resolver = getContext().getContentResolver();
                         ContentValues values = new ContentValues();

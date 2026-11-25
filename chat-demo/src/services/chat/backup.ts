@@ -1,5 +1,5 @@
 import { formatDate } from '../../utils/format.js'
-import { DeepSeekMigration, isNativeIos } from '../nativeBridge.js'
+import { DeepSeekMigration, isNativeAndroid, isNativeIos } from '../nativeBridge.js'
 import { useSettings } from '../settings.js'
 import * as db from './db.js'
 import { mergeHistory, replaceHistory, setImportProgress, useChatStore } from './store.js'
@@ -17,6 +17,69 @@ const enqueueBackup = <T>(run: () => Promise<T>): Promise<T> => {
 }
 
 const backupFileName = (date: Date) => `deepseek_data-${formatDate(date)}.zip`
+
+const sanitizeExportTitle = (title: string): string => {
+  const cleaned = title
+    .replace(/[\\/:*?"<>|\r\n\t]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, '_')
+    .slice(0, 32)
+  return cleaned || 'session'
+}
+
+/** 导出单个会话及其图片为标准 ZIP 归档，可再次导入到任意端。 */
+export const exportSession = (sessionId: string): Promise<{ name: string; blob: Blob }> =>
+  enqueueBackup(async () => {
+    const { sessions, sessionCache } = useChatStore.getState()
+    const summary = sessions.find((s) => s.id === sessionId)
+    const loaded = Object.hasOwn(sessionCache, sessionId)
+      ? sessionCache[sessionId]
+      : await db.loadSession(sessionId)
+    if (!loaded) {
+      throw new Error(`History session not found during export: ${sessionId}`)
+    }
+    const merged: Session = summary ? { ...loaded, ...summary } : loaded
+    async function* readSingle(): AsyncGenerator<Session> {
+      yield merged
+    }
+    const { exportArchive } = await import('./history/exportArchive.js')
+    const now = new Date()
+    const blob = await exportArchive(readSingle())
+    const safeTitle = sanitizeExportTitle(merged.title)
+    return { name: `nuwa-${safeTitle}-${formatDate(now)}.zip`, blob }
+  })
+
+export type ExportDestination = 'share' | 'save'
+
+/** 跨端保存或分享导出的 ZIP 文件（Android 支持系统分享 / 写入 Download/Nuwa，iOS 支持系统分享 / 文件保存，Web 支持分享或下载）。 */
+export const saveExportArchive = async (
+  name: string,
+  blob: Blob,
+  mode: ExportDestination = 'save'
+): Promise<{ savedPath?: string }> => {
+  if (isNativeIos() || isNativeAndroid()) {
+    const res = await DeepSeekMigration.saveFileToDocuments({
+      name,
+      data: await blobToBase64(blob),
+      mode,
+    })
+    return { savedPath: res?.savedPath }
+  }
+  if (mode === 'share' && typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
+    const file = new File([blob], name, { type: 'application/zip' })
+    if (typeof navigator.canShare !== 'function' || navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: name })
+      return {}
+    }
+  }
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = name
+  link.click()
+  setTimeout(() => URL.revokeObjectURL(url), 10_000)
+  return {}
+}
 
 /** 导出为历史会话导出格式的 ZIP，可再次导入。 */
 export const exportHistory = (): Promise<{ name: string; blob: Blob }> =>

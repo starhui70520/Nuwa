@@ -21,6 +21,8 @@ import {
   exportHistory,
   importHistory,
   maybeAutoBackupToIcloud,
+  saveExportArchive,
+  type ExportDestination,
 } from '../../services/chat/backup.js'
 import {
   hasUsedOneClickMigration,
@@ -61,6 +63,7 @@ import {
 } from '../../services/nativeBridge.js'
 import { handleExternalAnchorClick, openExternalUrl } from '../../services/externalLink.js'
 import { Button } from '../base/Button.js'
+import { ExportActionModal } from '../base/ExportActionModal.js'
 import {
   IconChevronLeftOutline18,
   IconChevronRightOutline14,
@@ -1496,71 +1499,61 @@ const ImportHistory = ({
   )
 }
 
-const blobToBase64 = async (blob: Blob): Promise<string> => {
-  const buffer = await blob.arrayBuffer()
-  const bytes = new Uint8Array(buffer)
-  let binary = ''
-  const chunk = 0x8000
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunk))
-  }
-  return btoa(binary)
-}
-
-/** 将全部会话及图片导出为 ZIP 文件并下载 */
+/** 将全部会话及图片导出为 ZIP 文件，支持发送其他软件或保存到本机 */
 const ExportHistory = ({ disabled }: { disabled: boolean }) => {
   const t = useTranslate()
   const empty = useChatStore((state) => state.sessions.length === 0)
-  const [busy, setBusy] = useState(false)
+  const [modalOpen, setModalOpen] = useState(false)
+  const [exportMode, setExportMode] = useState<ExportDestination | null>(null)
   const [status, setStatus] = useState<Status>(null)
+  const busy = exportMode !== null
 
-  const onExport = async () => {
-    setBusy(true)
+  const onExport = async (mode: ExportDestination) => {
+    setExportMode(mode)
     setStatus(null)
     try {
       const { name, blob } = await exportHistory()
-      if (isNativeIos() || isNativeAndroid()) {
-        // iOS：系统文件面板（iCloud Drive / 本机）；Android：写入系统 Download/Nuwa 或拉起分享面板
-        const res = await DeepSeekMigration.saveFileToDocuments({
-          name,
-          data: await blobToBase64(blob),
-        })
-        if (res?.savedPath) {
-          setStatus({ key: 'historyExportSaved', params: { path: res.savedPath } })
-        }
-      } else {
-        const url = URL.createObjectURL(blob)
-        const link = document.createElement('a')
-        link.href = url
-        link.download = name
-        link.click()
-        setTimeout(() => URL.revokeObjectURL(url), 10_000)
+      const res = await saveExportArchive(name, blob, mode)
+      setModalOpen(false)
+      if (res.savedPath) {
+        setStatus({ key: 'historyExportSaved', params: { path: res.savedPath } })
       }
     } catch (error) {
       setStatus(errorStatus('historyExportFailed', error))
     } finally {
-      setBusy(false)
+      setExportMode(null)
     }
   }
 
   return (
-    <SettingCell
-      label={t('exportAllLabel')}
-      description={isNativeIos() ? t('historyExportDescriptionIos') : t('historyExportDescription')}
-      status={status}
-      action={
-        <Button
-          variant="outlined"
-          size="m"
-          className={styles.cellButton}
-          disabled={disabled || busy || empty}
-          onClick={() => void onExport()}
-        >
-          <IconDownloadOutline16 />
-          {isNativeIos() ? t('exportAllSaveToIcloud') : t('exportAllDownload')}
-        </Button>
-      }
-    />
+    <>
+      <SettingCell
+        label={t('exportAllLabel')}
+        description={isNativeIos() ? t('historyExportDescriptionIos') : t('historyExportDescription')}
+        status={status}
+        action={
+          <Button
+            variant="outlined"
+            size="m"
+            className={styles.cellButton}
+            disabled={disabled || busy || empty}
+            onClick={() => setModalOpen(true)}
+          >
+            <IconDownloadOutline16 />
+            {isNativeIos() ? t('exportAllSaveToIcloud') : t('exportAllDownload')}
+          </Button>
+        }
+      />
+      {modalOpen ? (
+        <ExportActionModal
+          title={t('exportAllLabel')}
+          busy={busy}
+          activeMode={exportMode}
+          onSelect={(mode) => void onExport(mode)}
+          onClose={() => setModalOpen(false)}
+        />
+      ) : null}
+    </>
   )
 }
 

@@ -3,16 +3,24 @@ import { memo, useRef, useState } from 'react'
 import { useTranslate } from '../../i18n/index.js'
 import {
   IconCheckMark12,
+  IconDownloadOutline16,
   IconEditOutline16,
   IconEllipsisOutline16,
   IconMultiSelectOutline16,
   IconPinOutline16,
   IconTrashOutline16,
 } from '../base/icons.js'
+import {
+  exportSession,
+  saveExportArchive,
+  type ExportDestination,
+} from '../../services/chat/backup.js'
 import { renameSession, selectSession, togglePinSession } from '../../services/chat/store.js'
 import type { SessionSummary } from '../../services/chat/types.js'
+import { ExportActionModal } from '../base/ExportActionModal.js'
 import { IconButton } from '../base/IconButton.js'
 import { Menu } from '../base/Menu.js'
+import { showToast } from '../base/toastState.js'
 import { closeMobileSider } from './mobileSiderState.js'
 import styles from './SessionItem.module.css'
 
@@ -35,10 +43,39 @@ export const SessionItem = memo(function SessionItem({
 }) {
   const t = useTranslate()
   const [editing, setEditing] = useState(false)
+  const [exportModalOpen, setExportModalOpen] = useState(false)
+  const [exportMode, setExportMode] = useState<ExportDestination | null>(null)
+  const exportingRef = useRef(false)
   const longPressTimerRef = useRef<number | null>(null)
   const longPressTriggeredRef = useRef(false)
   const touchStartRef = useRef<{ x: number; y: number } | null>(null)
   const displayTitle = session.title || t('untitledChat')
+
+  const handleExport = (mode: ExportDestination) => {
+    if (exportingRef.current) {
+      return
+    }
+    exportingRef.current = true
+    setExportMode(mode)
+    void (async () => {
+      try {
+        const { name, blob } = await exportSession(session.id)
+        const res = await saveExportArchive(name, blob, mode)
+        setExportModalOpen(false)
+        if (res.savedPath) {
+          showToast({ key: 'historyExportSaved', params: { path: res.savedPath } })
+        } else if (mode === 'save') {
+          showToast({ key: 'sessionExported' })
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        showToast({ key: 'historyExportFailed', params: { message }, type: 'error' })
+      } finally {
+        exportingRef.current = false
+        setExportMode(null)
+      }
+    })()
+  }
 
   const clearLongPress = () => {
     if (longPressTimerRef.current !== null) {
@@ -157,6 +194,12 @@ export const SessionItem = memo(function SessionItem({
                 onSelect: () => setEditing(true),
               },
               {
+                key: 'export',
+                label: t('sessionItemMenuExportOption'),
+                icon: <IconDownloadOutline16 />,
+                onSelect: () => setExportModalOpen(true),
+              },
+              {
                 key: 'delete',
                 label: t('delete'),
                 icon: <IconTrashOutline16 />,
@@ -170,6 +213,15 @@ export const SessionItem = memo(function SessionItem({
             )}
           </Menu>
         </div>
+      ) : null}
+      {exportModalOpen ? (
+        <ExportActionModal
+          title={t('sessionItemMenuExportOption')}
+          busy={exportMode !== null}
+          activeMode={exportMode}
+          onSelect={handleExport}
+          onClose={() => setExportModalOpen(false)}
+        />
       ) : null}
     </div>
   )

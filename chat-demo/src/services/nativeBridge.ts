@@ -50,6 +50,7 @@ export type DeepSeekMigrationPlugin = {
   saveFileToDocuments: (options: {
     name: string
     data: string
+    mode?: 'save' | 'share'
   }) => Promise<{ presented: boolean; savedPath?: string }>
   icloudStatus: () => Promise<{ available: boolean }>
   icloudBackupNow: (options: { name: string; data: string }) => Promise<{ path: string }>
