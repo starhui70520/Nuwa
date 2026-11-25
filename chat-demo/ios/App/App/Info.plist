@@ -30,6 +30,10 @@
 	<string>用于语音输入，将语音转写为文字发送给助手</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>用于语音输入，在设备上进行语音识别</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>用于在输入框底部展示最近照片并快速选择图片发送给助手</string>
+	<key>NSCameraUsageDescription</key>
+	<string>用于拍照并发送图片给助手</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

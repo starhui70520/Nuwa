@@ -544,12 +544,96 @@
   }
 }
 
+.attachDrawer {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 2px 4px;
+  animation: attachSlideUp 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.recentPhotosRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+.recentPhotoItem {
+  position: relative;
+  flex-shrink: 0;
+  width: 78px;
+  height: 78px;
+  padding: 0;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 16px;
+  overflow: hidden;
+  background-color: var(--dsw-alias-bg-skeleton);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: transform 0.12s ease, opacity 0.15s ease;
+
+  [data-ds-dark-theme] & {
+    border-color: rgba(255, 255, 255, 0.1);
+  }
+
+  &:active {
+    transform: scale(0.96);
+  }
+
+  img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+}
+
+.recentPhotoSkeleton {
+  cursor: default;
+  pointer-events: none;
+  opacity: 0.65;
+}
+
+.recentPhotoPicking {
+  opacity: 0.6;
+}
+
+.recentPhotoBadge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  background-color: rgba(0, 0, 0, 0.28);
+  color: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.recentPhotoBadgeSelected {
+  border-color: var(--dsw-alias-brand-primary, #3964fe);
+  background-color: var(--dsw-alias-brand-primary, #3964fe);
+}
+
 .attachPanel {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
-  padding: 12px 2px 4px;
-  animation: attachSlideUp 0.18s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .attachCard {

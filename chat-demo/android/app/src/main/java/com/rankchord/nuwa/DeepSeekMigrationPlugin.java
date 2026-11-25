@@ -3,12 +3,16 @@ package com.rankchord.nuwa;
 import android.Manifest;
 import android.content.ComponentName;
 import android.content.ContentResolver;
+import android.content.ContentUris;
 import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
@@ -25,6 +29,7 @@ import android.speech.SpeechRecognizer;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
 import android.util.Base64;
+import android.util.Size;
 import androidx.core.content.ContextCompat;
 import androidx.core.content.FileProvider;
 
@@ -37,6 +42,7 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.annotation.Permission;
 import com.getcapacitor.annotation.PermissionCallback;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
@@ -55,7 +61,9 @@ import java.util.UUID;
 @CapacitorPlugin(
     name = "DeepSeekMigration",
     permissions = {
-        @Permission(alias = "microphone", strings = { Manifest.permission.RECORD_AUDIO })
+        @Permission(alias = "microphone", strings = { Manifest.permission.RECORD_AUDIO }),
+        @Permission(alias = "photos", strings = { Manifest.permission.READ_MEDIA_IMAGES }),
+        @Permission(alias = "photosLegacy", strings = { Manifest.permission.READ_EXTERNAL_STORAGE })
     }
 )
 public class DeepSeekMigrationPlugin extends Plugin {
@@ -1556,6 +1564,220 @@ public class DeepSeekMigrationPlugin extends Plugin {
                 });
             } catch (Exception e) {
                 mainHandler.post(() -> call.reject("EXPORT_SAVE_FAILED: " + e.getMessage(), e));
+            }
+        }).start();
+    }
+
+    private boolean hasPhotoReadPermission() {
+        Context ctx = getContext();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            boolean full = ContextCompat.checkSelfPermission(
+                ctx,
+                Manifest.permission.READ_MEDIA_IMAGES
+            ) == PackageManager.PERMISSION_GRANTED;
+            if (full) {
+                return true;
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                return ContextCompat.checkSelfPermission(
+                    ctx,
+                    Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
+                ) == PackageManager.PERMISSION_GRANTED;
+            }
+            return false;
+        }
+        return ContextCompat.checkSelfPermission(
+            ctx,
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        ) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    @PluginMethod
+    public void getRecentPhotos(PluginCall call) {
+        boolean requestPermission = Boolean.TRUE.equals(call.getBoolean("requestPermission", true));
+        if (!hasPhotoReadPermission()) {
+            if (!requestPermission) {
+                JSObject ret = new JSObject();
+                ret.put("permission", "denied");
+                ret.put("items", new JSArray());
+                call.resolve(ret);
+                return;
+            }
+            String alias = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                ? "photos"
+                : "photosLegacy";
+            requestPermissionForAlias(alias, call, "handlePhotosPermissionResult");
+            return;
+        }
+        loadRecentPhotosAsync(call);
+    }
+
+    @PermissionCallback
+    private void handlePhotosPermissionResult(PluginCall call) {
+        if (!hasPhotoReadPermission()) {
+            JSObject ret = new JSObject();
+            ret.put("permission", "denied");
+            ret.put("items", new JSArray());
+            call.resolve(ret);
+            return;
+        }
+        loadRecentPhotosAsync(call);
+    }
+
+    private void loadRecentPhotosAsync(PluginCall call) {
+        final int limit = Math.max(1, Math.min(30, call.getInt("limit", 16)));
+        new Thread(() -> {
+            JSArray items = new JSArray();
+            ContentResolver resolver = getContext().getContentResolver();
+            String[] projection = new String[] {
+                MediaStore.Images.Media._ID,
+                MediaStore.Images.Media.DISPLAY_NAME,
+                MediaStore.Images.Media.MIME_TYPE
+            };
+            String sortOrder = MediaStore.Images.Media.DATE_ADDED + " DESC";
+            try (Cursor cursor = resolver.query(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                projection,
+                null,
+                null,
+                sortOrder
+            )) {
+                if (cursor != null) {
+                    int idCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID);
+                    int nameCol = cursor.getColumnIndex(MediaStore.Images.Media.DISPLAY_NAME);
+                    int mimeCol = cursor.getColumnIndex(MediaStore.Images.Media.MIME_TYPE);
+                    int count = 0;
+                    while (cursor.moveToNext() && count < limit) {
+                        long id = cursor.getLong(idCol);
+                        String name = nameCol >= 0 ? cursor.getString(nameCol) : null;
+                        String mime = mimeCol >= 0 ? cursor.getString(mimeCol) : null;
+                        if (name == null || name.trim().isEmpty()) {
+                            name = "photo_" + id + ".jpg";
+                        }
+                        if (mime == null || mime.trim().isEmpty()) {
+                            mime = "image/jpeg";
+                        }
+                        Uri contentUri = ContentUris.withAppendedId(
+                            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                            id
+                        );
+                        Bitmap thumb = decodePhotoThumbnail(resolver, contentUri);
+                        if (thumb == null) {
+                            continue;
+                        }
+                        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                        thumb.compress(Bitmap.CompressFormat.JPEG, 72, baos);
+                        thumb.recycle();
+                        String b64 = Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP);
+
+                        JSObject item = new JSObject();
+                        item.put("id", String.valueOf(id));
+                        item.put("name", name);
+                        item.put("mimeType", mime);
+                        item.put("thumbnail", "data:image/jpeg;base64," + b64);
+                        items.put(item);
+                        count++;
+                    }
+                }
+                JSObject ret = new JSObject();
+                ret.put("permission", "granted");
+                ret.put("items", items);
+                mainHandler.post(() -> call.resolve(ret));
+            } catch (Exception e) {
+                mainHandler.post(() -> call.reject("RECENT_PHOTOS_FAILED: " + e.getMessage(), e));
+            }
+        }).start();
+    }
+
+    private Bitmap decodePhotoThumbnail(ContentResolver resolver, Uri uri) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                return resolver.loadThumbnail(uri, new Size(220, 220), null);
+            } catch (Exception ignored) {
+            }
+        }
+        try {
+            BitmapFactory.Options bounds = new BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            try (InputStream is = resolver.openInputStream(uri)) {
+                if (is == null) return null;
+                BitmapFactory.decodeStream(is, null, bounds);
+            }
+            int sample = 1;
+            int maxDim = Math.max(bounds.outWidth, bounds.outHeight);
+            while (maxDim / sample > 440) {
+                sample *= 2;
+            }
+            BitmapFactory.Options opts = new BitmapFactory.Options();
+            opts.inSampleSize = sample;
+            try (InputStream is = resolver.openInputStream(uri)) {
+                if (is == null) return null;
+                return BitmapFactory.decodeStream(is, null, opts);
+            }
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    @PluginMethod
+    public void readRecentPhoto(PluginCall call) {
+        String idStr = call.getString("id", "");
+        if (idStr == null || idStr.trim().isEmpty()) {
+            call.reject("INVALID_ID");
+            return;
+        }
+        if (!hasPhotoReadPermission()) {
+            call.reject("PERMISSION_DENIED");
+            return;
+        }
+        new Thread(() -> {
+            try {
+                long id = Long.parseLong(idStr.trim());
+                Uri contentUri = ContentUris.withAppendedId(
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                    id
+                );
+                ContentResolver resolver = getContext().getContentResolver();
+                String name = "photo_" + id + ".jpg";
+                String mime = "image/jpeg";
+                try (Cursor c = resolver.query(
+                    contentUri,
+                    new String[] { MediaStore.Images.Media.DISPLAY_NAME, MediaStore.Images.Media.MIME_TYPE },
+                    null,
+                    null,
+                    null
+                )) {
+                    if (c != null && c.moveToFirst()) {
+                        String n = c.getString(0);
+                        String m = c.getString(1);
+                        if (n != null && !n.trim().isEmpty()) name = n;
+                        if (m != null && !m.trim().isEmpty()) mime = m;
+                    }
+                }
+                ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                try (InputStream is = resolver.openInputStream(contentUri)) {
+                    if (is == null) {
+                        throw new IllegalStateException("Cannot open photo stream");
+                    }
+                    byte[] buf = new byte[16384];
+                    int read;
+                    int total = 0;
+                    while ((read = is.read(buf)) != -1) {
+                        total += read;
+                        if (total > 24 * 1024 * 1024) {
+                            throw new IllegalStateException("Photo exceeds 24MB limit");
+                        }
+                        baos.write(buf, 0, read);
+                    }
+                }
+                String b64 = Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP);
+                JSObject ret = new JSObject();
+                ret.put("name", name);
+                ret.put("mimeType", mime);
+                ret.put("data", b64);
+                mainHandler.post(() -> call.resolve(ret));
+            } catch (Exception e) {
+                mainHandler.post(() -> call.reject("READ_PHOTO_FAILED: " + e.getMessage(), e));
             }
         }).start();
     }

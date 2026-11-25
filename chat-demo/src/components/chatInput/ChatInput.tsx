@@ -3,6 +3,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 
 import {
   IconArrowUpBold16,
   IconCameraOutline22,
+  IconCheckMark12,
   IconGlobeLanguageOutline14,
   IconImageOutline22,
   IconPaperclipOutline22,
@@ -11,7 +12,7 @@ import {
   IconThinkOutline14,
 } from '../base/icons.js'
 import { getActiveSecret, setSearch, setThinking, useSettings } from '../../services/settings.js'
-import { isNativeAndroid, isNativeIos } from '../../services/nativeBridge.js'
+import { DeepSeekMigration, isNativeAndroid, isNativeIos } from '../../services/nativeBridge.js'
 import { useIsCompactWatch, useIsMobile } from '../../app/viewport.js'
 import { sendMessage, stopReply, useChatStore } from '../../services/chat/store.js'
 import {
@@ -43,6 +44,22 @@ export const ChatInput = memo(function ChatInput({ sessionId }: { sessionId: str
   return <Input key={sessionId === null ? 'new' : `session:${sessionId}`} sessionId={sessionId} />
 })
 
+type RecentPhotoItem = {
+  id: string
+  name: string
+  mimeType: string
+  thumbnail: string
+}
+
+const base64ToFile = (base64: string, name: string, mimeType: string): File => {
+  const binary = atob(base64)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i)
+  }
+  return new File([bytes], name, { type: mimeType || 'image/jpeg' })
+}
+
 const Input = ({ sessionId }: { sessionId: string | null }) => {
   const t = useTranslate()
   const draft = useDrafts((state) => state.drafts.get(sessionId) ?? EMPTY_DRAFT)
@@ -58,12 +75,51 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
   const isCompactWatch = useIsCompactWatch()
   const [watchToolsOpen, setWatchToolsOpen] = useState(false)
   const [attachSheetOpen, setAttachSheetOpen] = useState(false)
+  const [recentPhotos, setRecentPhotos] = useState<RecentPhotoItem[]>([])
+  const [recentLoading, setRecentLoading] = useState(false)
+  const [pickedPhotoIds, setPickedPhotoIds] = useState<string[]>([])
+  const [pickingPhotoIds, setPickingPhotoIds] = useState<string[]>([])
   const search = useSettings((state) => state.search)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const galleryInputRef = useRef<HTMLInputElement>(null)
   const cameraInputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const togglesRef = useRef<HTMLDivElement>(null)
+
+  const isNativeMobile = isNativeAndroid() || isNativeIos()
+
+  // 打开移动端附件面板时加载原生最近相册缩略图
+  useEffect(() => {
+    if (!attachSheetOpen) {
+      setPickedPhotoIds([])
+      setPickingPhotoIds([])
+      return
+    }
+    if (!isMobile || !isNativeMobile) {
+      return
+    }
+    let cancelled = false
+    setRecentLoading(true)
+    void DeepSeekMigration.getRecentPhotos({ limit: 16, requestPermission: true })
+      .then((res) => {
+        if (!cancelled) {
+          setRecentPhotos(res?.permission === 'granted' && Array.isArray(res.items) ? res.items : [])
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setRecentPhotos([])
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setRecentLoading(false)
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [attachSheetOpen, isMobile, isNativeMobile])
 
   useLayoutEffect(() => {
     const toggles = togglesRef.current
@@ -519,7 +575,60 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
         {dragging ? <DragMask /> : null}
       </div>
       {isMobile && attachSheetOpen ? (
-        <div className={styles.attachPanel} role="group" aria-label={t('uploadFile')}>
+        <div className={styles.attachDrawer}>
+          {isNativeMobile && (recentLoading || recentPhotos.length > 0) ? (
+            <div className={styles.recentPhotosRow}>
+              {recentLoading && recentPhotos.length === 0
+                ? [0, 1, 2, 3].map((idx) => (
+                    <div key={idx} className={clsx(styles.recentPhotoItem, styles.recentPhotoSkeleton)} />
+                  ))
+                : recentPhotos.map((photo) => {
+                    const picked = pickedPhotoIds.includes(photo.id)
+                    const picking = pickingPhotoIds.includes(photo.id)
+                    return (
+                      <button
+                        key={photo.id}
+                        type="button"
+                        className={clsx(styles.recentPhotoItem, picking && styles.recentPhotoPicking)}
+                        aria-label={photo.name}
+                        aria-pressed={picked}
+                        disabled={picking}
+                        onClick={() => {
+                          if (picked || picking || !ensureApiKey()) {
+                            return
+                          }
+                          setPickingPhotoIds((prev) => [...prev, photo.id])
+                          void DeepSeekMigration.readRecentPhoto({ id: photo.id })
+                            .then((res) => {
+                              const file = base64ToFile(res.data, res.name, res.mimeType)
+                              acceptFiles([file])
+                              setPickedPhotoIds((prev) =>
+                                prev.includes(photo.id) ? prev : [...prev, photo.id]
+                              )
+                            })
+                            .catch(() => {
+                              // 读取失败时静默恢复可点击状态
+                            })
+                            .finally(() => {
+                              setPickingPhotoIds((prev) => prev.filter((item) => item !== photo.id))
+                            })
+                        }}
+                      >
+                        <img src={photo.thumbnail} alt="" loading="lazy" />
+                        <span
+                          className={clsx(
+                            styles.recentPhotoBadge,
+                            picked && styles.recentPhotoBadgeSelected
+                          )}
+                        >
+                          {picked ? <IconCheckMark12 /> : null}
+                        </span>
+                      </button>
+                    )
+                  })}
+            </div>
+          ) : null}
+          <div className={styles.attachPanel} role="group" aria-label={t('uploadFile')}>
           <button
             type="button"
             className={styles.attachCard}
@@ -565,6 +674,7 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
             </span>
             <span className={styles.attachCardLabel}>{t('uploadDocument')}</span>
           </button>
+          </div>
         </div>
       ) : null}
     </div>

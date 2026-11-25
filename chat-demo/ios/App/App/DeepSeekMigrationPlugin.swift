@@ -2,7 +2,9 @@ import AVFAudio
 import AVFoundation
 import Capacitor
 import Foundation
+import Photos
 import Speech
+import UIKit
 
 /// iOS 端 DeepSeekMigration 插件：对齐 Android 同名插件的账号授权登录接口。
 /// startPlatformAuth 打开内嵌 WKWebView 授权页并直接把 token 作为结果返回；
@@ -29,6 +31,8 @@ public class DeepSeekMigrationPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "icloudBackupNow", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "fetchShareContent", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "downloadRemoteFile", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "getRecentPhotos", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "readRecentPhoto", returnType: CAPPluginReturnPromise),
     ]
 
     private var pendingAuthCall: CAPPluginCall?
@@ -571,6 +575,126 @@ public class DeepSeekMigrationPlugin: CAPPlugin, CAPBridgedPlugin {
                 call.resolve(["path": name])
             } catch {
                 call.reject("WRITE_FAILED: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    // MARK: 最近相册照片（对齐 Android MediaStore，用于底部附件面板横向缩略图条）
+
+    @objc func getRecentPhotos(_ call: CAPPluginCall) {
+        let limit = max(1, min(30, call.getInt("limit") ?? 16))
+        let requestPermission = call.getBool("requestPermission") ?? true
+
+        let loadPhotos: () -> Void = {
+            DispatchQueue.global(qos: .userInitiated).async {
+                let fetchOptions = PHFetchOptions()
+                fetchOptions.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+                fetchOptions.fetchLimit = limit
+                let assets = PHAsset.fetchAssets(with: .image, options: fetchOptions)
+
+                let manager = PHImageManager.default()
+                let imgOpts = PHImageRequestOptions()
+                imgOpts.isSynchronous = true
+                imgOpts.deliveryMode = .highQualityFormat
+                imgOpts.resizeMode = .fast
+                imgOpts.isNetworkAccessAllowed = true
+
+                var items: [[String: Any]] = []
+                assets.enumerateObjects { asset, _, _ in
+                    var thumbData: Data?
+                    manager.requestImage(
+                        for: asset,
+                        targetSize: CGSize(width: 220, height: 220),
+                        contentMode: .aspectFill,
+                        options: imgOpts
+                    ) { image, _ in
+                        if let image {
+                            thumbData = image.jpegData(compressionQuality: 0.72)
+                        }
+                    }
+                    guard let data = thumbData else { return }
+                    let filename = PHAssetResource.assetResources(for: asset).first?.originalFilename
+                        ?? "photo_\(items.count + 1).jpg"
+                    items.append([
+                        "id": asset.localIdentifier,
+                        "name": filename,
+                        "mimeType": "image/jpeg",
+                        "thumbnail": "data:image/jpeg;base64,\(data.base64EncodedString())",
+                    ])
+                }
+                DispatchQueue.main.async {
+                    call.resolve(["permission": "granted", "items": items])
+                }
+            }
+        }
+
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        if status == .authorized || status == .limited {
+            loadPhotos()
+            return
+        }
+        if !requestPermission || status == .denied || status == .restricted {
+            call.resolve(["permission": "denied", "items": []])
+            return
+        }
+        PHPhotoLibrary.requestAuthorization(for: .readWrite) { newStatus in
+            if newStatus == .authorized || newStatus == .limited {
+                loadPhotos()
+            } else {
+                DispatchQueue.main.async {
+                    call.resolve(["permission": "denied", "items": []])
+                }
+            }
+        }
+    }
+
+    @objc func readRecentPhoto(_ call: CAPPluginCall) {
+        let id = (call.getString("id") ?? "").trimmingCharacters(in: .whitespaces)
+        guard !id.isEmpty else {
+            call.reject("INVALID_ID")
+            return
+        }
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard status == .authorized || status == .limited else {
+            call.reject("PERMISSION_DENIED")
+            return
+        }
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil)
+        guard let asset = assets.firstObject else {
+            call.reject("NOT_FOUND")
+            return
+        }
+        let opts = PHImageRequestOptions()
+        opts.isNetworkAccessAllowed = true
+        opts.deliveryMode = .highQualityFormat
+        PHImageManager.default().requestImageDataAndOrientation(for: asset, options: opts) { data, uti, _, _ in
+            guard let rawData = data else {
+                DispatchQueue.main.async { call.reject("READ_PHOTO_FAILED") }
+                return
+            }
+            var finalData = rawData
+            var mime = "image/jpeg"
+            var name = PHAssetResource.assetResources(for: asset).first?.originalFilename ?? "photo.jpg"
+            let lowerUti = (uti ?? "").lowercased()
+            if lowerUti.contains("png") {
+                mime = "image/png"
+            } else if lowerUti.contains("webp") {
+                mime = "image/webp"
+            } else if lowerUti.contains("heic") || lowerUti.contains("heif") {
+                // 转成通用 JPEG，确保所有模型接口都支持
+                if let uiImage = UIImage(data: rawData), let jpg = uiImage.jpegData(compressionQuality: 0.88) {
+                    finalData = jpg
+                    mime = "image/jpeg"
+                    name = (name as NSString).deletingPathExtension + ".jpg"
+                }
+            }
+            let b64 = finalData.base64EncodedString()
+            DispatchQueue.main.async {
+                call.resolve([
+                    "name": name,
+                    "mimeType": mime,
+                    "data": b64,
+                ])
             }
         }
     }

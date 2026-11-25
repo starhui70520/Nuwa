@@ -29,6 +29,13 @@ declare const styles: {
   readonly "composerRoot": string;
   readonly "attachToggle": string;
   readonly "attachToggleOpen": string;
+  readonly "attachDrawer": string;
+  readonly "recentPhotosRow": string;
+  readonly "recentPhotoItem": string;
+  readonly "recentPhotoSkeleton": string;
+  readonly "recentPhotoPicking": string;
+  readonly "recentPhotoBadge": string;
+  readonly "recentPhotoBadgeSelected": string;
   readonly "attachPanel": string;
   readonly "attachCard": string;
   readonly "attachCardIcon": string;

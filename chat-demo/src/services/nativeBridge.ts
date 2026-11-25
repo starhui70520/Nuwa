@@ -61,6 +61,20 @@ export type DeepSeekMigrationPlugin = {
     contentType: string
     finalUrl: string
   }>
+  getRecentPhotos: (options?: { limit?: number; requestPermission?: boolean }) => Promise<{
+    permission: 'granted' | 'denied'
+    items: Array<{
+      id: string
+      name: string
+      mimeType: string
+      thumbnail: string
+    }>
+  }>
+  readRecentPhoto: (options: { id: string }) => Promise<{
+    name: string
+    mimeType: string
+    data: string
+  }>
 }
 
 export const DeepSeekMigration = registerPlugin<DeepSeekMigrationPlugin>('DeepSeekMigration')
