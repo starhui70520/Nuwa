@@ -26,5 +26,12 @@ declare const styles: {
   readonly "actionCircle": string;
   readonly "sendButton": string;
   readonly "disabled": string;
+  readonly "composerRoot": string;
+  readonly "attachToggle": string;
+  readonly "attachToggleOpen": string;
+  readonly "attachPanel": string;
+  readonly "attachCard": string;
+  readonly "attachCardIcon": string;
+  readonly "attachCardLabel": string;
 };
 export = styles;

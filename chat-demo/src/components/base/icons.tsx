@@ -841,3 +841,53 @@ export const IconCheckMark12 = () => (
     />
   </svg>
 )
+
+/** 附件面板：拍照图标 */
+export const IconCameraOutline22 = () => (
+  <svg width={22} height={22} viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path
+      d="M4 8.5C4 7.39543 4.89543 6.5 6 6.5H7.6C8.1 6.5 8.56 6.24 8.83 5.82L9.52 4.74C9.79 4.32 10.25 4.06 10.75 4.06H13.25C13.75 4.06 14.21 4.32 14.48 4.74L15.17 5.82C15.44 6.24 15.9 6.5 16.4 6.5H18C19.1046 6.5 20 7.39543 20 8.5V17.5C20 18.6046 19.1046 19.5 18 19.5H6C4.89543 19.5 4 18.6046 4 17.5V8.5Z"
+      stroke="currentColor"
+      strokeWidth={1.75}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <circle cx="12" cy="13" r="3.25" stroke="currentColor" strokeWidth={1.75} />
+  </svg>
+)
+
+/** 附件面板：相册图标 */
+export const IconImageOutline22 = () => (
+  <svg width={22} height={22} viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <rect
+      x="3.75"
+      y="4.5"
+      width="16.5"
+      height="15"
+      rx="3"
+      stroke="currentColor"
+      strokeWidth={1.75}
+    />
+    <circle cx="9.25" cy="9.75" r="1.4" fill="currentColor" />
+    <path
+      d="M5.5 17L10.2 12.6C10.65 12.18 11.35 12.19 11.79 12.62L14.2 15L15.9 13.4C16.34 12.99 17.02 13.01 17.44 13.44L19.5 15.6"
+      stroke="currentColor"
+      strokeWidth={1.75}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+)
+
+/** 附件面板：文件回形针图标 */
+export const IconPaperclipOutline22 = () => (
+  <svg width={22} height={22} viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path
+      d="M15.8 7.6L9.4 14C8.52 14.88 8.52 16.31 9.4 17.19C10.28 18.07 11.71 18.07 12.59 17.19L19.45 10.33C20.99 8.79 20.99 6.29 19.45 4.75C17.91 3.21 15.41 3.21 13.87 4.75L6.55 12.07C4.34 14.28 4.34 17.87 6.55 20.08C8.76 22.29 12.35 22.29 14.56 20.08L19.5 15.14"
+      stroke="currentColor"
+      strokeWidth={1.75}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+)

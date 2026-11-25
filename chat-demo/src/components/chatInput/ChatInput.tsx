@@ -2,7 +2,10 @@ import clsx from 'clsx'
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
   IconArrowUpBold16,
+  IconCameraOutline22,
   IconGlobeLanguageOutline14,
+  IconImageOutline22,
+  IconPaperclipOutline22,
   IconPlusCircleOutline22,
   IconStopFill16,
   IconThinkOutline14,
@@ -54,8 +57,11 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
   const isMobile = useIsMobile()
   const isCompactWatch = useIsCompactWatch()
   const [watchToolsOpen, setWatchToolsOpen] = useState(false)
+  const [attachSheetOpen, setAttachSheetOpen] = useState(false)
   const search = useSettings((state) => state.search)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const galleryInputRef = useRef<HTMLInputElement>(null)
+  const cameraInputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const togglesRef = useRef<HTMLDivElement>(null)
 
@@ -147,6 +153,7 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
       return
     }
     stopReadAloud()
+    setAttachSheetOpen(false)
     if (isMobile) {
       textareaRef.current?.blur()
     } else {
@@ -155,17 +162,41 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
   }
 
   const fileInputNode = (
-    <input
-      ref={fileInputRef}
-      type="file"
-      multiple
-      hidden
-      accept={ACCEPT}
-      onChange={(event) => {
-        acceptFiles(Array.from(event.target.files ?? []))
-        event.target.value = ''
-      }}
-    />
+    <>
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        hidden
+        accept={ACCEPT}
+        onChange={(event) => {
+          acceptFiles(Array.from(event.target.files ?? []))
+          event.target.value = ''
+        }}
+      />
+      <input
+        ref={galleryInputRef}
+        type="file"
+        multiple
+        hidden
+        accept="image/*"
+        onChange={(event) => {
+          acceptFiles(Array.from(event.target.files ?? []))
+          event.target.value = ''
+        }}
+      />
+      <input
+        ref={cameraInputRef}
+        type="file"
+        hidden
+        accept="image/*"
+        capture="environment"
+        onChange={(event) => {
+          acceptFiles(Array.from(event.target.files ?? []))
+          event.target.value = ''
+        }}
+      />
+    </>
   )
 
   const voiceButtonNode = (
@@ -174,6 +205,7 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
       disabled={!voice.available}
       seconds={voice.seconds}
       onClick={() => {
+        setAttachSheetOpen(false)
         if (
           voice.status !== 'idle' ||
           (!useChatStore.getState().importingHistory && ensureApiKey())
@@ -313,34 +345,36 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
   }
 
   return (
-    <div
-      className={clsx(styles.wrapper, sessionId === null ? styles.home : styles.session)}
-      onClick={(event) => {
-        if (event.target === event.currentTarget) {
-          textareaRef.current?.focus({ preventScroll: true })
-        }
-      }}
-    >
-      <DraftAttachments items={attachments} onRetry={retryFile} onRemove={removeFile} />
-      <div className={styles.textareaWrapper}>
-        <textarea
-          ref={textareaRef}
-          className={clsx(styles.textarea, recording && isMobile && styles.textareaHidden)}
-          placeholder={t('chatInputPlaceholderChat')}
-          rows={2}
-          enterKeyHint={
-            isMobile ||
-            isNativeAndroid() ||
-            isNativeIos() ||
-            (typeof window !== 'undefined' && window.matchMedia('(pointer: coarse)').matches)
-              ? 'enter'
-              : 'send'
+    <div className={styles.composerRoot}>
+      <div
+        className={clsx(styles.wrapper, sessionId === null ? styles.home : styles.session)}
+        onClick={(event) => {
+          if (event.target === event.currentTarget) {
+            textareaRef.current?.focus({ preventScroll: true })
           }
-          // 移动端不自动聚焦，避免一打开就弹出键盘
-          autoFocus={!isMobile}
-          disabled={importingHistory}
-          value={text}
-          onChange={(event) => setText(event.target.value)}
+        }}
+      >
+        <DraftAttachments items={attachments} onRetry={retryFile} onRemove={removeFile} />
+        <div className={styles.textareaWrapper}>
+          <textarea
+            ref={textareaRef}
+            className={clsx(styles.textarea, recording && isMobile && styles.textareaHidden)}
+            placeholder={t('chatInputPlaceholderChat')}
+            rows={2}
+            enterKeyHint={
+              isMobile ||
+              isNativeAndroid() ||
+              isNativeIos() ||
+              (typeof window !== 'undefined' && window.matchMedia('(pointer: coarse)').matches)
+                ? 'enter'
+                : 'send'
+            }
+            // 移动端不自动聚焦，避免一打开就弹出键盘
+            autoFocus={!isMobile}
+            disabled={importingHistory}
+            value={text}
+            onFocus={() => setAttachSheetOpen(false)}
+            onChange={(event) => setText(event.target.value)}
           onMouseDown={(event) => {
             // 首次点击时手动聚焦，避免 Safari 把整个页面滚到输入框位置。
             if (isMobile && event.button === 0 && document.activeElement !== event.currentTarget) {
@@ -414,11 +448,22 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
               <Tooltip content={t('uploadFile')}>
                 <button
                   type="button"
-                  className={styles.actionCircle}
+                  className={clsx(
+                    styles.actionCircle,
+                    styles.attachToggle,
+                    isMobile && attachSheetOpen && styles.attachToggleOpen
+                  )}
                   aria-label={t('uploadFile')}
+                  aria-expanded={isMobile ? attachSheetOpen : undefined}
                   disabled={importingHistory}
                   onClick={() => {
-                    if (ensureApiKey()) {
+                    if (!ensureApiKey()) {
+                      return
+                    }
+                    if (isMobile) {
+                      textareaRef.current?.blur()
+                      setAttachSheetOpen((open) => !open)
+                    } else {
                       fileInputRef.current?.click()
                     }
                   }}
@@ -471,7 +516,57 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
           })()}
         </div>
       </div>
-      {dragging ? <DragMask /> : null}
+        {dragging ? <DragMask /> : null}
+      </div>
+      {isMobile && attachSheetOpen ? (
+        <div className={styles.attachPanel} role="group" aria-label={t('uploadFile')}>
+          <button
+            type="button"
+            className={styles.attachCard}
+            onClick={() => {
+              setAttachSheetOpen(false)
+              if (ensureApiKey()) {
+                cameraInputRef.current?.click()
+              }
+            }}
+          >
+            <span className={styles.attachCardIcon}>
+              <IconCameraOutline22 />
+            </span>
+            <span className={styles.attachCardLabel}>{t('uploadCamera')}</span>
+          </button>
+          <button
+            type="button"
+            className={styles.attachCard}
+            onClick={() => {
+              setAttachSheetOpen(false)
+              if (ensureApiKey()) {
+                galleryInputRef.current?.click()
+              }
+            }}
+          >
+            <span className={styles.attachCardIcon}>
+              <IconImageOutline22 />
+            </span>
+            <span className={styles.attachCardLabel}>{t('uploadGallery')}</span>
+          </button>
+          <button
+            type="button"
+            className={styles.attachCard}
+            onClick={() => {
+              setAttachSheetOpen(false)
+              if (ensureApiKey()) {
+                fileInputRef.current?.click()
+              }
+            }}
+          >
+            <span className={styles.attachCardIcon}>
+              <IconPaperclipOutline22 />
+            </span>
+            <span className={styles.attachCardLabel}>{t('uploadDocument')}</span>
+          </button>
+        </div>
+      ) : null}
     </div>
   )
 }
