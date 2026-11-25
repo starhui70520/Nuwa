@@ -8,6 +8,7 @@ enum AIStreamEvent {
     case citationDelta(index: Int, citation: TextCitation)
     case blockStop(index: Int)
     case messageDelta(stopReason: String?, title: String?)
+    case usage(inputTokens: Int?, outputTokens: Int?)
     case disablePrefix
 }
 
@@ -438,6 +439,7 @@ enum AIClient {
 
     struct StreamParams {
         let history: [ChatMessage]
+        let compactions: [CompactionSpan]?
         let question: ChatMessage
         let prefixReply: ChatMessage?
         let useAccount: Bool
@@ -453,6 +455,51 @@ enum AIClient {
         let omitExtendedFor1M: Bool
         let rejectedFileIds: Set<String>
         let imageCap: Int
+    }
+
+    static func generateCompactionSummary(
+        promptText: String,
+        systemPrompt: String,
+        useAccount: Bool,
+        apiProtocol: ApiProtocol,
+        baseUrl: String,
+        secret: String,
+        model: String
+    ) async throws -> String {
+        let params = StreamParams(
+            history: [],
+            compactions: nil,
+            question: ChatMessage(role: .user, content: promptText),
+            prefixReply: nil,
+            useAccount: useAccount,
+            apiProtocol: apiProtocol,
+            baseUrl: baseUrl,
+            secret: secret,
+            model: model,
+            customSystemPrompt: systemPrompt,
+            thinkingEnabled: false,
+            searchEnabled: false,
+            wantsTitle: false,
+            latestReminder: nil,
+            omitExtendedFor1M: true,
+            rejectedFileIds: [],
+            imageCap: 0
+        )
+        var rawSummary = ""
+        for try await event in streamChat(params) {
+            try Task.checkCancellation()
+            switch event {
+            case .blockStart(_, let block):
+                if case .text(_, let text, _, _) = block, !text.isEmpty {
+                    rawSummary += text
+                }
+            case .textDelta(_, let text):
+                rawSummary += text
+            default:
+                break
+            }
+        }
+        return rawSummary
     }
 
     static func streamChat(_ params: StreamParams) -> AsyncThrowingStream<AIStreamEvent, Error> {
@@ -521,15 +568,30 @@ enum AIClient {
             previousReminder = normalized
         }
 
-        for (question, reply) in contextRounds(params.history) {
-            guard let (message, hasFile) = buildAnthropicUserMessage(question, rejectedFileIds: params.rejectedFileIds)
-            else { continue }
-            let blocks = buildAnthropicAssistantBlocks(reply, includeReadLinks: isDeepSeekTarget)
-            guard !blocks.isEmpty else { continue }
-            hasAnyFile = hasAnyFile || hasFile
-            appendReminder(reply.latestReminder)
-            payloadMessages.append(message)
-            payloadMessages.append(["role": "assistant", "content": blocks])
+        let projected = ContextCompaction.projectContextItems(history: params.history, compactions: params.compactions)
+        for item in projected {
+            switch item {
+            case .compaction(let span):
+                let pair = ContextCompaction.toCompactionMessagePair(span)
+                payloadMessages.append(["role": "user", "content": pair.userText])
+                payloadMessages.append(["role": "assistant", "content": [["type": "text", "text": pair.assistantText]]])
+
+            case .round(let question, let reply):
+                var effectiveQuestion = question
+                if let recalledPrefix = reply.recalledMemory?.blockText, !recalledPrefix.isEmpty {
+                    effectiveQuestion.content = effectiveQuestion.content.isEmpty
+                        ? recalledPrefix
+                        : "\(recalledPrefix)\n\n\(effectiveQuestion.content)"
+                }
+                guard let (message, hasFile) = buildAnthropicUserMessage(effectiveQuestion, rejectedFileIds: params.rejectedFileIds)
+                else { continue }
+                let blocks = buildAnthropicAssistantBlocks(reply, includeReadLinks: isDeepSeekTarget)
+                guard !blocks.isEmpty else { continue }
+                hasAnyFile = hasAnyFile || hasFile
+                appendReminder(reply.latestReminder)
+                payloadMessages.append(message)
+                payloadMessages.append(["role": "assistant", "content": blocks])
+            }
         }
 
         appendReminder(params.latestReminder)
@@ -676,6 +738,16 @@ enum AIClient {
 
             let type = obj["type"] as? String ?? ""
             switch type {
+            case "message_start":
+                if let messageObj = obj["message"] as? [String: Any],
+                   let usageObj = messageObj["usage"] as? [String: Any] {
+                    let inputTokens = usageObj["input_tokens"] as? Int
+                    let outputTokens = usageObj["output_tokens"] as? Int
+                    if inputTokens != nil || outputTokens != nil {
+                        continuation.yield(.usage(inputTokens: inputTokens, outputTokens: outputTokens))
+                    }
+                }
+
             case "content_block_start":
                 guard let idx = obj["index"] as? Int,
                       let blockDict = obj["content_block"] as? [String: Any]
@@ -726,6 +798,13 @@ enum AIClient {
                 }
 
             case "message_delta":
+                if let usageObj = obj["usage"] as? [String: Any] {
+                    let inputTokens = usageObj["input_tokens"] as? Int
+                    let outputTokens = usageObj["output_tokens"] as? Int
+                    if inputTokens != nil || outputTokens != nil {
+                        continuation.yield(.usage(inputTokens: inputTokens, outputTokens: outputTokens))
+                    }
+                }
                 if let delta = obj["delta"] as? [String: Any] {
                     let stopReason = delta["stop_reason"] as? String
                     if let stopReason, !stopReason.isEmpty { sawStopReason = true }
@@ -1073,7 +1152,7 @@ enum AIClient {
             throw AIClientError.invalidURL
         }
 
-        let rounds = contextRounds(params.history)
+        let projected = ContextCompaction.projectContextItems(history: params.history, compactions: params.compactions)
         var imageBudget = min(maxOpenAIInlineImages, max(0, params.imageCap))
         var questionImageParts: [[String: Any]] = []
         for file in params.question.files where file.isImage && imageBudget > 0 {
@@ -1083,11 +1162,12 @@ enum AIClient {
             }
         }
 
-        var historyImagePartsByRound: [Int: [[String: Any]]] = [:]
+        var historyImagePartsByItem: [Int: [[String: Any]]] = [:]
         if imageBudget > 0 {
-            for idx in stride(from: rounds.count - 1, through: 0, by: -1) {
+            for idx in stride(from: projected.count - 1, through: 0, by: -1) {
                 guard imageBudget > 0 else { break }
-                let userFiles = rounds[idx].0.files
+                guard case .round(let question, _) = projected[idx] else { continue }
+                let userFiles = question.files
                 guard userFiles.contains(where: \.isImage) else { continue }
                 var collected: [[String: Any]] = []
                 for file in userFiles.reversed() where file.isImage && imageBudget > 0 {
@@ -1097,7 +1177,7 @@ enum AIClient {
                     }
                 }
                 if !collected.isEmpty {
-                    historyImagePartsByRound[idx] = collected.reversed()
+                    historyImagePartsByItem[idx] = collected.reversed()
                 }
             }
         }
@@ -1107,13 +1187,27 @@ enum AIClient {
         if !trimmedSystem.isEmpty {
             payloadMessages.append(["role": "system", "content": trimmedSystem])
         }
-        for (idx, (question, reply)) in rounds.enumerated() {
-            guard let userContent = buildOpenAIUserContent(question, imageParts: historyImagePartsByRound[idx] ?? []) else {
-                continue
+        for (idx, item) in projected.enumerated() {
+            switch item {
+            case .compaction(let span):
+                let pair = ContextCompaction.toCompactionMessagePair(span)
+                payloadMessages.append(["role": "user", "content": pair.userText])
+                payloadMessages.append(["role": "assistant", "content": pair.assistantText])
+
+            case .round(let question, let reply):
+                var effectiveQuestion = question
+                if let recalledPrefix = reply.recalledMemory?.blockText, !recalledPrefix.isEmpty {
+                    effectiveQuestion.content = effectiveQuestion.content.isEmpty
+                        ? recalledPrefix
+                        : "\(recalledPrefix)\n\n\(effectiveQuestion.content)"
+                }
+                guard let userContent = buildOpenAIUserContent(effectiveQuestion, imageParts: historyImagePartsByItem[idx] ?? []) else {
+                    continue
+                }
+                payloadMessages.append(["role": "user", "content": userContent])
+                let text = buildAnthropicAssistantBlocks(reply).compactMap { $0["text"] as? String }.joined(separator: "\n")
+                payloadMessages.append(["role": "assistant", "content": text])
             }
-            payloadMessages.append(["role": "user", "content": userContent])
-            let text = buildAnthropicAssistantBlocks(reply).compactMap { $0["text"] as? String }.joined(separator: "\n")
-            payloadMessages.append(["role": "assistant", "content": text])
         }
         if let currentContent = buildOpenAIUserContent(params.question, imageParts: questionImageParts) {
             payloadMessages.append(["role": "user", "content": currentContent])
@@ -1173,6 +1267,13 @@ enum AIClient {
 
             if let err = obj["error"] as? [String: Any], let msg = err["message"] as? String {
                 throw AIClientError.streamError(msg)
+            }
+            if let usageObj = obj["usage"] as? [String: Any] {
+                let promptTokens = usageObj["prompt_tokens"] as? Int
+                let completionTokens = usageObj["completion_tokens"] as? Int
+                if promptTokens != nil || completionTokens != nil {
+                    continuation.yield(.usage(inputTokens: promptTokens, outputTokens: completionTokens))
+                }
             }
             guard let choices = obj["choices"] as? [[String: Any]], let first = choices.first else { continue }
             if let fr = first["finish_reason"] as? String { finishReason = fr }

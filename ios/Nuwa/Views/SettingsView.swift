@@ -68,19 +68,6 @@ private enum SettingsSubpage {
     case feedback
 }
 
-private struct ZipBackupDocument: FileDocument {
-    static var readableContentTypes: [UTType] { [.zip] }
-    var data: Data
-
-    init(data: Data) { self.data = data }
-    init(configuration: ReadConfiguration) throws {
-        data = configuration.file.regularFileContents ?? Data()
-    }
-    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
-        FileWrapper(regularFileWithContents: data)
-    }
-}
-
 private struct ReleaseHistoryEntry: Identifiable {
     let id: String
     let version: String
@@ -116,9 +103,9 @@ struct SettingsView: View {
     @State private var importingShareLink = false
     @State private var shareImportStage = ""
 
-    @State private var isExporting = false
+    @State private var showExportSheet = false
+    @State private var exportBusyMode: ExportDestination?
     @State private var isImporting = false
-    @State private var exportDocument: ZipBackupDocument?
     @State private var showDeleteAllConfirm = false
     @State private var showSignOutConfirm = false
 
@@ -275,18 +262,44 @@ struct SettingsView: View {
             }
             .ignoresSafeArea()
         }
-        .fileExporter(
-            isPresented: $isExporting,
-            document: exportDocument,
-            contentType: .zip,
-            defaultFilename: DeepSeekZipExporter.defaultFileName()
-        ) { result in
-            switch result {
-            case .success:
-                chatStore.showToast("已导出历史对话 ZIP")
-            case .failure(let error):
-                chatStore.showToast("导出失败：\(error.localizedDescription)")
-            }
+        .sheet(isPresented: $showExportSheet) {
+            ExportActionSheetView(
+                title: L10n.t("exportHistory", locale: settings.locale),
+                subtitle: settings.locale == .enUS
+                    ? "DeepSeek / Nuwa standard ZIP backup (\(chatStore.sessions.count) chats)"
+                    : "标准 DeepSeek / Nuwa ZIP 归档（共 \(chatStore.sessions.count) 条对话）",
+                locale: settings.locale,
+                busyMode: exportBusyMode,
+                onSelect: { destination in
+                    guard exportBusyMode == nil else { return }
+                    exportBusyMode = destination
+                    Task {
+                        do {
+                            let fileURL = try await chatStore.exportAllSessionsZipURL()
+                            exportBusyMode = nil
+                            showExportSheet = false
+                            try? await Task.sleep(nanoseconds: 280_000_000)
+                            ExportPresenter.present(fileURL: fileURL, destination: destination) { completed in
+                                if completed {
+                                    chatStore.showToast(
+                                        settings.locale == .enUS ? "Exported chat history ZIP" : "已导出历史对话 ZIP"
+                                    )
+                                }
+                            }
+                        } catch {
+                            exportBusyMode = nil
+                            showExportSheet = false
+                            chatStore.showToast("导出失败：\(error.localizedDescription)")
+                        }
+                    }
+                },
+                onCancel: {
+                    if exportBusyMode == nil {
+                        showExportSheet = false
+                    }
+                }
+            )
+            .environment(\.nuwaFontScale, fontScale)
         }
         .fileImporter(
             isPresented: $isImporting,
@@ -855,19 +868,11 @@ struct SettingsView: View {
             rowDivider
             actionCell(
                 title: L10n.t("exportHistory", locale: loc),
-                subtitle: "导出标准 DeepSeek 格式 ZIP，可备份到 iCloud Drive 或导入其他端",
-                buttonTitle: "备份到 iCloud",
+                subtitle: "导出标准 DeepSeek 格式 ZIP，可发送到其他软件或保存到「文件」与 iCloud Drive",
+                buttonTitle: loc == .enUS ? "Export" : "导出",
                 disabled: historyBusy
             ) {
-                Task {
-                    do {
-                        let data = try await chatStore.exportDeepSeekZipDataAsync()
-                        exportDocument = ZipBackupDocument(data: data)
-                        isExporting = true
-                    } catch {
-                        chatStore.showToast("导出失败：\(error.localizedDescription)")
-                    }
-                }
+                showExportSheet = true
             }
             rowDivider
             HStack(spacing: 12) {

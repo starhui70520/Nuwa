@@ -52,6 +52,7 @@ final class DraftStore: ObservableObject {
         data: Data,
         fileName: String,
         isImage: Bool,
+        sourcePhotoAssetId: String? = nil,
         for sessionId: UUID?,
         settings: SettingsStore,
         onToast: @escaping (String) -> Void
@@ -81,11 +82,15 @@ final class DraftStore: ObservableObject {
                 let (file, normalizedData) = try AttachmentStore.saveLocally(data: data, originalName: fileName, isImage: isImage)
                 await MainActor.run {
                     var current = self.drafts[k] ?? DraftEntry()
+                    if let assetId = sourcePhotoAssetId,
+                       current.attachments.contains(where: { $0.sourcePhotoAssetId == assetId }) {
+                        return
+                    }
                     if isOpenAIMode {
-                        current.attachments.append(DraftAttachment(id: file.id, file: file, status: .done))
+                        current.attachments.append(DraftAttachment(id: file.id, file: file, status: .done, sourcePhotoAssetId: sourcePhotoAssetId))
                         self.drafts[k] = current
                     } else {
-                        current.attachments.append(DraftAttachment(id: file.id, file: file, status: .uploading))
+                        current.attachments.append(DraftAttachment(id: file.id, file: file, status: .uploading, sourcePhotoAssetId: sourcePhotoAssetId))
                         self.drafts[k] = current
                         self.uploadAttachment(fileId: file.id, data: normalizedData, file: file, draftKey: k, settings: settings, onToast: onToast)
                     }
@@ -258,6 +263,7 @@ final class ChatStore: ObservableObject {
     }
     @Published private(set) var activeSessionLoadFailed = false
     @Published var isGenerating = false
+    @Published private(set) var compactingProgress: [UUID: CompactionProgress] = [:]
     @Published private(set) var importingHistory = false
     @Published private(set) var importProgress: ImportProgress?
     @Published var toastMessage: String?
@@ -273,6 +279,7 @@ final class ChatStore: ObservableObject {
 
     private var activeTask: Task<Void, Never>?
     private var generationID: UUID?
+    private var compactionTasks: [UUID: Task<Bool, Never>] = [:]
     private var toastTask: Task<Void, Never>?
     private var saveWorkItem: DispatchWorkItem?
     private var saveToken: UUID?
@@ -467,6 +474,7 @@ final class ChatStore: ObservableObject {
 
     func deleteSession(_ id: UUID) {
         guard !committingImport else { return }
+        stopCompaction(id)
         if activeSessionId == id {
             stopGenerating()
             activeSessionId = nil
@@ -479,6 +487,7 @@ final class ChatStore: ObservableObject {
 
     func deleteSessions(_ ids: Set<UUID>) {
         guard !committingImport else { return }
+        for id in ids { stopCompaction(id) }
         if let active = activeSessionId, ids.contains(active) {
             stopGenerating()
             activeSessionId = nil
@@ -491,6 +500,7 @@ final class ChatStore: ObservableObject {
 
     func deleteAllSessions() {
         guard historyLoaded, !importingHistory else { return }
+        for id in Array(compactionTasks.keys) { stopCompaction(id) }
         stopGenerating()
         sessions.removeAll()
         draftStore.clearAll()
@@ -504,6 +514,9 @@ final class ChatStore: ObservableObject {
 
     func stopGenerating() {
         guard isGenerating else { return }
+        if let sid = activeSessionId {
+            stopCompaction(sid)
+        }
         generationID = nil
         activeTask?.cancel()
         activeTask = nil
@@ -780,8 +793,11 @@ final class ChatStore: ObservableObject {
             saveServerIds(sessionId: sessionId, map: uploadedMap)
         }
 
+        let activeCompactions = sessions.first(where: { $0.id == sessionId })?.compactions
+        let projectedHistory = ContextCompaction.projectContextItems(history: liveHistory, compactions: activeCompactions)
         var imageBudget = max(0, AIClient.maxRequestImages - liveQuestion.files.filter(\.isImage).count)
-        for (msg, _) in AIClient.contextRounds(liveHistory).reversed() {
+        for item in projectedHistory.reversed() {
+            guard case .round(let msg, _) = item else { continue }
             for file in msg.files.reversed() {
                 if file.isImage {
                     if imageBudget <= 0 { continue }
@@ -873,6 +889,8 @@ final class ChatStore: ObservableObject {
             var skippedBadImages = 0
             var imageCap = AIClient.maxRequestImages
             var cachedPrepared: (history: [ChatMessage], question: ChatMessage)?
+            var cachedRecalled: RecalledMemoryResult?
+            var didPreSendPrepare = false
             let maxFileRetries = 2
             let maxSkippedBadImages = 60
 
@@ -896,10 +914,56 @@ final class ChatStore: ObservableObject {
                     }
                     guard generationID == generation else { return }
 
+                    if !didPreSendPrepare {
+                        didPreSendPrepare = true
+                        if prefixReply == nil {
+                            let initialCompactions = sessions.first(where: { $0.id == sessionId })?.compactions
+                            if ContextCompaction.selectCompactionTarget(
+                                visibleMessages: prepared.history,
+                                compactions: initialCompactions,
+                                source: .auto
+                            ) != nil {
+                                _ = await compactSession(
+                                    sessionId,
+                                    source: .auto,
+                                    settings: settings,
+                                    historyOverride: prepared.history
+                                )
+                                guard generationID == generation, !Task.isCancelled else { return }
+                            }
+                            let latestCompactions = sessions.first(where: { $0.id == sessionId })?.compactions
+                            if let recalled = ContextCompaction.recallRelevantHistory(
+                                queryText: prepared.question.content,
+                                history: prepared.history,
+                                compactions: latestCompactions
+                            ) {
+                                cachedRecalled = recalled
+                                if let sIdx = sessions.firstIndex(where: { $0.id == sessionId }),
+                                   let mIdx = sessions[sIdx].messages.firstIndex(where: { $0.id == assistantId }) {
+                                    sessions[sIdx].messages[mIdx].recalledMemory = RecalledMemory(
+                                        roundNumbers: recalled.roundNumbers,
+                                        spanTitles: recalled.spanTitles,
+                                        blockText: recalled.blockText
+                                    )
+                                    scheduleSave()
+                                }
+                            }
+                        }
+                    }
+
+                    let sessionCompactions = sessions.first(where: { $0.id == sessionId })?.compactions
+                    var requestQuestion = prepared.question
+                    if let recalled = cachedRecalled {
+                        requestQuestion.content = requestQuestion.content.isEmpty
+                            ? recalled.blockText
+                            : "\(recalled.blockText)\n\n\(requestQuestion.content)"
+                    }
+
                     let wantsTitle = initialWantsTitle && !manuallyRenamedSessions.contains(sessionId)
                     let params = AIClient.StreamParams(
                         history: prepared.history,
-                        question: prepared.question,
+                        compactions: sessionCompactions,
+                        question: requestQuestion,
                         prefixReply: prefixReply,
                         useAccount: useAccount,
                         apiProtocol: apiProtocol,
@@ -1003,6 +1067,12 @@ final class ChatStore: ObservableObject {
                                    let autoTitle, !autoTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                                     pendingTitle = autoTitle.trimmingCharacters(in: .whitespacesAndNewlines)
                                 }
+
+                            case .usage(let inputTokens, let outputTokens):
+                                var usage = draft.usage ?? MessageTokenUsage()
+                                if let inputTokens, inputTokens > 0 { usage.inputTokens = inputTokens }
+                                if let outputTokens, outputTokens > 0 { usage.outputTokens = outputTokens }
+                                draft.usage = usage
 
                             case .disablePrefix:
                                 receivedContent = true
@@ -1129,6 +1199,176 @@ final class ChatStore: ObservableObject {
         }
     }
 
+    // MARK: - Context Compaction (Auto Pre-Send + Manual Batch Catch-Up + Edit / Restore)
+
+    func stopCompaction(_ sessionId: UUID) {
+        compactionTasks[sessionId]?.cancel()
+    }
+
+    @discardableResult
+    func compactSession(
+        _ sessionId: UUID,
+        source: CompactionSource = .manual,
+        settings: SettingsStore,
+        historyOverride: [ChatMessage]? = nil
+    ) async -> Bool {
+        guard compactionTasks[sessionId] == nil,
+              !importingHistory,
+              settings.hasActiveCredential,
+              let session = sessions.first(where: { $0.id == sessionId }),
+              session.hasLoadedMessages
+        else { return false }
+
+        let visible = historyOverride ?? session.visibleMessages()
+        if source == .auto,
+           ContextCompaction.selectCompactionTarget(visibleMessages: visible, compactions: session.compactions, source: .auto) == nil {
+            return false
+        }
+        let targets = ContextCompaction.selectBatchCompactionTargets(visibleMessages: visible, compactions: session.compactions)
+        guard !targets.isEmpty else { return false }
+
+        let useAccount = settings.isUsingDeepSeekAccount
+        let apiProtocol = settings.effectiveProtocol
+        let baseUrl = settings.effectiveBaseUrl
+        let secret = settings.activeSecret
+        let model = settings.compactionModel
+        let total = targets.count
+
+        compactingProgress[sessionId] = CompactionProgress(done: 0, total: total)
+
+        let workerTask = Task<Bool, Never> { @MainActor in
+            defer {
+                self.compactionTasks.removeValue(forKey: sessionId)
+                self.compactingProgress.removeValue(forKey: sessionId)
+            }
+
+            var completed = 0
+            var succeeded = 0
+            var nextIndex = 0
+            let maxConcurrency = min(ContextCompaction.batchCompactConcurrency, total)
+
+            await withTaskGroup(of: (Int, Result<CompactionSpan, Error>).self) { group in
+                func enqueueNext() {
+                    guard !Task.isCancelled, nextIndex < total else { return }
+                    let currentIdx = nextIndex
+                    nextIndex += 1
+                    let target = targets[currentIdx]
+                    let promptText = ContextCompaction.formatTranscriptForCompaction(target)
+                    let systemPrompt = ContextCompaction.systemPrompt(for: target.scene)
+                    group.addTask {
+                        do {
+                            let raw = try await AIClient.generateCompactionSummary(
+                                promptText: promptText,
+                                systemPrompt: systemPrompt,
+                                useAccount: useAccount,
+                                apiProtocol: apiProtocol,
+                                baseUrl: baseUrl,
+                                secret: secret,
+                                model: model
+                            )
+                            let parsed = ContextCompaction.parseSummaryAndKeywords(raw)
+                            guard !parsed.summary.isEmpty else {
+                                throw AIClientError.streamError("Compaction model returned empty summary")
+                            }
+                            let now = Date()
+                            let span = CompactionSpan(
+                                id: UUID(),
+                                startMessageId: target.startMessageId,
+                                endMessageId: target.endMessageId,
+                                title: target.title,
+                                summary: parsed.summary,
+                                keywords: parsed.keywords.isEmpty ? nil : parsed.keywords,
+                                editedByUser: nil,
+                                source: source,
+                                coveredRounds: target.rounds.count,
+                                originalTokensEstimate: target.originalTokensEstimate,
+                                summaryTokensEstimate: ContextCompaction.estimateTextTokens(parsed.summary),
+                                model: model,
+                                createdAt: now,
+                                updatedAt: now
+                            )
+                            return (currentIdx, .success(span))
+                        } catch {
+                            return (currentIdx, .failure(error))
+                        }
+                    }
+                }
+
+                for _ in 0..<maxConcurrency {
+                    enqueueNext()
+                }
+
+                for await (chunkIdx, result) in group {
+                    if !Task.isCancelled {
+                        switch result {
+                        case .success(let span):
+                            if !self.importingHistory,
+                               let sIdx = self.sessions.firstIndex(where: { $0.id == sessionId }),
+                               self.sessions[sIdx].hasLoadedMessages {
+                                self.sessions[sIdx].compactions = ContextCompaction.upsertSpan(
+                                    span,
+                                    into: self.sessions[sIdx].compactions
+                                )
+                                self.scheduleSave(immediate: true)
+                                succeeded += 1
+                            }
+                        case .failure(let error):
+                            if !(error is CancellationError) {
+                                AppLogStore.shared.record(
+                                    .error,
+                                    source: "chat.compaction",
+                                    message: "compaction (\(source.rawValue)) chunk \(chunkIdx + 1)/\(total) failed",
+                                    detail: error.localizedDescription
+                                )
+                            }
+                        }
+                    }
+                    completed += 1
+                    if !Task.isCancelled {
+                        self.compactingProgress[sessionId] = CompactionProgress(done: completed, total: total)
+                    }
+                    enqueueNext()
+                }
+            }
+
+            return succeeded > 0
+        }
+
+        compactionTasks[sessionId] = workerTask
+        return await withTaskCancellationHandler {
+            await workerTask.value
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.stopCompaction(sessionId)
+            }
+        }
+    }
+
+    func updateCompactionSummary(sessionId: UUID, spanId: UUID, summary: String, title: String? = nil) {
+        let cleaned = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty,
+              let sIdx = sessions.firstIndex(where: { $0.id == sessionId }),
+              var list = sessions[sIdx].compactions,
+              let spanIdx = list.firstIndex(where: { $0.id == spanId })
+        else { return }
+        if let title {
+            let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedTitle.isEmpty { list[spanIdx].title = trimmedTitle }
+        }
+        list[spanIdx].summary = cleaned
+        list[spanIdx].summaryTokensEstimate = ContextCompaction.estimateTextTokens(cleaned)
+        list[spanIdx].editedByUser = true
+        list[spanIdx].updatedAt = Date()
+        sessions[sIdx].compactions = list
+        scheduleSave(immediate: true)
+    }
+
+    func deleteCompactionSpan(sessionId: UUID, spanId: UUID) {
+        guard let sIdx = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
+        sessions[sIdx].compactions = ContextCompaction.removeSpan(id: spanId, from: sessions[sIdx].compactions)
+        scheduleSave(immediate: true)
+    }
+
     // MARK: - Import / Export / Share Link / Pending Migration / iCloud Auto-Backup
 
     func showToast(_ message: String) {
@@ -1170,6 +1410,23 @@ final class ChatStore: ObservableObject {
         let url = Self.storageURL
         return try await Task.detached(priority: .userInitiated) {
             try Self.exportSnapshot(snapshot, legacyURL: url)
+        }.value
+    }
+
+    func exportSingleSessionZipURL(_ id: UUID) async throws -> URL {
+        let session = try await sessionForSharing(id)
+        let fileName = DeepSeekZipExporter.singleSessionFileName(title: session.title)
+        return try await Task.detached(priority: .userInitiated) {
+            let zipData = try DeepSeekZipExporter.exportSessionsToZip([session])
+            return try DeepSeekZipExporter.writeTemporaryZip(data: zipData, fileName: fileName)
+        }.value
+    }
+
+    func exportAllSessionsZipURL() async throws -> URL {
+        let data = try await exportDeepSeekZipDataAsync()
+        let fileName = DeepSeekZipExporter.defaultFileName()
+        return try await Task.detached(priority: .userInitiated) {
+            try DeepSeekZipExporter.writeTemporaryZip(data: data, fileName: fileName)
         }.value
     }
 

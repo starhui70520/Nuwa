@@ -295,6 +295,27 @@ enum DeepSeekZipExporter {
         return "deepseek_data-\(df.string(from: date)).zip"
     }
 
+    static func singleSessionFileName(title: String, date: Date = Date()) -> String {
+        let invalid = CharacterSet(charactersIn: "\\/:*?\"<>|\r\n\t")
+        let cleaned = title
+            .components(separatedBy: invalid)
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"\s+"#, with: "_", options: .regularExpression)
+        let safeTitle = cleaned.isEmpty ? "session" : String(cleaned.prefix(32))
+        let df = DateFormatter()
+        df.dateFormat = "yyyy-MM-dd"
+        return "nuwa-\(safeTitle)-\(df.string(from: date)).zip"
+    }
+
+    static func writeTemporaryZip(data: Data, fileName: String) throws -> URL {
+        let folder = NuwaShareTypes.shareTempRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let url = folder.appendingPathComponent(fileName)
+        try data.write(to: url, options: [.atomic])
+        return url
+    }
+
     // MARK: - iCloud Ubiquity Auto-Backup (matches backup.ts)
 
     static func isIcloudAvailable() -> Bool {

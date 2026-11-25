@@ -14,6 +14,9 @@ struct ChatTimelineAppearance {
     let editingMessageID: UUID?
     let editDraft: String
     let disclosureOverrides: [UUID: Bool]
+    let compactionAfterMessage: [UUID: CompactionSpan]
+    let compactionExpandedIDs: Set<UUID>
+    let compactingProgress: CompactionProgress?
 }
 
 struct ChatTimeline<Row: View>: View {
@@ -33,6 +36,7 @@ struct ChatTimeline<Row: View>: View {
     let animateBoundaryJumps: Bool
     let latestLabel: String
     let onBackgroundTap: () -> Void
+    let onBeginDragging: () -> Void
     @ViewBuilder let row: (ChatMessage) -> Row
 
     @State private var latestCommand = 0
@@ -83,6 +87,7 @@ struct ChatTimeline<Row: View>: View {
             streamingCoordinator: streamingCoordinator,
             animateBoundaryJumps: animateBoundaryJumps && !reduceMotion,
             onBackgroundTap: onBackgroundTap,
+            onBeginDragging: onBeginDragging,
             row: row
         )
         #if compiler(>=6.2)
@@ -115,6 +120,7 @@ private struct TimelineCollection<Row: View>: UIViewRepresentable {
     let streamingCoordinator: TimelineStreamingCoordinator
     let animateBoundaryJumps: Bool
     let onBackgroundTap: () -> Void
+    let onBeginDragging: () -> Void
     let row: (ChatMessage) -> Row
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -298,15 +304,20 @@ private struct TimelineCollection<Row: View>: UIViewRepresentable {
             guard let index = indices[id] else { return }
             let message = renderedMessages[index]
             let appearance = input.appearance
+            let isLast = input.messages.last?.id == id
+            let compactionSpan = appearance.compactionAfterMessage[id]
             let key = TimelineCellKey(
                 message: message,
                 version: input.versions[id],
                 fontSize: appearance.fontSize,
                 locale: appearance.locale,
                 isGenerating: appearance.isGenerating,
-                isLast: input.messages.last?.id == id,
+                isLast: isLast,
                 editDraft: appearance.editingMessageID == id ? appearance.editDraft : nil,
                 disclosureExpanded: appearance.disclosureOverrides[id],
+                compactionSpan: compactionSpan,
+                compactionExpanded: compactionSpan.map { appearance.compactionExpandedIDs.contains($0.id) } ?? false,
+                compactingProgress: (isLast && appearance.isGenerating) ? appearance.compactingProgress : nil,
                 colorScheme: input.colorScheme
             )
             guard cell.key != key else { return }
@@ -315,6 +326,7 @@ private struct TimelineCollection<Row: View>: UIViewRepresentable {
 
         func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
             (scrollView as? TimelineCollectionView)?.beginDragging()
+            input.onBeginDragging()
         }
 
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
@@ -387,6 +399,9 @@ private struct TimelineCellKey: Equatable {
     let isLast: Bool
     let editDraft: String?
     let disclosureExpanded: Bool?
+    let compactionSpan: CompactionSpan?
+    let compactionExpanded: Bool
+    let compactingProgress: CompactionProgress?
     let colorScheme: ColorScheme
 }
 

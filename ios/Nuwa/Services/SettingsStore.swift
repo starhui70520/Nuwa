@@ -263,6 +263,16 @@ final class SettingsStore: ObservableObject {
         return trimmed.isEmpty ? (effectiveProtocol == .anthropic ? "deepseek-flash" : "deepseek-chat") : trimmed
     }
 
+    /// Model used for context compaction summaries (non-thinking for fast, low-cost summarization).
+    var compactionModel: String {
+        if isUsingDeepSeekAccount {
+            return "deepseek-flash"
+        }
+        let trimmed = apiModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty { return trimmed }
+        return effectiveProtocol == .anthropic ? "deepseek-flash" : "deepseek-chat"
+    }
+
     var profileDisplayName: String {
         if isUsingDeepSeekAccount {
             return dshAccountLabel.isEmpty ? "DeepSeek API 账号" : dshAccountLabel

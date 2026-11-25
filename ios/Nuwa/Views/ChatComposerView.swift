@@ -8,7 +8,9 @@ struct ChatComposerView: View {
     let attachments: [DraftAttachment]
     @Binding var thinkingEnabled: Bool
     @Binding var searchEnabled: Bool
+    @Binding var isAttachmentPanelOpen: Bool
     let locale: AppLocale
+    let hasActiveCredential: Bool
     let canSend: Bool
     let isGenerating: Bool
     let isRecording: Bool
@@ -22,9 +24,12 @@ struct ChatComposerView: View {
     let onToggleVoice: () -> Void
     let onCancelVoice: () -> Void
     let onPickPhotos: ([NuwaLegacyPickedImage]) -> Void
+    let onPickRecentPhoto: (Data, String, String) -> Void
     let onPickFiles: () -> Void
     let onRetryAttachment: (String) -> Void
     let onRemoveAttachment: (String) -> Void
+    let onRequireCredential: () -> Void
+    let onToast: (String) -> Void
 
     @FocusState private var isFocused: Bool
     @State private var legacyFocused = false
@@ -33,6 +38,9 @@ struct ChatComposerView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.nuwaFontScale) private var fontScale
     @State private var showPhotoPicker = false
+    @State private var showCameraPicker = false
+    @StateObject private var recentPhotos = RecentPhotosStore()
+    @State private var pickingPhotoIds: Set<String> = []
 
     private static let lightImpact = UIImpactFeedbackGenerator(style: .light)
 
@@ -149,14 +157,45 @@ struct ChatComposerView: View {
                     .allowsHitTesting(false)
             }
             .contentShape(RoundedRectangle(cornerRadius: 28))
+
+            if isAttachmentPanelOpen {
+                attachmentDrawerPanel
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
         }
         .padding(.horizontal, 22)
         .padding(.top, 6)
         .padding(.bottom, 10)
+        .animation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.86), value: isAttachmentPanelOpen)
         .nuwaOnChange(of: allowPressEffect && !isRecording) { enabled in
             if !enabled { pressing = false }
         }
+        .nuwaOnChange(of: isFocused) { focused in
+            if focused && isAttachmentPanelOpen {
+                isAttachmentPanelOpen = false
+            }
+        }
+        .nuwaOnChange(of: legacyFocused) { focused in
+            if focused && isAttachmentPanelOpen {
+                isAttachmentPanelOpen = false
+            }
+        }
+        .nuwaOnChange(of: isAttachmentPanelOpen) { open in
+            if open {
+                isFocused = false
+                legacyFocused = false
+                recentPhotos.loadRecentPhotos(limit: 16)
+            } else {
+                pickingPhotoIds.removeAll()
+            }
+        }
         .modifier(ComposerPhotoPickerModifier(isPresented: $showPhotoPicker, onPicked: onPickPhotos))
+        .fullScreenCover(isPresented: $showCameraPicker) {
+            CameraPickerView { captured in
+                onPickPhotos([captured])
+            }
+            .ignoresSafeArea()
+        }
     }
 
     @ViewBuilder
@@ -265,29 +304,210 @@ struct ChatComposerView: View {
     }
 
     private var attachmentMenuButton: some View {
-        Menu {
-            Button {
-                showPhotoPicker = true
-            } label: {
-                Label("相册图片", systemImage: "photo.on.rectangle")
+        Button {
+            guard hasActiveCredential else {
+                isAttachmentPanelOpen = false
+                onRequireCredential()
+                return
             }
-            Button {
-                onPickFiles()
-            } label: {
-                Label("选取文件 (PDF / Word / 代码等)", systemImage: "doc")
+            if hapticFeedbackEnabled { Self.lightImpact.impactOccurred() }
+            if !isAttachmentPanelOpen {
+                dismissEditorKeyboard()
             }
+            isAttachmentPanelOpen.toggle()
         } label: {
             Image(systemName: "plus.circle")
                 .font(.system(size: 22))
-                .foregroundStyle(Color.nuwaLabelPrimary)
+                .foregroundStyle(isAttachmentPanelOpen ? Color.nuwaBrandText : Color.nuwaLabelPrimary)
+                .rotationEffect(.degrees(isAttachmentPanelOpen ? 45 : 0))
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: isAttachmentPanelOpen)
                 .frame(width: 34, height: 34)
                 .contentShape(Circle())
         }
+        .buttonStyle(NuwaTactileButtonStyle(pressedScale: 0.92))
         .accessibilityLabel("上传文件")
     }
 
+    private var attachmentDrawerPanel: some View {
+        VStack(spacing: 10) {
+            if recentPhotos.isLoading || !recentPhotos.items.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        if recentPhotos.isLoading && recentPhotos.items.isEmpty {
+                            ForEach(0..<4, id: \.self) { _ in
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .fill(Color.nuwaControlFill)
+                                    .frame(width: 72, height: 72)
+                            }
+                        } else {
+                            ForEach(recentPhotos.items) { photo in
+                                recentPhotoTile(photo)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 2)
+                }
+            }
+
+            HStack(spacing: 10) {
+                attachmentActionCard(
+                    title: L10n.t("uploadCamera", locale: locale),
+                    systemImage: "camera"
+                ) {
+                    isAttachmentPanelOpen = false
+                    guard hasActiveCredential else {
+                        onRequireCredential()
+                        return
+                    }
+                    if UIImagePickerController.isSourceTypeAvailable(.camera) {
+                        showCameraPicker = true
+                    } else {
+                        onToast(locale == .enUS ? "Camera is not available on this device" : "当前设备不支持拍照")
+                    }
+                }
+
+                attachmentActionCard(
+                    title: L10n.t("uploadGallery", locale: locale),
+                    systemImage: "photo.on.rectangle"
+                ) {
+                    isAttachmentPanelOpen = false
+                    guard hasActiveCredential else {
+                        onRequireCredential()
+                        return
+                    }
+                    showPhotoPicker = true
+                }
+
+                attachmentActionCard(
+                    title: L10n.t("uploadDocument", locale: locale),
+                    systemImage: "paperclip"
+                ) {
+                    isAttachmentPanelOpen = false
+                    guard hasActiveCredential else {
+                        onRequireCredential()
+                        return
+                    }
+                    onPickFiles()
+                }
+            }
+        }
+        .padding(12)
+        .background {
+            Color.clear
+                .nuwaGlassCard(cornerRadius: 24, tint: colorScheme == .dark ? .white.opacity(0.06) : nil)
+                .allowsHitTesting(false)
+        }
+    }
+
+    @ViewBuilder
+    private func recentPhotoTile(_ photo: RecentPhotoAsset) -> some View {
+        let matchedAttachment = attachments.first(where: { $0.sourcePhotoAssetId == photo.id })
+        let picked = matchedAttachment != nil
+        let picking = pickingPhotoIds.contains(photo.id)
+
+        Button {
+            guard !picking else { return }
+            if let existing = matchedAttachment {
+                if hapticFeedbackEnabled { Self.lightImpact.impactOccurred() }
+                onRemoveAttachment(existing.id)
+                return
+            }
+            guard hasActiveCredential else {
+                isAttachmentPanelOpen = false
+                onRequireCredential()
+                return
+            }
+            if hapticFeedbackEnabled { Self.lightImpact.impactOccurred() }
+            pickingPhotoIds.insert(photo.id)
+            Task {
+                defer { pickingPhotoIds.remove(photo.id) }
+                if let loaded = await recentPhotos.loadFullImageData(assetId: photo.id) {
+                    onPickRecentPhoto(loaded.data, loaded.fileName, photo.id)
+                }
+            }
+        } label: {
+            ZStack(alignment: .topTrailing) {
+                Group {
+                    if let thumb = recentPhotos.thumbnails[photo.id] {
+                        Image(uiImage: thumb)
+                            .resizable()
+                            .scaledToFill()
+                    } else {
+                        Color.nuwaControlFill
+                    }
+                }
+                .frame(width: 72, height: 72)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .opacity(picking ? 0.55 : 1)
+
+                if picking {
+                    ProgressView()
+                        .tint(.white)
+                        .controlSize(.small)
+                        .frame(width: 72, height: 72)
+                }
+
+                ZStack {
+                    Circle()
+                        .fill(picked ? Color.nuwaBrand : Color.black.opacity(0.32))
+                        .frame(width: 22, height: 22)
+                    Circle()
+                        .strokeBorder(Color.white.opacity(0.92), lineWidth: 1.4)
+                        .frame(width: 22, height: 22)
+                    if picked {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(.white)
+                    }
+                }
+                .padding(5)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(NuwaTactileButtonStyle(pressedScale: 0.95))
+        .disabled(picking)
+        .accessibilityLabel(photo.fileName)
+    }
+
+    @ViewBuilder
+    private func attachmentActionCard(
+        title: String,
+        systemImage: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            VStack(spacing: 7) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 21, weight: .medium))
+                    .foregroundStyle(Color.nuwaLabelPrimary)
+                Text(title)
+                    .font(NuwaFont.captionMedium(fontScale))
+                    .foregroundStyle(Color.nuwaLabelSecondary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 76)
+            .background(Color.nuwaControlFill, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(Color.nuwaControlBorder, lineWidth: 0.75)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+        .buttonStyle(NuwaTactileButtonStyle(pressedScale: 0.96))
+    }
+
+    private func dismissEditorKeyboard() {
+        isFocused = false
+        legacyFocused = false
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    }
+
     private var voiceButton: some View {
-        Button(action: onToggleVoice) {
+        Button {
+            isAttachmentPanelOpen = false
+            onToggleVoice()
+        } label: {
             Group {
                 if isTranscribing {
                     ProgressView().controlSize(.mini)
@@ -308,6 +528,8 @@ struct ChatComposerView: View {
     private var sendButton: some View {
         Button {
             isFocused = false
+            legacyFocused = false
+            isAttachmentPanelOpen = false
             onSend()
         } label: {
             Image(systemName: "arrow.up")

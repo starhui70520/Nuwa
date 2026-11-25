@@ -141,6 +141,7 @@ struct DraftAttachment: Identifiable, Equatable {
     let id: String
     var file: FileAttachment
     var status: DraftUploadStatus
+    var sourcePhotoAssetId: String? = nil
 }
 
 struct DraftEntry: Equatable {
@@ -204,6 +205,39 @@ enum ReplyBlock: Identifiable, Codable, Equatable {
     }
 }
 
+enum CompactionSource: String, Codable, Equatable {
+    case auto
+    case manual
+}
+
+struct CompactionSpan: Identifiable, Codable, Equatable {
+    let id: UUID
+    let startMessageId: UUID
+    let endMessageId: UUID
+    var title: String
+    var summary: String
+    var keywords: [String]?
+    var editedByUser: Bool?
+    let source: CompactionSource
+    let coveredRounds: Int
+    let originalTokensEstimate: Int
+    var summaryTokensEstimate: Int
+    let model: String?
+    let createdAt: Date
+    var updatedAt: Date
+}
+
+struct RecalledMemory: Codable, Equatable {
+    let roundNumbers: [Int]
+    let spanTitles: [String]
+    let blockText: String?
+}
+
+struct MessageTokenUsage: Codable, Equatable {
+    var inputTokens: Int?
+    var outputTokens: Int?
+}
+
 enum ReplyStatus: String, Codable {
     case pending
     case streaming
@@ -234,6 +268,8 @@ struct ChatMessage: Identifiable, Codable, Equatable {
     var searchEnabled: Bool
     var prefixEnabled: Bool
     var latestReminder: String?
+    var recalledMemory: RecalledMemory?
+    var usage: MessageTokenUsage?
     var createdAt: Date
     var errorMessage: String?
 
@@ -307,6 +343,8 @@ struct ChatMessage: Identifiable, Codable, Equatable {
         searchEnabled: Bool = false,
         prefixEnabled: Bool = true,
         latestReminder: String? = nil,
+        recalledMemory: RecalledMemory? = nil,
+        usage: MessageTokenUsage? = nil,
         createdAt: Date = Date(),
         isStreaming: Bool = false,
         errorMessage: String? = nil
@@ -326,6 +364,8 @@ struct ChatMessage: Identifiable, Codable, Equatable {
         self.searchEnabled = searchEnabled
         self.prefixEnabled = prefixEnabled
         self.latestReminder = latestReminder
+        self.recalledMemory = recalledMemory
+        self.usage = usage
         self.createdAt = createdAt
         self.errorMessage = errorMessage
     }
@@ -333,7 +373,7 @@ struct ChatMessage: Identifiable, Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case id, parentId, selectedChildId, role, content, reasoning, thinkingSeconds
         case files, blocks, status, stopReason, thinkingEnabled, searchEnabled, prefixEnabled
-        case latestReminder, createdAt, errorMessage
+        case latestReminder, recalledMemory, usage, createdAt, errorMessage
     }
 
     init(from decoder: Decoder) throws {
@@ -354,6 +394,8 @@ struct ChatMessage: Identifiable, Codable, Equatable {
         searchEnabled = try c.decodeIfPresent(Bool.self, forKey: .searchEnabled) ?? false
         prefixEnabled = try c.decodeIfPresent(Bool.self, forKey: .prefixEnabled) ?? true
         latestReminder = try c.decodeIfPresent(String.self, forKey: .latestReminder)
+        recalledMemory = try c.decodeIfPresent(RecalledMemory.self, forKey: .recalledMemory)
+        usage = try c.decodeIfPresent(MessageTokenUsage.self, forKey: .usage)
         createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         errorMessage = try c.decodeIfPresent(String.self, forKey: .errorMessage)
     }
@@ -372,6 +414,7 @@ struct ChatSession: Identifiable, Codable, Equatable {
     var title: String
     var rootMessageId: UUID?
     var messages: [ChatMessage]
+    var compactions: [CompactionSpan]?
     var createdAt: Date
     var updatedAt: Date
     var isPinned: Bool
@@ -379,12 +422,13 @@ struct ChatSession: Identifiable, Codable, Equatable {
     private(set) var hasLoadedMessages = true
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, rootMessageId, messages, createdAt, updatedAt, isPinned, pinnedAt
+        case id, title, rootMessageId, messages, compactions, createdAt, updatedAt, isPinned, pinnedAt
     }
 
     var metadataOnly: ChatSession {
         var result = self
         result.messages = []
+        result.compactions = nil
         result.hasLoadedMessages = false
         return result
     }
@@ -401,6 +445,7 @@ struct ChatSession: Identifiable, Codable, Equatable {
         title: String = "",
         rootMessageId: UUID? = nil,
         messages: [ChatMessage] = [],
+        compactions: [CompactionSpan]? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
         isPinned: Bool = false,
@@ -410,6 +455,7 @@ struct ChatSession: Identifiable, Codable, Equatable {
         self.title = title
         self.rootMessageId = rootMessageId
         self.messages = messages
+        self.compactions = compactions
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.isPinned = isPinned

@@ -22,6 +22,11 @@ struct ChatView: View {
     @State private var showMigrationWeb = false
     @State private var showZipImporter = false
     @State private var showAttachmentFilePicker = false
+    @State private var isAttachmentPanelOpen = false
+    @State private var showContextMemory = false
+    @State private var compactionExpandedIDs: Set<UUID> = []
+    @State private var exportingSessionTarget: SessionSummaryItem?
+    @State private var sessionExportBusyMode: ExportDestination?
 
     @State private var editingMessageId: UUID?
     @State private var editDraftText = ""
@@ -61,7 +66,7 @@ struct ChatView: View {
         let sid = chatStore.activeSessionId?.uuidString ?? ""
         let count = chatStore.activeSession?.messages.count ?? 0
         let title = chatStore.activeSession?.title ?? ""
-        return "\(sid)|\(count)|\(title)|\(chatStore.isGenerating)|\(chatStore.importingHistory)|\(drawerOpen)|\(showSettings)|\(settings.showMigrationPrompt)|\(previewImage != nil)|\(chatStore.pendingIncomingFile != nil)"
+        return "\(sid)|\(count)|\(title)|\(chatStore.isGenerating)|\(chatStore.importingHistory)|\(drawerOpen)|\(showSettings)|\(showContextMemory)|\(exportingSessionTarget != nil)|\(settings.showMigrationPrompt)|\(previewImage != nil)|\(chatStore.pendingIncomingFile != nil)"
     }
 
     private var rootStage: some View {
@@ -91,9 +96,10 @@ struct ChatView: View {
                             wideOpen: sidebarVisible,
                             compactOpen: $drawerOpen,
                             gestureEnabled: !settings.showMigrationPrompt && !showSettings &&
+                                !showContextMemory && exportingSessionTarget == nil &&
                                 editingMessageId == nil && previewImage == nil,
                             hapticEnabled: UIDevice.current.userInterfaceIdiom == .phone && settings.hapticFeedbackEnabled,
-                            dismissKeyboard: dismissKeyboard
+                            dismissKeyboard: dismissKeyboardAndPanels
                         ) {
                             SessionDrawerView(
                                 listStore: listStore,
@@ -120,6 +126,12 @@ struct ChatView: View {
                                 onTogglePin: { chatStore.togglePin($0) },
                                 onSetSessionsPinned: { chatStore.setSessionsPinned($0, pinned: $1) },
                                 onRenameSession: { chatStore.renameSession($0, title: $1) },
+                                onExportSession: { id in
+                                    guard let target = listStore.summaries.first(where: { $0.id == id }) else { return }
+                                    if !wide { closeDrawer() }
+                                    dismissKeyboardAndPanels()
+                                    exportingSessionTarget = target
+                                },
                                 onShareSession: { id in
                                     Task {
                                         do {
@@ -153,13 +165,13 @@ struct ChatView: View {
                             ) {
                                 if wide {
                                     if sidebarVisible {
-                                        dismissKeyboard()
+                                        dismissKeyboardAndPanels()
                                     }
                                     sidebarVisible.toggle()
                                 } else if drawerOpen {
                                     closeDrawer()
                                 } else {
-                                    dismissKeyboard()
+                                    dismissKeyboardAndPanels()
                                     drawerOpen = true
                                 }
                             }
@@ -223,11 +235,16 @@ struct ChatView: View {
             .nuwaOnChange(of: chatStore.activeSessionId) { _ in
                 speech.stopSpeaking()
                 editingMessageId = nil
+                isAttachmentPanelOpen = false
                 isAtBottom = true
                 disclosureOverrides.removeAll()
+                compactionExpandedIDs.removeAll()
                 disclosureAnchorID = nil
             }
             .nuwaOnChange(of: showSettings) { open in
+                if open {
+                    isAttachmentPanelOpen = false
+                }
                 if open || !sidebarSearchFocus.isFocused {
                     dismissKeyboard()
                 }
@@ -267,7 +284,7 @@ struct ChatView: View {
 
     private func attachSheetsAndImporters<V: View>(to content: V) -> some View {
         let incomingBinding = Binding<IncomingFileRequest?>(
-            get: { (showSettings || showMigrationWeb || searchPanelResults != nil) ? nil : chatStore.pendingIncomingFile },
+            get: { (showSettings || showMigrationWeb || showContextMemory || exportingSessionTarget != nil || searchPanelResults != nil) ? nil : chatStore.pendingIncomingFile },
             set: { if $0 == nil { chatStore.dismissPendingIncomingFile() } }
         )
         let searchResultsBinding = Binding<Bool>(
@@ -278,6 +295,52 @@ struct ChatView: View {
             .sheet(isPresented: $showSettings) {
                 SettingsView(settings: settings, chatStore: chatStore)
                     .environment(\.nuwaFontScale, fontScale)
+            }
+            .sheet(isPresented: $showContextMemory) {
+                if let sessionId = chatStore.activeSessionId {
+                    ContextMemorySheetView(
+                        chatStore: chatStore,
+                        settings: settings,
+                        sessionId: sessionId,
+                        onRequireCredential: { showSettings = true }
+                    )
+                    .environment(\.nuwaFontScale, fontScale)
+                }
+            }
+            .sheet(item: $exportingSessionTarget) { target in
+                ExportActionSheetView(
+                    title: L10n.t("exportSession", locale: settings.locale),
+                    subtitle: target.title.isEmpty ? L10n.t("untitledChat", locale: settings.locale) : target.title,
+                    locale: settings.locale,
+                    busyMode: sessionExportBusyMode,
+                    onSelect: { destination in
+                        guard sessionExportBusyMode == nil else { return }
+                        sessionExportBusyMode = destination
+                        Task {
+                            do {
+                                let fileURL = try await chatStore.exportSingleSessionZipURL(target.id)
+                                sessionExportBusyMode = nil
+                                exportingSessionTarget = nil
+                                try? await Task.sleep(nanoseconds: 280_000_000)
+                                ExportPresenter.present(fileURL: fileURL, destination: destination) { completed in
+                                    if completed {
+                                        chatStore.showToast(L10n.t("sessionExported", locale: settings.locale))
+                                    }
+                                }
+                            } catch {
+                                sessionExportBusyMode = nil
+                                exportingSessionTarget = nil
+                                chatStore.showToast("导出失败：\(error.localizedDescription)")
+                            }
+                        }
+                    },
+                    onCancel: {
+                        if sessionExportBusyMode == nil {
+                            exportingSessionTarget = nil
+                        }
+                    }
+                )
+                .environment(\.nuwaFontScale, fontScale)
             }
             .sheet(item: incomingBinding) { request in
                 IncomingFileActionSheet(
@@ -323,9 +386,11 @@ struct ChatView: View {
     }
 
     private func resetOverlaysForIncomingShare() {
-        dismissKeyboard()
+        dismissKeyboardAndPanels()
         if drawerOpen { drawerOpen = false }
         if showSettings { showSettings = false }
+        if showContextMemory { showContextMemory = false }
+        if exportingSessionTarget != nil { exportingSessionTarget = nil }
         if searchPanelResults != nil { searchPanelResults = nil }
         if previewImage != nil { previewImage = nil }
     }
@@ -573,14 +638,29 @@ struct ChatView: View {
                 .background(Color.nuwaBrand)
             }
 
+            let contextStats: ContextStats? = {
+                guard let session = chatStore.activeSession, let timeline = chatStore.activeTimeline else { return nil }
+                return ContextCompaction.inspectContextStats(
+                    visibleMessages: timeline.messages,
+                    compactions: session.compactions
+                )
+            }()
+            let compactProgress = chatStore.activeSessionId.flatMap { chatStore.compactingProgress[$0] }
+
             ChatHeaderView(
                 speech: speech,
                 settings: settings,
                 hasMessages: hasMessages,
                 sessionTitle: sessionTitle,
+                contextStats: contextStats,
+                compactProgress: compactProgress,
                 sidebarShown: sidebarShown,
                 drawerModal: drawerModal,
                 onOpenDrawer: onToggleSidebar,
+                onOpenContextMemory: {
+                    dismissKeyboardAndPanels()
+                    showContextMemory = true
+                },
                 onScrollToTop: { scrollToTopToken += 1 },
                 onCreateNewSession: { chatStore.createNewSession() },
                 onToast: { chatStore.showToast($0) }
@@ -598,6 +678,7 @@ struct ChatView: View {
             settings: settings,
             speech: speech,
             sessionId: chatStore.activeSessionId,
+            isAttachmentPanelOpen: $isAttachmentPanelOpen,
             isGenerating: chatStore.isGenerating,
             isImporting: chatStore.importingHistory || !chatStore.historyLoaded
                 || chatStore.activeSessionIsLoading || chatStore.activeSessionLoadFailed,
@@ -608,6 +689,7 @@ struct ChatView: View {
                 chatStore.stopGenerating()
             },
             onPickFiles: { showAttachmentFilePicker = true },
+            onRequireCredential: { showSettings = true },
             onToast: { chatStore.showToast($0) }
         )
         .frame(maxWidth: 680)
@@ -758,13 +840,23 @@ struct ChatView: View {
         .padding(.bottom, usesSystemSafeAreaBars ? 0 : bottomSafe + composerHeight)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
-        .onTapGesture(perform: dismissKeyboard)
+        .onTapGesture(perform: dismissKeyboardAndPanels)
     }
 
     private func messageList(_ timeline: ChatStore.ActiveTimeline, topSafe: CGFloat, bottomSafe: CGFloat) -> some View {
         let messages = timeline.messages
         let versions = timeline.versions
         let last = messages.last
+        let session = chatStore.activeSession
+        let activeCompactions = ContextCompaction.resolveActiveCompactions(
+            rounds: AIClient.contextRounds(messages),
+            compactions: session?.compactions
+        )
+        let compactionAfterMessage: [UUID: CompactionSpan] = Dictionary(
+            activeCompactions.map { ($0.span.endMessageId, $0.span) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let compactingProgress = session.flatMap { chatStore.compactingProgress[$0.id] }
         return ChatTimeline(
             isAtBottom: $isAtBottom,
             messages: messages,
@@ -775,7 +867,10 @@ struct ChatView: View {
                 isGenerating: chatStore.isGenerating,
                 editingMessageID: editingMessageId,
                 editDraft: editDraftText,
-                disclosureOverrides: disclosureOverrides
+                disclosureOverrides: disclosureOverrides,
+                compactionAfterMessage: compactionAfterMessage,
+                compactionExpandedIDs: compactionExpandedIDs,
+                compactingProgress: compactingProgress
             ),
             topInset: headerHeight,
             bottomInset: composerHeight,
@@ -788,7 +883,12 @@ struct ChatView: View {
             streamingCoordinator: streamingCoordinator,
             animateBoundaryJumps: messages.count <= 240,
             latestLabel: settings.locale == .enUS ? "Scroll to latest" : "跳到最新消息",
-            onBackgroundTap: dismissKeyboard
+            onBackgroundTap: dismissKeyboardAndPanels,
+            onBeginDragging: {
+                if isAttachmentPanelOpen {
+                    isAttachmentPanelOpen = false
+                }
+            }
         ) { message in
             Group {
                 if message.id == last?.id && message.isStreaming && chatStore.isGenerating {
@@ -797,10 +897,22 @@ struct ChatView: View {
                         fallback: message,
                         onUpdate: { streamingCoordinator.onLiveRowUpdated?() }
                     ) { reply in
-                        messageRow(message: reply, versionInfo: versions[reply.id], isLast: true)
+                        messageRow(
+                            message: reply,
+                            versionInfo: versions[reply.id],
+                            isLast: true,
+                            compactionAfter: compactionAfterMessage[reply.id],
+                            compactingProgress: compactingProgress
+                        )
                     }
                 } else {
-                    messageRow(message: message, versionInfo: versions[message.id], isLast: message.id == last?.id)
+                    messageRow(
+                        message: message,
+                        versionInfo: versions[message.id],
+                        isLast: message.id == last?.id,
+                        compactionAfter: compactionAfterMessage[message.id],
+                        compactingProgress: nil
+                    )
                 }
             }
             .frame(maxWidth: 748)
@@ -809,14 +921,20 @@ struct ChatView: View {
             .background {
                 Color.clear
                     .contentShape(Rectangle())
-                    .onTapGesture(perform: dismissKeyboard)
+                    .onTapGesture(perform: dismissKeyboardAndPanels)
                     .accessibilityHidden(true)
             }
         }
     }
 
     @ViewBuilder
-    private func messageRow(message: ChatMessage, versionInfo: MessageVersionInfo?, isLast: Bool) -> some View {
+    private func messageRow(
+        message: ChatMessage,
+        versionInfo: MessageVersionInfo?,
+        isLast: Bool,
+        compactionAfter: CompactionSpan?,
+        compactingProgress: CompactionProgress?
+    ) -> some View {
         let versionInfo = versionInfo ?? MessageVersionInfo(ids: [message.id], index: 0)
 
         if message.role == .user {
@@ -939,9 +1057,29 @@ struct ChatView: View {
             let refused = message.stopReason == "refusal"
             let reply = ReplyPresentation(message)
             let displayText = reply.answer
+            let compactingBeforeReply = isLast && message.isStreaming && compactingProgress != nil && displayText.isEmpty && reply.steps.isEmpty
 
             VStack(alignment: .leading, spacing: 10) {
-                if reply.hasDisclosure || !reply.steps.isEmpty {
+                if let recalled = message.recalledMemory, !recalled.roundNumbers.isEmpty {
+                    HStack(spacing: 5) {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text(
+                            L10n.t("recalledMemoryBadge", locale: settings.locale)
+                                .replacingOccurrences(
+                                    of: "{rounds}",
+                                    with: recalled.roundNumbers.map(String.init).joined(separator: "、")
+                                )
+                        )
+                        .font(NuwaFont.badge(fontScale))
+                    }
+                    .foregroundStyle(Color.nuwaBrandText)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(Color.nuwaBrand.opacity(0.11), in: Capsule())
+                }
+
+                if !compactingBeforeReply && (reply.hasDisclosure || !reply.steps.isEmpty) {
                     ReplyProcessView(
                         reply: reply,
                         fontSize: settings.chatFontSize,
@@ -971,6 +1109,20 @@ struct ChatView: View {
                         onCopyCode: { _ in chatStore.showToast(L10n.t("copied", locale: settings.locale)) }
                     )
                     .equatable()
+                } else if compactingBeforeReply, let progress = compactingProgress {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text(
+                            progress.total > 1
+                                ? L10n.t("replyCompactingContextProgress", locale: settings.locale)
+                                    .replacingOccurrences(of: "{done}", with: String(progress.done))
+                                    .replacingOccurrences(of: "{total}", with: String(progress.total))
+                                : L10n.t("replyCompactingContext", locale: settings.locale)
+                        )
+                        .font(NuwaFont.sublabel(fontScale))
+                        .foregroundStyle(Color.nuwaLabelSecondary)
+                    }
                 } else if message.isStreaming && !reply.hasDisclosure && reply.steps.isEmpty {
                     HStack(spacing: 8) {
                         ProgressView()
@@ -1083,6 +1235,40 @@ struct ChatView: View {
                         }
                     }
                 }
+
+                if let span = compactionAfter, let sessionId = chatStore.activeSessionId {
+                    CompactionCardView(
+                        span: span,
+                        locale: settings.locale,
+                        isExpanded: compactionExpandedIDs.contains(span.id),
+                        onToggleExpanded: { next in
+                            var transaction = Transaction(animation: nil)
+                            transaction.disablesAnimations = true
+                            withTransaction(transaction) {
+                                disclosureAnchorID = message.id
+                                disclosureAnchorToken += 1
+                                if next {
+                                    compactionExpandedIDs.insert(span.id)
+                                } else {
+                                    compactionExpandedIDs.remove(span.id)
+                                }
+                            }
+                        },
+                        onSave: { updatedSummary in
+                            chatStore.updateCompactionSummary(
+                                sessionId: sessionId,
+                                spanId: span.id,
+                                summary: updatedSummary
+                            )
+                            chatStore.showToast(L10n.t("compactMemorySavedToast", locale: settings.locale))
+                        },
+                        onRestore: {
+                            compactionExpandedIDs.remove(span.id)
+                            chatStore.deleteCompactionSpan(sessionId: sessionId, spanId: span.id)
+                            chatStore.showToast(L10n.t("compactMemoryRestoredToast", locale: settings.locale))
+                        }
+                    )
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -1138,6 +1324,13 @@ struct ChatView: View {
         }
     }
 
+    private func dismissKeyboardAndPanels() {
+        if isAttachmentPanelOpen {
+            isAttachmentPanelOpen = false
+        }
+        dismissKeyboard()
+    }
+
     private func dismissKeyboard() {
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
         for scene in UIApplication.shared.connectedScenes {
@@ -1187,6 +1380,8 @@ struct ChatView: View {
     private func syncProximityShare() {
         let eligible = !drawerOpen
             && !showSettings
+            && !showContextMemory
+            && exportingSessionTarget == nil
             && !settings.showMigrationPrompt
             && previewImage == nil
             && chatStore.pendingIncomingFile == nil
@@ -1198,6 +1393,7 @@ struct ChatView: View {
     }
 
     private func sendMessage() {
+        isAttachmentPanelOpen = false
         guard settings.hasActiveCredential else {
             showSettings = true
             return
@@ -1503,9 +1699,12 @@ private struct ChatHeaderView: View {
     @ObservedObject var settings: SettingsStore
     let hasMessages: Bool
     let sessionTitle: String
+    let contextStats: ContextStats?
+    let compactProgress: CompactionProgress?
     let sidebarShown: Bool
     let drawerModal: Bool
     let onOpenDrawer: () -> Void
+    let onOpenContextMemory: () -> Void
     let onScrollToTop: () -> Void
     let onCreateNewSession: () -> Void
     let onToast: (String) -> Void
@@ -1546,6 +1745,16 @@ private struct ChatHeaderView: View {
             }
 
             HStack(spacing: 2) {
+                if let stats = contextStats,
+                   stats.totalRounds >= 2 || !stats.activeCompactions.isEmpty || compactProgress != nil {
+                    ContextStatusTriggerButton(
+                        stats: stats,
+                        compactProgress: compactProgress,
+                        locale: settings.locale,
+                        onTap: onOpenContextMemory
+                    )
+                }
+
                 Button {
                     if speech.isSpeaking {
                         speech.stopSpeaking()
@@ -1594,12 +1803,14 @@ private struct ChatComposerContainer: View {
     @ObservedObject var settings: SettingsStore
     @ObservedObject var speech: SpeechService
     let sessionId: UUID?
+    @Binding var isAttachmentPanelOpen: Bool
     let isGenerating: Bool
     let isImporting: Bool
     let allowPressEffect: Bool
     let onSend: () -> Void
     let onStop: () -> Void
     let onPickFiles: () -> Void
+    let onRequireCredential: () -> Void
     let onToast: (String) -> Void
 
     @State private var voiceDraftPrefix = ""
@@ -1618,7 +1829,9 @@ private struct ChatComposerContainer: View {
             attachments: currentDraft.attachments,
             thinkingEnabled: $settings.thinkingEnabled,
             searchEnabled: $settings.searchEnabled,
+            isAttachmentPanelOpen: $isAttachmentPanelOpen,
             locale: settings.locale,
+            hasActiveCredential: settings.hasActiveCredential,
             canSend: draftStore.canSend(for: sessionId, isBusy: isImporting || isGenerating),
             isGenerating: isGenerating,
             isRecording: speech.isRecording,
@@ -1646,13 +1859,26 @@ private struct ChatComposerContainer: View {
             },
             onCancelVoice: { speech.cancelRecording() },
             onPickPhotos: { items in handlePickedPhotos(items) },
+            onPickRecentPhoto: { data, fileName, assetId in
+                draftStore.addFile(
+                    data: data,
+                    fileName: fileName,
+                    isImage: true,
+                    sourcePhotoAssetId: assetId,
+                    for: sessionId,
+                    settings: settings,
+                    onToast: onToast
+                )
+            },
             onPickFiles: onPickFiles,
             onRetryAttachment: { fileId in
                 draftStore.retryAttachment(fileId: fileId, for: sessionId, settings: settings, onToast: onToast)
             },
             onRemoveAttachment: { fileId in
                 draftStore.removeAttachment(fileId: fileId, for: sessionId)
-            }
+            },
+            onRequireCredential: onRequireCredential,
+            onToast: onToast
         )
         .nuwaOnChange(of: speech.errorMessage) { newError in
             if let newError { onToast(newError) }

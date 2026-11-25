@@ -10,7 +10,7 @@ settings:
   base:
     SWIFT_VERSION: "5.9"
     TARGETED_DEVICE_FAMILY: "1,2"
-    MARKETING_VERSION: "0.1.39"
+    MARKETING_VERSION: "0.1.40"
     CURRENT_PROJECT_VERSION: "1"
     NUWA_APP_BUNDLE_ID: com.rankchord.nuwa
     NUWA_APP_PROFILE: ""
@@ -78,6 +78,8 @@ targets:
                 - application/vnd.nuwa.session+zip
         NSMicrophoneUsageDescription: 用于语音输入，将语音转写为文字发送给助手
         NSSpeechRecognitionUsageDescription: 用于语音输入，在设备上进行语音识别
+        NSPhotoLibraryUsageDescription: 用于在输入框附件面板快速展示和选择最近照片发送给助手
+        NSCameraUsageDescription: 用于在对话中拍照并将照片发送给助手
         UILaunchStoryboardName: LaunchScreen
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait

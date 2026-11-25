@@ -63,7 +63,7 @@ final class ChatHistoryPersistence {
             }
             try db.statement("""
                 INSERT INTO session_catalog (id, metadata)
-                SELECT id, json_set(json_remove(CAST(payload AS TEXT), '$.messages'), '$.messages', json('[]'))
+                SELECT id, json_set(json_remove(CAST(payload AS TEXT), '$.messages', '$.compactions'), '$.messages', json('[]'))
                 FROM sessions WHERE rowid = ?
                 """) { statement in
                 for row in missing {
