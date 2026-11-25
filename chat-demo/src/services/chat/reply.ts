@@ -336,7 +336,12 @@ export const toRequestMessages = (
       continue
     }
     appendReminder(reply.latestReminder)
-    messages.push(toUserParam(user), toAssistantParam(reply))
+    // Append-Only 保缓存：若该历史轮次曾触发过回溯，原样复原其 <recalled_memory> 前缀直至下次压缩折叠
+    const recalledPrefix = reply.recalledMemory?.blockText
+    const effectiveUser: UserMessage = recalledPrefix
+      ? { ...user, content: `${recalledPrefix}\n\n${user.content}` }
+      : user
+    messages.push(toUserParam(effectiveUser), toAssistantParam(reply))
   }
   appendReminder(latestReminder)
   messages.push(toUserParam(question))

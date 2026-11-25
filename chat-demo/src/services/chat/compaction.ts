@@ -681,9 +681,13 @@ export const recallRelevantHistory = (
   }
 
   const tailParts: string[] = []
+  const alreadyRecalledInTail = new Set<number>()
   for (let i = 0; i < rounds.length; i++) {
     if (!coveredIndexes.has(i)) {
       tailParts.push(rounds[i][0].content, getReplyText(rounds[i][1]))
+      for (const num of rounds[i][1].recalledMemory?.roundNumbers ?? []) {
+        alreadyRecalledInTail.add(num)
+      }
     }
   }
   const tailLower = tailParts.join('\n').toLowerCase()
@@ -731,6 +735,10 @@ export const recallRelevantHistory = (
 
   const scored: Array<{ entry: (typeof covered)[number]; score: number }> = []
   for (let i = 0; i < N; i++) {
+    // 同轮去重：当前未压缩尾部里已经回溯过的历史轮次不再重复注入，既省 Token 又保缓存
+    if (alreadyRecalledInTail.has(covered[i].roundNumber)) {
+      continue
+    }
     let score = 0
     const doc = covered[i].docLower
     for (const t of usefulTerms) {

@@ -1416,12 +1416,14 @@ const buildOpenAIRequestMessages = async (
     if (!user.content && imageBlocks.length === 0) {
       continue
     }
+    const recalledPrefix = reply.recalledMemory?.blockText
+    const userText = recalledPrefix ? `${recalledPrefix}\n\n${user.content}` : user.content
     messages.push({
       role: 'user',
       content:
         imageBlocks.length > 0
-          ? [...imageBlocks, ...(user.content ? [{ type: 'text' as const, text: user.content }] : [])]
-          : user.content,
+          ? [...imageBlocks, ...(userText ? [{ type: 'text' as const, text: userText }] : [])]
+          : userText,
     })
     messages.push({
       role: 'assistant',
@@ -1725,6 +1727,7 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
             recalledMemory: {
               roundNumbers: recalled.roundNumbers,
               spanTitles: recalled.spanTitles,
+              blockText: recalled.blockText,
             },
           }
           updateReply(sessionId, reply)

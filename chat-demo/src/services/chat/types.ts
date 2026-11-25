@@ -92,10 +92,11 @@ export type AssistantMessage = MessageBranch & {
   stopDetails?: StopDetails
   /** 最近一次请求的用量，续写后更新 */
   usage?: MessageUsage
-  /** 本轮请求自动回溯的历史原文轮次（仅用于 UI 微提示） */
+  /** 本轮请求自动回溯的历史原文轮次（同时保留 blockText 供后续轮次复原字节级前缀以命中 Prefix Cache） */
   recalledMemory?: {
     roundNumbers: number[]
     spanTitles: string[]
+    blockText?: string
   }
   error?: {
     /** upload：发送前补传附件失败，请求没有发出 */
