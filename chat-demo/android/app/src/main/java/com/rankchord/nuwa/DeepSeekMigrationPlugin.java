@@ -2,6 +2,8 @@ package com.rankchord.nuwa;
 
 import android.Manifest;
 import android.content.ComponentName;
+import android.content.ContentResolver;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -13,13 +15,16 @@ import android.media.AudioManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.MediaStore;
 import android.provider.Settings;
 import android.speech.RecognitionListener;
 import android.speech.SpeechRecognizer;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
+import android.util.Base64;
 import androidx.core.content.ContextCompat;
 import androidx.core.content.FileProvider;
 
@@ -35,6 +40,7 @@ import com.getcapacitor.annotation.PermissionCallback;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
@@ -1448,6 +1454,108 @@ public class DeepSeekMigrationPlugin extends Plugin {
                 if (conn != null) {
                     conn.disconnect();
                 }
+            }
+        }).start();
+    }
+
+    @PluginMethod
+    public void saveFileToDocuments(PluginCall call) {
+        String rawName = call.getString("name", "");
+        String base64 = call.getString("data", "");
+        if (rawName == null || rawName.trim().isEmpty() || base64 == null || base64.isEmpty()) {
+            call.reject("INVALID_DATA");
+            return;
+        }
+        String safeName = rawName.trim().replaceAll("[\\\\/:*?\"<>|]", "_");
+        if (safeName.isEmpty()) {
+            safeName = "nuwa-history.zip";
+        }
+        final String finalName = safeName;
+        final String mimeType = finalName.toLowerCase(Locale.ROOT).endsWith(".zip")
+            ? "application/zip"
+            : "application/octet-stream";
+
+        new Thread(() -> {
+            try {
+                byte[] bytes = Base64.decode(base64, Base64.DEFAULT);
+                if (bytes == null || bytes.length == 0) {
+                    mainHandler.post(() -> call.reject("INVALID_DATA"));
+                    return;
+                }
+
+                // Android 10+ (API 29+): 直接通过 MediaStore 写入系统公共「下载/Nuwa」目录，无需存储权限
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    try {
+                        ContentResolver resolver = getContext().getContentResolver();
+                        ContentValues values = new ContentValues();
+                        values.put(MediaStore.Downloads.DISPLAY_NAME, finalName);
+                        values.put(MediaStore.Downloads.MIME_TYPE, mimeType);
+                        values.put(
+                            MediaStore.Downloads.RELATIVE_PATH,
+                            Environment.DIRECTORY_DOWNLOADS + "/Nuwa"
+                        );
+                        values.put(MediaStore.Downloads.IS_PENDING, 1);
+
+                        Uri uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+                        if (uri != null) {
+                            try (OutputStream out = resolver.openOutputStream(uri)) {
+                                if (out == null) {
+                                    throw new IllegalStateException("Cannot open MediaStore output stream");
+                                }
+                                out.write(bytes);
+                                out.flush();
+                            } catch (Exception writeErr) {
+                                resolver.delete(uri, null, null);
+                                throw writeErr;
+                            }
+                            ContentValues doneValues = new ContentValues();
+                            doneValues.put(MediaStore.Downloads.IS_PENDING, 0);
+                            resolver.update(uri, doneValues, null, null);
+
+                            JSObject ret = new JSObject();
+                            ret.put("presented", true);
+                            ret.put("savedPath", "Download/Nuwa/" + finalName);
+                            mainHandler.post(() -> call.resolve(ret));
+                            return;
+                        }
+                    } catch (Exception ignored) {
+                        // 若个别定制 ROM 的 MediaStore 异常，自动降级为系统分享/保存面板
+                    }
+                }
+
+                // Android 9 及以下或 MediaStore 降级：写入 cache/exports 并拉起系统分享/保存面板
+                File exportDir = new File(getContext().getCacheDir(), "exports");
+                if (!exportDir.exists()) {
+                    //noinspection ResultOfMethodCallIgnored
+                    exportDir.mkdirs();
+                }
+                File outFile = new File(exportDir, finalName);
+                try (FileOutputStream fos = new FileOutputStream(outFile)) {
+                    fos.write(bytes);
+                    fos.flush();
+                }
+
+                Uri shareUri = FileProvider.getUriForFile(
+                    getContext(),
+                    getContext().getPackageName() + ".fileprovider",
+                    outFile
+                );
+                Intent shareIntent = new Intent(Intent.ACTION_SEND);
+                shareIntent.setType(mimeType);
+                shareIntent.putExtra(Intent.EXTRA_STREAM, shareUri);
+                shareIntent.putExtra(Intent.EXTRA_SUBJECT, finalName);
+                shareIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                Intent chooser = Intent.createChooser(shareIntent, finalName);
+                chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+
+                mainHandler.post(() -> {
+                    getContext().startActivity(chooser);
+                    JSObject ret = new JSObject();
+                    ret.put("presented", true);
+                    call.resolve(ret);
+                });
+            } catch (Exception e) {
+                mainHandler.post(() -> call.reject("EXPORT_SAVE_FAILED: " + e.getMessage(), e));
             }
         }).start();
     }

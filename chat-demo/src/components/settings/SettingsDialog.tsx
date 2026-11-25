@@ -1519,12 +1519,15 @@ const ExportHistory = ({ disabled }: { disabled: boolean }) => {
     setStatus(null)
     try {
       const { name, blob } = await exportHistory()
-      if (isNativeIos()) {
-        // iOS：走原生文件面板，可保存到 iCloud Drive / 本地
-        await DeepSeekMigration.saveFileToDocuments({
+      if (isNativeIos() || isNativeAndroid()) {
+        // iOS：系统文件面板（iCloud Drive / 本机）；Android：写入系统 Download/Nuwa 或拉起分享面板
+        const res = await DeepSeekMigration.saveFileToDocuments({
           name,
           data: await blobToBase64(blob),
         })
+        if (res?.savedPath) {
+          setStatus({ key: 'historyExportSaved', params: { path: res.savedPath } })
+        }
       } else {
         const url = URL.createObjectURL(blob)
         const link = document.createElement('a')

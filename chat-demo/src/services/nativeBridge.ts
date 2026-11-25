@@ -47,7 +47,10 @@ export type DeepSeekMigrationPlugin = {
   openSystemTtsSettings: () => Promise<void>
   prepareExternalUrls: (options: { urls: string[] }) => Promise<void>
   openExternalUrl: (options: { url: string; dark?: boolean }) => Promise<void>
-  saveFileToDocuments: (options: { name: string; data: string }) => Promise<{ presented: boolean }>
+  saveFileToDocuments: (options: {
+    name: string
+    data: string
+  }) => Promise<{ presented: boolean; savedPath?: string }>
   icloudStatus: () => Promise<{ available: boolean }>
   icloudBackupNow: (options: { name: string; data: string }) => Promise<{ path: string }>
   fetchShareContent: (options: { shareId: string }) => Promise<{ status: number; body: string }>
