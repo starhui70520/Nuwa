@@ -9,7 +9,12 @@ import { searchSessionIdsByContent } from '../../services/chat/db.js'
 import { groupSessions } from '../../services/chat/sessionGroups.js'
 import { newChat, removeSession, setSessionsPinned, useChatStore } from '../../services/chat/store.js'
 import type { SessionSummary } from '../../services/chat/types.js'
-import { isUsingDeepSeekAccount, setSiderCollapsed, useSettings } from '../../services/settings.js'
+import {
+  isUsingDeepSeekAccount,
+  isUsingRankAIFree,
+  setSiderCollapsed,
+  useSettings,
+} from '../../services/settings.js'
 import { Button } from '../base/Button.js'
 import { IconButton } from '../base/IconButton.js'
 import {
@@ -37,6 +42,7 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
   const sessions = useChatStore((state) => state.sessions)
   const activeId = useChatStore((state) => state.activeId)
   const isAccount = useSettings((state) => isUsingDeepSeekAccount(state))
+  const isRankAIFree = useSettings((state) => isUsingRankAIFree(state))
   const dshAccountLabel = useSettings((state) => state.dshAccountLabel)
   const apiModel = useSettings((state) => state.apiModel)
   const balance = useBalance((state) => state.balance)
@@ -222,7 +228,9 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
 
   const profileName = isAccount
     ? dshAccountLabel || t('dshAccountLabel')
-    : apiModel.trim() || t('appName')
+    : isRankAIFree
+      ? t('rankaiFreeLabel')
+      : apiModel.trim() || t('appName')
 
   return (
     <div className={clsx(styles.sider, mobile && styles.mobile)}>

@@ -106,7 +106,10 @@ import {
   createNativeLatestReminder, defaultNativeLocale, nativeCityOptions, NativeLocale, NativeLocationOption,
   nativeProvinceOptions, nativeRegionOptions, NativeUserLocation, usesChineseLocationPicker,
 } from '../native/NativeLocation';
-import { NativeApiCredentialDraft, NativeSettings, NativeSettingsController, NATIVE_CHAT_FONT_SIZES } from '../native/NativeSettings';
+import {
+  NativeApiCredentialDraft, NativeSettings, NativeSettingsController, NATIVE_CHAT_FONT_SIZES,
+  RANKAI_API_KEY, RANKAI_BASE_URL, RANKAI_MODEL,
+} from '../native/NativeSettings';
 import {
   createSidebarRows, createSidebarSections, filterSidebarGroups, matchesSidebarBody, NativeSidebarRow, NativeSidebarSearch,
   NativeSidebarSection, NativeSidebarSession, normalizeSidebarQuery, SIDEBAR_HISTORY_PAGE_SIZE, visibleSidebarRowIndex,
@@ -955,8 +958,12 @@ struct NativeChat {
     return !this.settings.signedOut && this.settings.authMode === 'deepseek-account' ? this.account?.token ?? '' : '';
   }
 
+  private isUsingRankAIFree(): boolean {
+    return !this.settings.signedOut && this.settings.authMode === 'rankai-free';
+  }
+
   private authenticated(): boolean {
-    return !this.settings.signedOut && (!!this.settings.apiKey || !!this.accountToken() ||
+    return !this.settings.signedOut && (!!this.settings.apiKey || !!this.accountToken() || this.isUsingRankAIFree() ||
       (!!this.settings.model.trim() && allowsKeylessNativeApi(this.settings.baseUrl, this.settings.protocol)));
   }
 
@@ -976,6 +983,10 @@ struct NativeChat {
 
   private async refreshBalance(force: boolean = false): Promise<void> {
     if (!this.balanceRefreshEnabled || this.signingOut) return;
+    if (this.isUsingRankAIFree()) {
+      this.resetBalance();
+      return;
+    }
     const token = this.accountToken();
     const key = this.settings.signedOut ? '' : this.settings.apiKey.trim();
     const binding = this.settings.attachmentBinding;
@@ -1328,13 +1339,63 @@ struct NativeChat {
     }
   }
 
+  private async enableRankAIFree(): Promise<void> {
+    const settings = this.settingsSnapshot();
+    settings.authMode = 'rankai-free';
+    settings.signedOut = false;
+    settings.attachmentBinding = util.generateRandomUUID(true);
+    try {
+      await this.settingsStore.save(this.host(), settings);
+      this.settings = settings;
+      this.resetBalance(true);
+      this.toast(this.label('已切换为 RankAI 免费额度', 'Switched to RankAI Free Quota'));
+    } catch {
+      this.toast(this.label('无法保存设置', "Unable to save settings"));
+    }
+  }
+
+  private async disableRankAIFree(): Promise<void> {
+    const settings = this.settingsSnapshot();
+    settings.authMode = this.account ? 'deepseek-account' : 'api-key';
+    settings.attachmentBinding = util.generateRandomUUID(true);
+    try {
+      await this.settingsStore.save(this.host(), settings);
+      this.settings = settings;
+      void this.refreshBalance(true);
+      this.toast(this.label('已切回原有账号配置', 'Switched back to previous account'));
+      if (!this.authenticated()) {
+        this.settingsVisible = false;
+      }
+    } catch {
+      this.toast(this.label('无法保存设置', "Unable to save settings"));
+    }
+  }
+
+  private async enableApiKeyMode(): Promise<void> {
+    if (!this.settings.apiKey.trim()) {
+      return;
+    }
+    const settings = this.settingsSnapshot();
+    settings.authMode = 'api-key';
+    settings.attachmentBinding = util.generateRandomUUID(true);
+    try {
+      await this.settingsStore.save(this.host(), settings);
+      this.settings = settings;
+      void this.refreshBalance(true);
+    } catch {
+      this.toast(this.label('无法保存设置', "Unable to save settings"));
+    }
+  }
+
   private async logoutAccount(): Promise<void> {
     const account = this.account;
     try {
       await saveNativeAccount(null);
       this.account = null;
       this.resetBalance(true);
-      this.settings.authMode = 'api-key';
+      if (this.settings.authMode === 'deepseek-account') {
+        this.settings.authMode = 'api-key';
+      }
       this.settings.attachmentBinding = util.generateRandomUUID(true);
       await this.saveSettings();
       void this.refreshBalance();
@@ -2160,6 +2221,13 @@ struct NativeChat {
   }
 
   private requestConfig(): NativeChatConfig {
+    if (this.isUsingRankAIFree()) {
+      return {
+        baseUrl: RANKAI_BASE_URL, model: RANKAI_MODEL, apiKey: RANKAI_API_KEY,
+        protocol: 'openai', thinking: this.settings.thinking, search: false,
+        accountToken: '',
+      };
+    }
     return {
       baseUrl: this.settings.baseUrl.trim(), model: this.settings.model.trim(), apiKey: this.settings.apiKey.trim(),
       protocol: this.settings.protocol, thinking: this.settings.thinking, search: this.settings.search,
@@ -2365,7 +2433,7 @@ struct NativeChat {
   private canSendDraft(): boolean {
     const session = this.session();
     return !session?.unloaded && !session?.unreadable && this.attachmentIntakeDraftId !== (this.history.activeId ?? '') &&
-      (!this.draftFiles.length || !!this.accountToken() || this.settings.protocol === 'anthropic' ||
+      (!this.draftFiles.length || (!this.isUsingRankAIFree() && (!!this.accountToken() || this.settings.protocol === 'anthropic')) ||
         this.draftFiles.every((file: NativeDraftAttachment): boolean => file.item.isImage)) &&
       !this.recognitionId && this.canModifyHistory() && (!!this.draft.trim() || this.draftFiles.length > 0) &&
       this.draftFiles.every((file: NativeDraftAttachment): boolean => file.state === 'ready');
@@ -5727,11 +5795,13 @@ struct NativeChat {
     this.settingsLabel(() => this.label('账户', 'Account'))
     Column() {
       this.settingsRow($r('app.media.native_settings_account'), () => this.label('账号管理', 'Account management'), () =>
-        this.accountToken() ? this.account?.label ?? this.label('DeepSeek API 账号', 'DeepSeek API account') : this.settings.model,
+        this.accountToken() ? this.account?.label ?? this.label('DeepSeek API 账号', 'DeepSeek API account') :
+          (this.isUsingRankAIFree() ? this.label('RankAI 免费额度', 'RankAI Free Quota') : this.settings.model),
         () => { this.openSettings('account'); })
       Divider().color($r('app.color.native_chat_stroke'))
       this.settingsRow($r('app.media.native_settings_wallet'), () => this.label('API 余额', 'API balance'),
-        () => this.label('前往充值', 'Top up'), () => { void this.openLink('https://platform.deepseek.com/top_up'); },
+        () => this.isUsingRankAIFree() ? this.label('限时免费', 'Free') : this.label('前往充值', 'Top up'),
+        () => { void this.openLink('https://platform.deepseek.com/top_up'); },
         () => true, true)
       Divider().color($r('app.color.native_chat_stroke'))
       this.settingsRow($r('app.media.native_settings_data'), () => this.label('数据管理', 'Data management'),
@@ -5915,8 +5985,11 @@ struct NativeChat {
             .fontWeight(FontWeight.Medium).fontColor($r('app.color.native_chat_primary'))
           if (this.account) {
             Text(this.accountToken() ? this.label(`当前生效：${this.account.label}`, `Active: ${this.account.label}`) :
-              this.label(`已登录：${this.account.label}（当前使用自定义 API Key）`,
-                `Signed in: ${this.account.label} (using custom API Key)`))
+              (this.isUsingRankAIFree() ?
+                this.label(`已登录：${this.account.label}（当前使用 RankAI 免费额度）`,
+                  `Signed in: ${this.account.label} (using RankAI Free Quota)`) :
+                this.label(`已登录：${this.account.label}（当前使用自定义 API Key）`,
+                  `Signed in: ${this.account.label} (using custom API Key)`)))
               .fontSize(this.appFontSize(12)).fontColor($r('app.color.native_chat_secondary'))
           } else {
             Text(this.label('通过 DeepSeek 开放平台授权登录，免手动复制 API Key',
@@ -5948,6 +6021,46 @@ struct NativeChat {
       }
       .width('100%').padding(14).borderRadius(16).backgroundColor($r('app.color.native_chat_surface'))
     }
+    Row({ space: 12 }) {
+      Column({ space: 4 }) {
+        Row({ space: 6 }) {
+          Text(this.label('RankAI 免费额度', 'RankAI Free Quota')).fontSize(this.appFontSize(14))
+            .fontWeight(FontWeight.Medium).fontColor($r('app.color.native_chat_primary'))
+          Text(this.label('限时', 'Limited'))
+            .fontSize(this.appFontSize(11)).fontWeight(FontWeight.Medium)
+            .fontColor('#D97706').backgroundColor('#24F59E0B')
+            .padding({ left: 6, right: 6, top: 2, bottom: 2 }).borderRadius(100)
+        }
+        .alignItems(VerticalAlign.Center)
+        Text(this.isUsingRankAIFree() ?
+          this.label('当前生效 · 免费使用DeepSeek额度', 'Active · Use DeepSeek quota for free') :
+          this.label('免费使用DeepSeek额度', 'Use DeepSeek quota for free'))
+          .fontSize(this.appFontSize(12)).fontColor($r('app.color.native_chat_secondary'))
+      }
+      .layoutWeight(1).alignItems(HorizontalAlign.Start)
+      if (this.isUsingRankAIFree()) {
+        Button(this.label('取消使用', 'Disable'), { buttonStyle: ButtonStyleMode.TEXTUAL })
+          .height(34).fontSize(this.appFontSize(13)).fontColor($r('app.color.native_chat_primary'))
+          .clickEffect(NATIVE_PILL_CLICK_EFFECT)
+          .enabled(!this.settingsVerifying && !this.backupBusy)
+          .onClick(() => {
+            triggerNativeHaptic('light');
+            void this.disableRankAIFree();
+          })
+      } else {
+        Button(this.label('切换使用', 'Switch'), { type: ButtonType.Capsule })
+          .height(34).padding({ left: 14, right: 14 }).fontSize(this.appFontSize(13)).fontWeight(FontWeight.Medium)
+          .backgroundColor($r('app.color.native_chat_blue')).fontColor(Color.White)
+          .clickEffect(NATIVE_PILL_CLICK_EFFECT)
+          .enabled(!this.settingsVerifying && !this.backupBusy)
+          .onClick(() => {
+            triggerNativeHaptic('light');
+            void this.enableRankAIFree();
+          })
+      }
+    }
+    .width('100%').padding(14).borderRadius(16).alignItems(VerticalAlign.Center)
+    .backgroundColor($r('app.color.native_chat_surface'))
     Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween, alignItems: ItemAlign.Center,
       space: { main: LengthMetrics.vp(10), cross: LengthMetrics.vp(8) } }) {
       Text(this.label('接口协议', 'API Protocol')).fontSize(this.appFontSize(14)).fontWeight(FontWeight.Medium)
@@ -6028,6 +6141,13 @@ struct NativeChat {
         Row({ space: 8 }) {
           Text('*'.repeat(this.settings.apiKey.length)).layoutWeight(1).fontSize(this.appFontSize(14)).maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis }).fontColor($r('app.color.native_chat_secondary'))
+          if (this.settings.authMode !== 'api-key') {
+            Button(this.label('切换为此 Key', 'Use Key'), { buttonStyle: ButtonStyleMode.TEXTUAL })
+              .height(32).fontSize(this.appFontSize(12)).fontColor($r('app.color.native_chat_blue_text'))
+              .clickEffect(NATIVE_PILL_CLICK_EFFECT)
+              .enabled(!this.settingsVerifying)
+              .onClick(() => { void this.enableApiKeyMode(); })
+          }
           this.iconButton($r('app.media.native_edit'), this.label('修改 API Key', 'Edit API Key'),
             () => { this.editSettingsKey(); }, 32, 16, $r('app.color.native_chat_blue_text'))
         }
@@ -6490,6 +6610,7 @@ struct NativeChat {
 
   private sidebarProfileName(): string {
     if (this.accountToken()) return this.account?.label || this.label('DeepSeek API 账号', 'DeepSeek API Account');
+    if (this.isUsingRankAIFree()) return this.label('RankAI 免费额度', 'RankAI Free Quota');
     return this.settings.model.trim() || 'Nuwa';
   }
 

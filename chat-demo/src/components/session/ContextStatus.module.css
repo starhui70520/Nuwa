@@ -147,6 +147,64 @@
   background: var(--dsw-alias-border-l1);
 }
 
+.settingRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.settingText {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.settingTitle {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
+}
+
+.settingDesc {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.switchTrack {
+  position: relative;
+  flex-shrink: 0;
+  width: 44px;
+  height: 26px;
+  padding: 2px;
+  border: none;
+  border-radius: 999px;
+  background: var(--dsw-alias-border-l2);
+  cursor: pointer;
+  transition: background-color 0.2s var(--ds-ease-in-out);
+}
+
+.switchTrackOn {
+  background: var(--dsw-alias-brand-primary);
+}
+
+.switchThumb {
+  display: block;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22);
+  transform: translateX(0);
+  transition: transform 0.2s var(--ds-ease-in-out);
+}
+
+.switchTrackOn .switchThumb {
+  transform: translateX(18px);
+}
+
 .sectionTitle {
   font-size: 12px;
   font-weight: 500;

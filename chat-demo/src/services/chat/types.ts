@@ -150,6 +150,8 @@ export type Session = {
   messages: Message[]
   /** 非破坏性上下文压缩块列表；按分支路径锚定，不影响原消息展示与导出。 */
   compactions?: CompactionSpan[]
+  /** 是否允许发送前自动压缩上下文；缺省或 false 表示默认不自动压缩。 */
+  autoCompact?: boolean
   /** undefined 表示线性消息列表；null 表示空会话。 */
   rootMessageId?: string | null
   /** 置顶时间戳（毫秒）；缺省或 undefined 表示未置顶。 */

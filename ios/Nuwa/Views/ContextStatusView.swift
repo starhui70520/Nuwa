@@ -113,6 +113,7 @@ struct ContextMemorySheetView: View {
         let session = chatStore.sessions.first(where: { $0.id == sessionId })
         let visible = session?.hasLoadedMessages == true ? (session?.visibleMessages() ?? []) : []
         let stats = ContextCompaction.inspectContextStats(visibleMessages: visible, compactions: session?.compactions)
+        let autoCompactEnabled = session?.autoCompact == true
         let compactProgress = chatStore.compactingProgress[sessionId]
         let compacting = compactProgress != nil
         let level = ContextPressureLevel(pressure: stats.pressure)
@@ -181,6 +182,37 @@ struct ContextMemorySheetView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(cardBg, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
 
+                        // Per-session auto-compact toggle card (default OFF)
+                        HStack(spacing: 12) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(L10n.t("contextStatusAutoCompactLabel", locale: loc))
+                                    .font(NuwaFont.controlMedium(fontScale))
+                                    .foregroundStyle(Color.nuwaLabelPrimary)
+                                Text(L10n.t("contextStatusAutoCompactDesc", locale: loc))
+                                    .font(NuwaFont.caption(fontScale))
+                                    .foregroundStyle(Color.nuwaLabelTertiary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            Spacer(minLength: 8)
+                            Toggle("", isOn: Binding(
+                                get: { autoCompactEnabled },
+                                set: { next in
+                                    chatStore.setSessionAutoCompact(sessionId, enabled: next)
+                                    chatStore.showToast(
+                                        L10n.t(
+                                            next ? "contextStatusAutoCompactOnToast" : "contextStatusAutoCompactOffToast",
+                                            locale: loc
+                                        )
+                                    )
+                                }
+                            ))
+                            .labelsHidden()
+                            .tint(Color.nuwaBrand)
+                        }
+                        .padding(16)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(cardBg, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+
                         // Section Header
                         Text(
                             L10n.t("contextStatusMemoryListTitle", locale: loc)
@@ -192,7 +224,12 @@ struct ContextMemorySheetView: View {
                         .padding(.top, 2)
 
                         if stats.activeCompactions.isEmpty {
-                            Text(L10n.t("contextStatusMemoryEmpty", locale: loc))
+                            Text(
+                                L10n.t(
+                                    autoCompactEnabled ? "contextStatusMemoryEmpty" : "contextStatusMemoryEmptyManual",
+                                    locale: loc
+                                )
+                            )
                                 .font(NuwaFont.sublabel(fontScale))
                                 .foregroundStyle(Color.nuwaLabelSecondary)
                                 .multilineTextAlignment(.center)
@@ -260,11 +297,6 @@ struct ContextMemorySheetView: View {
                         } else {
                             let disabled = chatStore.isGenerating || chatStore.importingHistory || !stats.canManualCompact
                             Button {
-                                guard settings.hasActiveCredential else {
-                                    dismiss()
-                                    onRequireCredential()
-                                    return
-                                }
                                 Task {
                                     let ok = await chatStore.compactSession(sessionId, source: .manual, settings: settings)
                                     chatStore.showToast(L10n.t(ok ? "compactMemorySuccess" : "compactMemoryEmpty", locale: loc))

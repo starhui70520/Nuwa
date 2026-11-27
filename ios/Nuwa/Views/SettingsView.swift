@@ -388,9 +388,11 @@ struct SettingsView: View {
             navRow(
                 icon: "creditcard",
                 label: L10n.t("apiBalance", locale: loc),
-                value: settings.deepSeekBalanceText ?? L10n.t("topUp", locale: loc),
-                valueAccent: settings.deepSeekBalanceText != nil,
-                valueDanger: settings.isBalanceLow
+                value: settings.isUsingRankAIFree
+                    ? L10n.t("apiBalanceFree", locale: loc)
+                    : (settings.deepSeekBalanceText ?? L10n.t("topUp", locale: loc)),
+                valueAccent: settings.isUsingRankAIFree || settings.deepSeekBalanceText != nil,
+                valueDanger: !settings.isUsingRankAIFree && settings.isBalanceLow
             ) {
                 openURL(topUpURL)
             }
@@ -598,63 +600,120 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var accountPage: some View {
+        let loc = settings.locale
         groupCard {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("DeepSeek API 账号")
-                            .font(NuwaFont.controlMedium(fontScale))
-                            .foregroundStyle(Color.nuwaLabelPrimary)
-                        if !settings.dshToken.isEmpty {
-                            Text(settings.isUsingDeepSeekAccount
-                                 ? "当前生效：\(settings.dshAccountLabel.isEmpty ? "DeepSeek API 账号" : settings.dshAccountLabel)"
-                                 : "已登录（当前使用自定义 API Key）")
-                                .font(NuwaFont.badge(fontScale))
-                                .foregroundStyle(Color.nuwaLabelTertiary)
+            VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("DeepSeek API 账号")
+                                .font(NuwaFont.controlMedium(fontScale))
+                                .foregroundStyle(Color.nuwaLabelPrimary)
+                            if !settings.dshToken.isEmpty {
+                                Text(settings.isUsingDeepSeekAccount
+                                     ? "当前生效：\(settings.dshAccountLabel.isEmpty ? "DeepSeek API 账号" : settings.dshAccountLabel)"
+                                     : (settings.isUsingRankAIFree
+                                        ? "已登录（当前使用 RankAI 免费额度）"
+                                        : "已登录（当前使用自定义 API Key）"))
+                                    .font(NuwaFont.badge(fontScale))
+                                    .foregroundStyle(Color.nuwaLabelTertiary)
+                            } else {
+                                Text("通过 DeepSeek 开放平台授权登录，免手动复制 API Key")
+                                    .font(NuwaFont.badge(fontScale))
+                                    .foregroundStyle(Color.nuwaLabelTertiary)
+                            }
+                        }
+                        Spacer()
+                        if settings.dshToken.isEmpty {
+                            Button("账号登录") {
+                                showDeepSeekAuth = true
+                            }
+                            .font(NuwaFont.sized(13, weight: .semibold, scale: fontScale))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(Color.nuwaBrand, in: Capsule())
                         } else {
-                            Text("通过 DeepSeek 开放平台授权登录，免手动复制 API Key")
-                                .font(NuwaFont.badge(fontScale))
-                                .foregroundStyle(Color.nuwaLabelTertiary)
+                            HStack(spacing: 8) {
+                                if !settings.isUsingDeepSeekAccount {
+                                    Button("切换使用") {
+                                        settings.authMode = .deepseekAccount
+                                        Task { await settings.refreshBalance(force: true) }
+                                    }
+                                    .font(NuwaFont.captionMedium(fontScale))
+                                    .foregroundStyle(Color.nuwaBrandText)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 7)
+                                    .nuwaPillSurface(selected: true)
+                                    .buttonStyle(NuwaTactileButtonStyle())
+                                }
+                                Button("退出") {
+                                    settings.signOutDeepSeekAccount()
+                                }
+                                .font(NuwaFont.captionMedium(fontScale))
+                                .foregroundStyle(.red)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 7)
+                                .nuwaPillSurface(destructive: true)
+                                .buttonStyle(NuwaTactileButtonStyle())
+                            }
                         }
                     }
+                }
+                .padding(16)
+
+                rowDivider
+
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 6) {
+                            Text(L10n.t("rankaiFreeLabel", locale: loc))
+                                .font(NuwaFont.controlMedium(fontScale))
+                                .foregroundStyle(Color.nuwaLabelPrimary)
+                            Text(L10n.t("rankaiFreeLimitedBadge", locale: loc))
+                                .font(NuwaFont.sized(11, weight: .semibold, scale: fontScale))
+                                .foregroundStyle(colorScheme == .dark
+                                    ? Color(red: 251 / 255, green: 191 / 255, blue: 36 / 255)
+                                    : Color(red: 217 / 255, green: 119 / 255, blue: 6 / 255))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(
+                                    Color(red: 245 / 255, green: 158 / 255, blue: 11 / 255)
+                                        .opacity(colorScheme == .dark ? 0.22 : 0.14),
+                                    in: Capsule()
+                                )
+                        }
+                        Text(L10n.t(settings.isUsingRankAIFree ? "rankaiFreeActiveDesc" : "rankaiFreeDesc", locale: loc))
+                            .font(NuwaFont.badge(fontScale))
+                            .foregroundStyle(Color.nuwaLabelTertiary)
+                    }
                     Spacer()
-                    if settings.dshToken.isEmpty {
-                        Button("账号登录") {
-                            showDeepSeekAuth = true
+                    if settings.isUsingRankAIFree {
+                        Button(L10n.t("rankaiFreeDisableButton", locale: loc)) {
+                            settings.disableRankAIFree()
+                            chatStore.showToast(L10n.t("rankaiFreeDisabledToast", locale: loc))
+                        }
+                        .font(NuwaFont.captionMedium(fontScale))
+                        .foregroundStyle(Color.nuwaLabelPrimary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .nuwaPillSurface()
+                        .buttonStyle(NuwaTactileButtonStyle())
+                    } else {
+                        Button(L10n.t("rankaiFreeEnableButton", locale: loc)) {
+                            settings.enableRankAIFree()
+                            chatStore.showToast(L10n.t("rankaiFreeEnabledToast", locale: loc))
                         }
                         .font(NuwaFont.sized(13, weight: .semibold, scale: fontScale))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 8)
                         .background(Color.nuwaBrand, in: Capsule())
-                    } else {
-                        HStack(spacing: 8) {
-                            if !settings.isUsingDeepSeekAccount {
-                                Button("切换使用") {
-                                    settings.authMode = .deepseekAccount
-                                    Task { await settings.refreshBalance(force: true) }
-                                }
-                                .font(NuwaFont.captionMedium(fontScale))
-                                .foregroundStyle(Color.nuwaBrandText)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 7)
-                                .nuwaPillSurface(selected: true)
-                                .buttonStyle(NuwaTactileButtonStyle())
-                            }
-                            Button("退出") {
-                                settings.signOutDeepSeekAccount()
-                            }
-                            .font(NuwaFont.captionMedium(fontScale))
-                            .foregroundStyle(.red)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 7)
-                            .nuwaPillSurface(destructive: true)
-                            .buttonStyle(NuwaTactileButtonStyle())
-                        }
+                        .buttonStyle(NuwaTactileButtonStyle())
                     }
                 }
+                .padding(16)
             }
-            .padding(16)
         }
         .padding(.top, 8)
 
@@ -797,6 +856,22 @@ struct SettingsView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(verifyingKey || apiKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                if !settings.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && settings.authMode != .apiKey {
+                    Button {
+                        settings.authMode = .apiKey
+                        Task { await settings.refreshBalance(force: true) }
+                        chatStore.showToast("已切换为自定义 API Key")
+                    } label: {
+                        Text("切换为已保存的 API Key")
+                            .font(NuwaFont.captionMedium(fontScale))
+                            .foregroundStyle(Color.nuwaBrandText)
+                            .frame(maxWidth: .infinity)
+                            .frame(minHeight: max(38, 26 + 12 * fontScale))
+                            .nuwaPillSurface(selected: true)
+                    }
+                    .buttonStyle(NuwaTactileButtonStyle())
+                }
             }
             .padding(16)
         }

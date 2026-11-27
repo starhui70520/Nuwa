@@ -3,6 +3,7 @@ import type {
   CreateMessageRequest,
   MessageParam,
   MessageStreamEvent,
+  MessageUsage,
   StopReason,
 } from './types.js'
 
@@ -91,7 +92,10 @@ const buildOpenAIUserContent = (
   return text ? [...imageParts, { type: 'text', text }] : imageParts
 }
 
-export const buildOpenAIChatBody = (body: CreateMessageRequest) => {
+export const buildOpenAIChatBody = (
+  body: CreateMessageRequest,
+  options?: { includeThinking?: boolean }
+) => {
   const messages: OpenAIMessage[] = []
   if (body.system.trim()) {
     messages.push({ role: 'system', content: body.system })
@@ -116,6 +120,7 @@ export const buildOpenAIChatBody = (body: CreateMessageRequest) => {
     model: body.model,
     messages,
     stream: true,
+    ...(options?.includeThinking && body.thinking ? { thinking: body.thinking } : {}),
   }
 }
 
@@ -140,6 +145,7 @@ export async function* parseOpenAIStream(
   let thinkingIndex: number | null = null
   let textIndex: number | null = null
   let finishReason: string | null | undefined
+  let usage: MessageUsage | undefined
 
   const closeThinking = function* (): Generator<MessageStreamEvent> {
     if (thinkingIndex !== null) {
@@ -179,6 +185,14 @@ export async function* parseOpenAIStream(
           id: chunk.id ?? `openai-${Date.now()}`,
           model: chunk.model ?? '',
         },
+      }
+    }
+    if (chunk.usage) {
+      usage = {
+        input_tokens: chunk.usage.prompt_tokens ?? 0,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+        output_tokens: chunk.usage.completion_tokens ?? 0,
       }
     }
     const choice = chunk.choices?.[0]
@@ -232,6 +246,7 @@ export async function* parseOpenAIStream(
       stop_reason: toStopReason(finishReason),
       stop_sequence: null,
     },
+    ...(usage ? { usage } : {}),
   }
   yield { type: 'message_stop' }
 }

@@ -23,8 +23,9 @@ import {
 import { recordAppLog } from '../errorLog.js'
 import {
   getActiveSecret,
-  hasActiveCredential,
   isUsingDeepSeekAccount,
+  isUsingRankAIFree,
+  RANKAI_MODEL,
   useSettings,
 } from '../settings.js'
 import { appendBranch, getVisibleMessages, normalizeSession, selectVersion } from './branches.js'
@@ -1324,7 +1325,7 @@ const assertNotAborted = (signal: AbortSignal) => {
 }
 
 const isOpenAIProtocolActive = () =>
-  !isUsingDeepSeekAccount() && useSettings.getState().apiProtocol === 'openai'
+  isUsingRankAIFree() || (!isUsingDeepSeekAccount() && useSettings.getState().apiProtocol === 'openai')
 
 const loadLocalFileBlob = async (sessionId: string, fileId: string): Promise<Blob | null> => {
   const inMemory = pendingFiles.get(sessionId)?.find((entry) => entry.id === fileId)
@@ -1705,12 +1706,14 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
           updateReply(sessionId, reply)
           persist(sessionId)
         }
-        const initialCompactions = get().sessionCache[sessionId]?.compactions
-        // 发送前检查：若上下文达到自动整理阈值，先在回复气泡内展示「正在整理上下文」，
-        // 批量压缩完全部超限历史后再携带精简上下文正式生成回复（支持随时点击停止中止）。
+        const currentSession = get().sessionCache[sessionId]
+        const initialCompactions = currentSession?.compactions
+        const autoCompactEnabled = currentSession?.autoCompact === true
+        // 发送前检查：仅当当前会话主动开启自动压缩，且上下文达到阈值时，才在回复气泡内自动分块整理。
         if (
           firstPrepared &&
           !prepared.prefix &&
+          autoCompactEnabled &&
           selectCompactionTarget(prepared.history, initialCompactions, 'auto') !== null
         ) {
           await compactSession(sessionId, 'auto', controller.signal, prepared.history)
@@ -1776,7 +1779,9 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
         const configuredModel = useSettings.getState().apiModel.trim()
         const resolvedModel = isUsingDeepSeekAccount()
           ? MODEL
-          : configuredModel || initial.model || MODEL
+          : isUsingRankAIFree()
+            ? RANKAI_MODEL
+            : configuredModel || initial.model || MODEL
         // 服务端只要收到 tools 或 title.enabled 就会把用户输入上限降到 32,768 tokens；
         // 有文档附件且未开搜索、未带网址时直接走 1M 通道，其他场景命中 32K 上限则自动降级重试。
         const omitExtended =
@@ -1954,7 +1959,7 @@ export const compactSession = async (
   externalSignal?: AbortSignal,
   historyOverride?: Message[]
 ): Promise<boolean> => {
-  if (compactionControllers.has(sessionId) || get().importingHistory || !hasActiveCredential()) {
+  if (compactionControllers.has(sessionId) || get().importingHistory) {
     return false
   }
   const session = get().sessionCache[sessionId]
@@ -1962,7 +1967,11 @@ export const compactSession = async (
     return false
   }
   const visible = historyOverride ?? getVisibleMessages(session)
-  if (source === 'auto' && selectCompactionTarget(visible, session.compactions, 'auto') === null) {
+  if (
+    source === 'auto' &&
+    (session.autoCompact !== true ||
+      selectCompactionTarget(visible, session.compactions, 'auto') === null)
+  ) {
     return false
   }
   const targets = selectBatchCompactionTargets(visible, session.compactions)
@@ -1997,7 +2006,7 @@ export const compactSession = async (
         const currentIdx = nextIndex++
         const target = targets[currentIdx]
         try {
-          const span = await generateCompactionSpan(target, source, controller.signal, MODEL)
+          const span = await generateCompactionSpan(target, source, controller.signal)
           if (controller.signal.aborted || !get().sessionCache[sessionId] || get().importingHistory) {
             return
           }
@@ -2073,5 +2082,13 @@ export const updateCompactionSummary = (
 /** 撤销某条剧情记忆折叠（完全无损，原对话恢复进入请求上下文） */
 export const deleteCompactionSpan = (sessionId: string, spanId: string): void => {
   updateSession(sessionId, (session) => removeCompactionSpan(session, spanId))
+  persist(sessionId)
+}
+
+/** 设置当前会话是否开启发送前自动上下文压缩（默认关闭） */
+export const setSessionAutoCompact = (sessionId: string, enabled: boolean): void => {
+  updateSession(sessionId, (session) =>
+    Boolean(session.autoCompact) === enabled ? session : { ...session, autoCompact: enabled }
+  )
   persist(sessionId)
 }

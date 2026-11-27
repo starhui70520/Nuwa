@@ -415,6 +415,7 @@ struct ChatSession: Identifiable, Codable, Equatable {
     var rootMessageId: UUID?
     var messages: [ChatMessage]
     var compactions: [CompactionSpan]?
+    var autoCompact: Bool?
     var createdAt: Date
     var updatedAt: Date
     var isPinned: Bool
@@ -422,13 +423,14 @@ struct ChatSession: Identifiable, Codable, Equatable {
     private(set) var hasLoadedMessages = true
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, rootMessageId, messages, compactions, createdAt, updatedAt, isPinned, pinnedAt
+        case id, title, rootMessageId, messages, compactions, autoCompact, createdAt, updatedAt, isPinned, pinnedAt
     }
 
     var metadataOnly: ChatSession {
         var result = self
         result.messages = []
         result.compactions = nil
+        result.autoCompact = nil
         result.hasLoadedMessages = false
         return result
     }
@@ -446,6 +448,7 @@ struct ChatSession: Identifiable, Codable, Equatable {
         rootMessageId: UUID? = nil,
         messages: [ChatMessage] = [],
         compactions: [CompactionSpan]? = nil,
+        autoCompact: Bool? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
         isPinned: Bool = false,
@@ -456,6 +459,7 @@ struct ChatSession: Identifiable, Codable, Equatable {
         self.rootMessageId = rootMessageId
         self.messages = messages
         self.compactions = compactions
+        self.autoCompact = autoCompact
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.isPinned = isPinned

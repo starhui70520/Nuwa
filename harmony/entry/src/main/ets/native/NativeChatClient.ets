@@ -67,10 +67,15 @@ interface OpenAIChatMessage {
   content: string | OpenAIContentPart[];
 }
 
+interface OpenAIThinkingOption {
+  type: 'enabled' | 'disabled';
+}
+
 interface ChatRequestBody {
   model: string;
   messages: OpenAIChatMessage[];
   stream: boolean;
+  thinking?: OpenAIThinkingOption;
 }
 
 interface ChatDelta {
@@ -1038,7 +1043,20 @@ export class NativeChatClient {
           openAIAssistantText(anthropicPrefillContent(prefill, config.thinking === true));
         if (text) openAIMessages.push({ role: 'assistant', content: text });
       }
-      body = { model: model, messages: openAIMessages, stream: true } as ChatRequestBody;
+      const isRankAI = config.baseUrl.trim().toLowerCase().includes('api.rankai.rankchord.com');
+      if (isRankAI) {
+        const thinkingOption: OpenAIThinkingOption = { type: config.thinking ? 'enabled' : 'disabled' };
+        const chatBody: ChatRequestBody = {
+          model: model,
+          messages: openAIMessages,
+          stream: true,
+          thinking: thinkingOption,
+        };
+        body = chatBody;
+      } else {
+        const chatBody: ChatRequestBody = { model: model, messages: openAIMessages, stream: true };
+        body = chatBody;
+      }
     }
     const options: http.HttpRequestOptions = {
       method: http.RequestMethod.POST,

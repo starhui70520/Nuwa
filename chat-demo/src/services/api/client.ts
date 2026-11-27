@@ -1,6 +1,13 @@
 import { translate, type TranslationMessage } from '../../i18n/index.js'
 import { recordAppLog } from '../errorLog.js'
-import { isUsingDeepSeekAccount, useSettings } from '../settings.js'
+import {
+  isUsingDeepSeekAccount,
+  isUsingRankAIFree,
+  RANKAI_API_KEY,
+  RANKAI_BASE_URL,
+  RANKAI_MODEL,
+  useSettings,
+} from '../settings.js'
 import { buildOpenAIChatBody, parseOpenAIStream, resolveOpenAIEndpoint } from './openai.js'
 import { readMessageEvent } from './parseEvent.js'
 import { readServerSentEvents } from './sse.js'
@@ -184,43 +191,88 @@ const hasFile = (body: CreateMessageRequest) =>
       message.content.some((block) => block.type === 'image' || block.type === 'document')
   )
 
+async function* streamOpenAICompatible(
+  endpoint: string,
+  apiKey: string,
+  body: CreateMessageRequest,
+  signal: AbortSignal,
+  includeThinking = false
+): AsyncGenerator<MessageStreamEvent> {
+  const response = await request(endpoint, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+    },
+    body: JSON.stringify(buildOpenAIChatBody(body, { includeThinking })),
+    signal,
+  })
+  const contentType = response.headers.get('Content-Type') ?? ''
+  if (!response.body || !contentType.includes('text/event-stream')) {
+    const protocolErr = await readErrorResponse(response, 'protocol', '')
+    recordAppLog(
+      'error',
+      'api.stream',
+      `POST ${endpoint.split('?')[0]} non-SSE (${contentType || 'unknown'})`,
+      protocolErr.message
+    )
+    throw protocolErr
+  }
+  yield* parseOpenAIStream(response.body, signal, (message) => {
+    recordAppLog('error', 'api.stream', `OpenAI stream error`, message)
+    return new ApiError('stream', message)
+  })
+}
+
 /**
- * 发送流式对话请求，支持 OpenAI 兼容协议与 Anthropic 兼容协议。
+ * 所有上下文压缩请求统一走内置 RankAI 免费接口（关闭深度思考），不消耗用户自有额度。
+ */
+export async function* streamRankAICompaction(
+  body: CreateMessageRequest,
+  signal: AbortSignal
+): AsyncGenerator<MessageStreamEvent> {
+  const endpoint = resolveOpenAIEndpoint(RANKAI_BASE_URL, 'chat/completions')
+  yield* streamOpenAICompatible(
+    endpoint,
+    RANKAI_API_KEY,
+    {
+      ...body,
+      model: RANKAI_MODEL,
+      thinking: { type: 'disabled' },
+    },
+    signal,
+    true
+  )
+}
+
+/**
+ * 发送流式对话请求，支持 RankAI 免费额度、OpenAI 兼容协议与 Anthropic 兼容协议。
  */
 export async function* streamMessage(
   apiKey: string,
   body: CreateMessageRequest,
   signal: AbortSignal
 ): AsyncGenerator<MessageStreamEvent> {
+  const useRankAIFree = isUsingRankAIFree()
+  if (useRankAIFree) {
+    const endpoint = resolveOpenAIEndpoint(RANKAI_BASE_URL, 'chat/completions')
+    yield* streamOpenAICompatible(
+      endpoint,
+      RANKAI_API_KEY,
+      { ...body, model: RANKAI_MODEL },
+      signal,
+      true
+    )
+    return
+  }
+
   const useAccount = isUsingDeepSeekAccount()
   const { apiProtocol, apiBaseUrl } = useSettings.getState()
   if (!useAccount && apiProtocol === 'openai') {
     const endpoint = resolveOpenAIEndpoint(apiBaseUrl || API_ORIGIN, 'chat/completions')
-    const response = await request(endpoint, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        Accept: 'text/event-stream',
-      },
-      body: JSON.stringify(buildOpenAIChatBody(body)),
-      signal,
-    })
-    const contentType = response.headers.get('Content-Type') ?? ''
-    if (!response.body || !contentType.includes('text/event-stream')) {
-      const protocolErr = await readErrorResponse(response, 'protocol', '')
-      recordAppLog(
-        'error',
-        'api.stream',
-        `POST ${endpoint.split('?')[0]} non-SSE (${contentType || 'unknown'})`,
-        protocolErr.message
-      )
-      throw protocolErr
-    }
-    yield* parseOpenAIStream(response.body, signal, (message) => {
-      recordAppLog('error', 'api.stream', `OpenAI stream error`, message)
-      return new ApiError('stream', message)
-    })
+    const isRankAIHost = endpoint.toLowerCase().includes('api.rankai.rankchord.com')
+    yield* streamOpenAICompatible(endpoint, apiKey, body, signal, isRankAIHost)
     return
   }
 

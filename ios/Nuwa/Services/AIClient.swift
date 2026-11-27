@@ -457,25 +457,21 @@ enum AIClient {
         let imageCap: Int
     }
 
+    /// 所有上下文压缩摘要统一走内置 RankAI 免费接口（关闭深度思考），不消耗用户自有额度。
     static func generateCompactionSummary(
         promptText: String,
-        systemPrompt: String,
-        useAccount: Bool,
-        apiProtocol: ApiProtocol,
-        baseUrl: String,
-        secret: String,
-        model: String
+        systemPrompt: String
     ) async throws -> String {
         let params = StreamParams(
             history: [],
             compactions: nil,
             question: ChatMessage(role: .user, content: promptText),
             prefixReply: nil,
-            useAccount: useAccount,
-            apiProtocol: apiProtocol,
-            baseUrl: baseUrl,
-            secret: secret,
-            model: model,
+            useAccount: false,
+            apiProtocol: .openai,
+            baseUrl: SettingsStore.rankAIBaseUrl,
+            secret: SettingsStore.rankAIKey,
+            model: SettingsStore.rankAIModel,
             customSystemPrompt: systemPrompt,
             thinkingEnabled: false,
             searchEnabled: false,
@@ -1220,11 +1216,14 @@ enum AIClient {
             }
         }
 
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "model": params.model,
             "messages": payloadMessages,
             "stream": true,
         ]
+        if url.host?.lowercased().contains("api.rankai.rankchord.com") == true {
+            body["thinking"] = ["type": params.thinkingEnabled ? "enabled" : "disabled"]
+        }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"

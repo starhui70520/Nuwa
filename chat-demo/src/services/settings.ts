@@ -16,8 +16,13 @@ export const DEFAULT_CHAT_FONT_SIZE: ChatFontSize = 16
 /** API 接口协议 */
 export type ApiProtocol = 'openai' | 'anthropic'
 
-/** 当前鉴权模式：DeepSeek API 账号授权登录 或 手动 API Key */
-export type AuthMode = 'deepseek-account' | 'api-key'
+/** 内置 RankAI 接口配置（免费上下文压缩 + 限时免费 DeepSeek 额度） */
+export const RANKAI_BASE_URL = 'https://api.rankai.rankchord.com/v1'
+export const RANKAI_MODEL = 'deepseek-v4.1-flash'
+export const RANKAI_API_KEY = 'chd_cm6J1GxDVbfPvFKycJGi74TtbJbsmrpXi_HSpF3p1lc'
+
+/** 当前鉴权模式：DeepSeek API 账号授权登录、RankAI 限时免费额度 或 手动 API Key */
+export type AuthMode = 'deepseek-account' | 'rankai-free' | 'api-key'
 
 /** 本机设置，存 localStorage：鉴权凭据、API 配置、语言、主题、位置、朗读音色、深度思考与智能搜索开关、侧边栏收起状态 */
 type Settings = {
@@ -144,6 +149,9 @@ const initialDshToken = read(KEYS.dshToken)
 
 const initialAuthMode = (): AuthMode => {
   const saved = read(KEYS.authMode)
+  if (saved === 'rankai-free') {
+    return 'rankai-free'
+  }
   if (saved === 'deepseek-account' && initialDshToken) {
     return 'deepseek-account'
   }
@@ -176,14 +184,21 @@ export const useSettings = create<Settings>(() => ({
   siderCollapsed: read(KEYS.siderCollapsed) === 'true',
 }))
 
-export const hasActiveCredential = (state: Settings = useSettings.getState()): boolean =>
-  (state.authMode === 'deepseek-account' && Boolean(state.dshToken)) || Boolean(state.apiKey)
-
 export const isUsingDeepSeekAccount = (state: Settings = useSettings.getState()): boolean =>
   state.authMode === 'deepseek-account' && Boolean(state.dshToken)
 
+export const isUsingRankAIFree = (state: Settings = useSettings.getState()): boolean =>
+  state.authMode === 'rankai-free'
+
+export const hasActiveCredential = (state: Settings = useSettings.getState()): boolean =>
+  isUsingDeepSeekAccount(state) || isUsingRankAIFree(state) || Boolean(state.apiKey)
+
 export const getActiveSecret = (state: Settings = useSettings.getState()): string =>
-  isUsingDeepSeekAccount(state) ? (state.dshToken ?? '') : (state.apiKey ?? '')
+  isUsingDeepSeekAccount(state)
+    ? (state.dshToken ?? '')
+    : isUsingRankAIFree(state)
+      ? RANKAI_API_KEY
+      : (state.apiKey ?? '')
 
 export const setLocale = (locale: Locale) => {
   write(KEYS.locale, locale)
@@ -263,12 +278,25 @@ export const setDeepSeekAccountAuth = (dshToken: string, dshAccountLabel: string
 export const clearDeepSeekAccountAuth = () => {
   write(KEYS.dshToken, null)
   write(KEYS.dshAccountLabel, null)
-  write(KEYS.authMode, 'api-key')
+  const nextAuthMode: AuthMode =
+    useSettings.getState().authMode === 'rankai-free' ? 'rankai-free' : 'api-key'
+  write(KEYS.authMode, nextAuthMode)
   useSettings.setState({
     dshToken: null,
     dshAccountLabel: null,
-    authMode: 'api-key',
+    authMode: nextAuthMode,
   })
+}
+
+export const enableRankAIFreeAuth = () => {
+  write(KEYS.authMode, 'rankai-free')
+  useSettings.setState({ authMode: 'rankai-free' })
+}
+
+export const disableRankAIFreeAuth = () => {
+  const nextAuthMode: AuthMode = useSettings.getState().dshToken ? 'deepseek-account' : 'api-key'
+  write(KEYS.authMode, nextAuthMode)
+  useSettings.setState({ authMode: nextAuthMode })
 }
 
 export const setAuthMode = (authMode: AuthMode) => {

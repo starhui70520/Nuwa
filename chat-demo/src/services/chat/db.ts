@@ -521,9 +521,15 @@ export const mergeStaging = async (): Promise<{
         continue
       }
       if (!localHasExtra) {
-        // 规则 3：DeepSeek 记录多于本地且本地无新增，直接覆盖
-        await target.put(incoming)
-        await summaryStore.put(storedSummary(incoming))
+        // 规则 3：DeepSeek 记录多于本地且本地无新增，直接覆盖，保留本机压缩记忆与自动压缩开关
+        const merged: Session = {
+          ...incoming,
+          ...(existing.pinnedAt && !incoming.pinnedAt ? { pinnedAt: existing.pinnedAt } : {}),
+          ...(existing.autoCompact !== undefined ? { autoCompact: existing.autoCompact } : {}),
+          ...(existing.compactions?.length ? { compactions: existing.compactions } : {}),
+        }
+        await target.put(merged)
+        await summaryStore.put(storedSummary(merged))
         importedCount += 1
         continue
       }

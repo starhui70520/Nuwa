@@ -24,6 +24,9 @@ declare const styles: {
   readonly "row": string;
   readonly "text": string;
   readonly "label": string;
+  readonly "labelWithBadge": string;
+  readonly "limitedBadge": string;
+  readonly "apiKeyActions": string;
   readonly "uploadButton": string;
   readonly "description": string;
   readonly "error": string;

@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { IconEditOutline16 } from '../base/icons.js'
-import { useSettings } from '../../services/settings.js'
+import { setAuthMode, useSettings } from '../../services/settings.js'
 import { useIsMobile } from '../../app/viewport.js'
+import { Button } from '../base/Button.js'
 import { IconButton } from '../base/IconButton.js'
 import { useApiKeyForm } from './useApiKeyForm.js'
 import { useTranslate } from '../../i18n/index.js'
@@ -21,6 +22,7 @@ type ApiKeyEditor = ReturnType<typeof useApiKeyEditor>
 export const ApiKeyField = ({ editor }: { editor: ApiKeyEditor }) => {
   const t = useTranslate()
   const isMobile = useIsMobile()
+  const authMode = useSettings((state) => state.authMode)
   const { apiKey, editing, setEditing, form, showInput } = editor
 
   return (
@@ -30,12 +32,19 @@ export const ApiKeyField = ({ editor }: { editor: ApiKeyEditor }) => {
         {apiKey && !editing ? (
           <div className={styles.apiKeySaved}>
             <span className={styles.apiKeyMask}>{'*'.repeat(apiKey.length)}</span>
-            <IconButton
-              tone="primary"
-              icon={<IconEditOutline16 />}
-              tooltip={t('apiKeyEdit')}
-              onClick={() => setEditing(true)}
-            />
+            <span className={styles.apiKeyActions}>
+              {authMode !== 'api-key' ? (
+                <Button variant="outlined" size="s" onClick={() => setAuthMode('api-key')}>
+                  {t('apiKeyEnableButton')}
+                </Button>
+              ) : null}
+              <IconButton
+                tone="primary"
+                icon={<IconEditOutline16 />}
+                tooltip={t('apiKeyEdit')}
+                onClick={() => setEditing(true)}
+              />
+            </span>
           </div>
         ) : (
           <div className={styles.apiKeyInput}>

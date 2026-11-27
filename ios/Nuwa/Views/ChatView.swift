@@ -646,6 +646,7 @@ struct ChatView: View {
                 )
             }()
             let compactProgress = chatStore.activeSessionId.flatMap { chatStore.compactingProgress[$0] }
+            let autoCompactEnabled = chatStore.activeSession?.autoCompact == true
 
             ChatHeaderView(
                 speech: speech,
@@ -654,6 +655,7 @@ struct ChatView: View {
                 sessionTitle: sessionTitle,
                 contextStats: contextStats,
                 compactProgress: compactProgress,
+                autoCompactEnabled: autoCompactEnabled,
                 sidebarShown: sidebarShown,
                 drawerModal: drawerModal,
                 onOpenDrawer: onToggleSidebar,
@@ -1701,6 +1703,7 @@ private struct ChatHeaderView: View {
     let sessionTitle: String
     let contextStats: ContextStats?
     let compactProgress: CompactionProgress?
+    let autoCompactEnabled: Bool
     let sidebarShown: Bool
     let drawerModal: Bool
     let onOpenDrawer: () -> Void
@@ -1746,7 +1749,7 @@ private struct ChatHeaderView: View {
 
             HStack(spacing: 2) {
                 if let stats = contextStats,
-                   stats.totalRounds >= 2 || !stats.activeCompactions.isEmpty || compactProgress != nil {
+                   stats.totalRounds >= 1 || !stats.activeCompactions.isEmpty || compactProgress != nil || autoCompactEnabled {
                     ContextStatusTriggerButton(
                         stats: stats,
                         compactProgress: compactProgress,

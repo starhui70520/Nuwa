@@ -75,6 +75,7 @@ let logWrites: Promise<void> = Promise.resolve();
 
 function redactLog(text: string, maxLength: number): string {
   const redacted = text.replace(/sk-[a-zA-Z0-9_-]{8,}/g, 'sk-***')
+    .replace(/chd_[a-zA-Z0-9_-]{8,}/g, 'chd_***')
     .replace(/\b(Bearer|Basic)\s+[a-zA-Z0-9._~+\/-]{8,}=*/gi, '$1 ***')
     .replace(/\b(x-api-key|x-dsh-auth-token|authorization|apiKey|dshToken)["']?\s*[:=]\s*["']?[^\s"',}]+/gi, '$1: ***');
   return redacted.length > maxLength ? redacted.slice(0, maxLength) + '…' : redacted;

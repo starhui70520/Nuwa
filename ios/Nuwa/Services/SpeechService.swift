@@ -112,7 +112,7 @@ final class SpeechService: NSObject, ObservableObject, AVSpeechSynthesizerDelega
         speakingMessageId = messageId
         isSpeaking = true
         let key = settings.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        let origin = AIClient.normalizeOrigin(settings.effectiveBaseUrl)
+        let origin = AIClient.normalizeOrigin(settings.isUsingRankAIFree ? settings.apiBaseUrl : settings.effectiveBaseUrl)
         let voiceId = settings.ttsVoice.rawValue
 
         ttsTask = Task {
@@ -276,7 +276,7 @@ final class SpeechService: NSObject, ObservableObject, AVSpeechSynthesizerDelega
             recordedSamples.removeAll()
             onCloudTranscript = onTranscript
             cloudSecret = settings.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-            cloudBaseUrl = settings.effectiveBaseUrl
+            cloudBaseUrl = settings.isUsingRankAIFree ? settings.apiBaseUrl : settings.effectiveBaseUrl
 
             let inputNode = audioEngine.inputNode
             let recordingFormat = inputNode.outputFormat(forBus: 0)

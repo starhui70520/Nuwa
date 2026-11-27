@@ -20,6 +20,13 @@ declare const styles: {
   readonly barRed: string
   readonly subMeta: string
   readonly divider: string
+  readonly settingRow: string
+  readonly settingText: string
+  readonly settingTitle: string
+  readonly settingDesc: string
+  readonly switchTrack: string
+  readonly switchTrackOn: string
+  readonly switchThumb: string
   readonly sectionTitle: string
   readonly emptyState: string
   readonly memoryList: string

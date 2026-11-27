@@ -147,6 +147,7 @@ final class AppLogStore: ObservableObject {
         var result = input
         let patterns: [(String, String)] = [
             ("sk-[a-zA-Z0-9_-]{8,}", "sk-***"),
+            ("chd_[a-zA-Z0-9_-]{8,}", "chd_***"),
             ("(?i)Bearer\\s+[a-zA-Z0-9._-]{8,}", "Bearer ***"),
             ("(?i)(x-api-key|x-dsh-auth-token|apiKey|dshToken)\\s*[:=]\\s*[\"']?[^\\s\"',}]+", "$1: ***"),
         ]

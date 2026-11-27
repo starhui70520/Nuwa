@@ -9,6 +9,7 @@ import {
 import {
   compactSession,
   deleteCompactionSpan,
+  setSessionAutoCompact,
   stopCompaction,
   updateCompactionSummary,
   useChatStore,
@@ -16,7 +17,6 @@ import {
 import type { CompactionSpan, Session } from '../../services/chat/types.js'
 import { Modal } from '../base/Modal.js'
 import { showToast } from '../base/toastState.js'
-import { ensureApiKey } from '../settings/settingsDialogState.js'
 import styles from './ContextStatus.module.css'
 
 const formatTokens = (tokens: number): string => {
@@ -196,7 +196,14 @@ export const ContextStatus = memo(function ContextStatus({
     }
   }, [session])
 
-  if (stats.totalRounds < 2 && stats.activeCompactions.length === 0 && !compacting) {
+  const autoCompact = session.autoCompact === true
+
+  if (
+    stats.totalRounds < 1 &&
+    stats.activeCompactions.length === 0 &&
+    !compacting &&
+    !autoCompact
+  ) {
     return null
   }
 
@@ -295,9 +302,6 @@ export const ContextStatus = memo(function ContextStatus({
                   className={clsx(styles.btn, styles.btnPrimary)}
                   disabled={streaming || importingHistory || !stats.canManualCompact}
                   onClick={() => {
-                    if (!ensureApiKey()) {
-                      return
-                    }
                     void compactSession(session.id, 'manual').then((ok) => {
                       showToast({ key: ok ? 'compactMemorySuccess' : 'compactMemoryEmpty' })
                     })
@@ -330,12 +334,41 @@ export const ContextStatus = memo(function ContextStatus({
 
           <div className={styles.divider} />
 
+          <div className={styles.settingRow}>
+            <div className={styles.settingText}>
+              <div className={styles.settingTitle}>{t('contextStatusAutoCompactLabel')}</div>
+              <div className={styles.settingDesc}>{t('contextStatusAutoCompactDesc')}</div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={autoCompact}
+              aria-label={t('contextStatusAutoCompactLabel')}
+              className={clsx(styles.switchTrack, autoCompact && styles.switchTrackOn)}
+              onClick={() => {
+                const next = !autoCompact
+                setSessionAutoCompact(session.id, next)
+                showToast({
+                  key: next
+                    ? 'contextStatusAutoCompactOnToast'
+                    : 'contextStatusAutoCompactOffToast',
+                })
+              }}
+            >
+              <span className={styles.switchThumb} />
+            </button>
+          </div>
+
+          <div className={styles.divider} />
+
           <div className={styles.sectionTitle}>
             {t('contextStatusMemoryListTitle', { count: stats.activeCompactions.length })}
           </div>
 
           {stats.activeCompactions.length === 0 ? (
-            <div className={styles.emptyState}>{t('contextStatusMemoryEmpty')}</div>
+            <div className={styles.emptyState}>
+              {autoCompact ? t('contextStatusMemoryEmpty') : t('contextStatusMemoryEmptyManual')}
+            </div>
           ) : (
             <div className={styles.memoryList}>
               {stats.activeCompactions.map(({ span }) => (

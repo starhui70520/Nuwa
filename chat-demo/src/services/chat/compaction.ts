@@ -1,7 +1,7 @@
 import { createId } from '../../utils/id.js'
-import { streamMessage } from '../api/client.js'
+import { streamRankAICompaction } from '../api/client.js'
 import type { MessageParam } from '../api/types.js'
-import { getActiveSecret, isUsingDeepSeekAccount, useSettings } from '../settings.js'
+import { RANKAI_MODEL } from '../settings.js'
 import { getContextRounds, getReplyText } from './reply.js'
 import type {
   AssistantMessage,
@@ -498,21 +498,15 @@ const parseSummaryAndKeywords = (raw: string): { summary: string; keywords: stri
   return { summary: summary || trimmed, keywords: Array.from(new Set(keywords)) }
 }
 
-/** 调用当前已配置的 LLM 生成结构化剧情记忆摘要（关闭深度思考以加快速度、降低成本） */
+/** 统一调用内置 RankAI 免费接口生成结构化记忆摘要（关闭深度思考，不消耗用户自有额度） */
 export const generateCompactionSpan = async (
   target: CompactionTarget,
   source: CompactionSource,
-  signal: AbortSignal,
-  fallbackModel: string
+  signal: AbortSignal
 ): Promise<CompactionSpan> => {
-  const settings = useSettings.getState()
-  const model = isUsingDeepSeekAccount(settings)
-    ? fallbackModel
-    : settings.apiModel.trim() || fallbackModel
-
+  const model = RANKAI_MODEL
   const promptText = formatTranscriptForCompaction(target)
-  const events = streamMessage(
-    getActiveSecret(settings),
+  const events = streamRankAICompaction(
     {
       model,
       system:

@@ -1,5 +1,10 @@
 import { create } from 'zustand'
-import { hasActiveCredential, isUsingDeepSeekAccount, useSettings } from '../settings.js'
+import {
+  hasActiveCredential,
+  isUsingDeepSeekAccount,
+  isUsingRankAIFree,
+  useSettings,
+} from '../settings.js'
 import { API_ORIGIN } from './client.js'
 
 export type AccountBalance = {
@@ -33,7 +38,7 @@ const normalizeOrigin = (rawBaseUrl: string): string => {
 }
 
 const getCredentialTag = (state: SettingsState = useSettings.getState()): string | null => {
-  if (!hasActiveCredential(state)) {
+  if (!hasActiveCredential(state) || isUsingRankAIFree(state)) {
     return null
   }
   if (isUsingDeepSeekAccount(state)) {
@@ -160,7 +165,7 @@ const fetchBalanceForCurrentSettings = async (
   signal: AbortSignal
 ): Promise<AccountBalance | null> => {
   const state = useSettings.getState()
-  if (!hasActiveCredential(state)) {
+  if (!hasActiveCredential(state) || isUsingRankAIFree(state)) {
     return null
   }
 

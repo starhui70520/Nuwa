@@ -13,7 +13,7 @@ import {
   validateFiles,
   type UploadTask,
 } from '../attachments.js'
-import { isUsingDeepSeekAccount, useSettings } from '../settings.js'
+import { isUsingDeepSeekAccount, isUsingRankAIFree, useSettings } from '../settings.js'
 import type { FileAttachment } from './types.js'
 
 export type DraftAttachment = {
@@ -52,7 +52,7 @@ export const setDraftText = (sessionId: string | null, text: string) =>
   updateDraft(sessionId, (draft) => ({ ...draft, text }))
 
 const isOpenAIMode = () =>
-  !isUsingDeepSeekAccount() && useSettings.getState().apiProtocol === 'openai'
+  isUsingRankAIFree() || (!isUsingDeepSeekAccount() && useSettings.getState().apiProtocol === 'openai')
 
 const upload = (attachment: DraftAttachment, apiKey: string) => {
   if (isOpenAIMode() && attachment.isImage) {

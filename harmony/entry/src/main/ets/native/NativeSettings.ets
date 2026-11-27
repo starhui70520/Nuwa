@@ -7,10 +7,13 @@ import { defaultNativeLocale, NativeLocale, NativeUserLocation, restoreNativeLoc
 import { HarmonySpeechEngine, HarmonySpeechVoice } from '../speech/HarmonySpeechOptions';
 
 export type NativeApiProtocol = 'openai' | 'anthropic';
-export type NativeAuthMode = 'api-key' | 'deepseek-account';
+export type NativeAuthMode = 'api-key' | 'deepseek-account' | 'rankai-free';
 export type NativeTheme = 'system' | 'light' | 'dark';
 export type NativeManualPreference = 'locale' | 'location';
 export const NATIVE_CHAT_FONT_SIZES: number[] = [12, 14, 16, 18, 20, 22];
+export const RANKAI_BASE_URL: string = 'https://api.rankai.rankchord.com/v1';
+export const RANKAI_MODEL: string = 'deepseek-v4.1-flash';
+export const RANKAI_API_KEY: string = 'chd_cm6J1GxDVbfPvFKycJGi74TtbJbsmrpXi_HSpF3p1lc';
 
 export interface NativeApiCredentialDraft {
   baseUrl: string;
@@ -181,7 +184,8 @@ export class NativeSettingsController {
       model,
       protocol: resolvedProtocol,
       credentialDraft,
-      authMode: authMode === 'deepseek-account' ? 'deepseek-account' : 'api-key',
+      authMode: authMode === 'deepseek-account' ? 'deepseek-account' :
+        (authMode === 'rankai-free' ? 'rankai-free' : 'api-key'),
       signedOut,
       locale: locale === 'zh-CN' || locale === 'en-US' ? locale : defaultNativeLocale(),
       location,

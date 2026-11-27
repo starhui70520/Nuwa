@@ -3,6 +3,7 @@ import SwiftUI
 
 enum AuthMode: String, Codable {
     case deepseekAccount = "deepseek-account"
+    case rankaiFree = "rankai-free"
     case apiKey = "api-key"
 }
 
@@ -60,6 +61,11 @@ final class SettingsStore: ObservableObject {
     }
 
     static let fontSizeOptions: [Double] = [12, 14, 16, 18, 20, 22]
+
+    /// 内置 RankAI 接口配置（免费上下文压缩 + 限时免费 DeepSeek 额度）
+    static let rankAIBaseUrl = "https://api.rankai.rankchord.com/v1"
+    static let rankAIModel = "deepseek-v4.1-flash"
+    static let rankAIKey = "chd_cm6J1GxDVbfPvFKycJGi74TtbJbsmrpXi_HSpF3p1lc"
 
     @Published var authMode: AuthMode {
         didSet { UserDefaults.standard.set(authMode.rawValue, forKey: Keys.authMode) }
@@ -168,7 +174,9 @@ final class SettingsStore: ObservableObject {
         let hasToken = !loadedToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let hasKey = !loadedKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         if let storedAuthMode {
-            if storedAuthMode == .apiKey && !hasKey && hasToken {
+            if storedAuthMode == .rankaiFree {
+                authMode = .rankaiFree
+            } else if storedAuthMode == .apiKey && !hasKey && hasToken {
                 authMode = .deepseekAccount
             } else if storedAuthMode == .deepseekAccount && !hasToken && hasKey {
                 authMode = .apiKey
@@ -224,9 +232,16 @@ final class SettingsStore: ObservableObject {
         authMode == .deepseekAccount && !dshToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    var isUsingRankAIFree: Bool {
+        authMode == .rankaiFree
+    }
+
     var activeSecret: String {
         if isUsingDeepSeekAccount {
             return dshToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if isUsingRankAIFree {
+            return Self.rankAIKey
         }
         return apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -241,11 +256,16 @@ final class SettingsStore: ObservableObject {
         if isUsingDeepSeekAccount {
             return "https://api.deepseek.com"
         }
+        if isUsingRankAIFree {
+            return Self.rankAIBaseUrl
+        }
         return apiBaseUrl.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     var effectiveProtocol: ApiProtocol {
-        isUsingDeepSeekAccount ? .anthropic : apiProtocol
+        if isUsingDeepSeekAccount { return .anthropic }
+        if isUsingRankAIFree { return .openai }
+        return apiProtocol
     }
 
     var isDeepSeekOfficial: Bool {
@@ -256,6 +276,9 @@ final class SettingsStore: ObservableObject {
         if isUsingDeepSeekAccount {
             return "deepseek-flash"
         }
+        if isUsingRankAIFree {
+            return Self.rankAIModel
+        }
         let trimmed = apiModel.trimmingCharacters(in: .whitespacesAndNewlines)
         if effectiveProtocol == .openai && thinkingEnabled && isDeepSeekOfficial && (trimmed.isEmpty || trimmed == "deepseek-chat") {
             return "deepseek-reasoner"
@@ -263,19 +286,17 @@ final class SettingsStore: ObservableObject {
         return trimmed.isEmpty ? (effectiveProtocol == .anthropic ? "deepseek-flash" : "deepseek-chat") : trimmed
     }
 
-    /// Model used for context compaction summaries (non-thinking for fast, low-cost summarization).
+    /// Model used for context compaction summaries (always routed to built-in RankAI free endpoint).
     var compactionModel: String {
-        if isUsingDeepSeekAccount {
-            return "deepseek-flash"
-        }
-        let trimmed = apiModel.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty { return trimmed }
-        return effectiveProtocol == .anthropic ? "deepseek-flash" : "deepseek-chat"
+        Self.rankAIModel
     }
 
     var profileDisplayName: String {
         if isUsingDeepSeekAccount {
             return dshAccountLabel.isEmpty ? "DeepSeek API 账号" : dshAccountLabel
+        }
+        if isUsingRankAIFree {
+            return L10n.t("rankaiFreeLabel", locale: locale)
         }
         let trimmed = apiModel.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? "API Key" : trimmed
@@ -298,11 +319,23 @@ final class SettingsStore: ObservableObject {
     func signOutDeepSeekAccount() {
         dshToken = ""
         dshAccountLabel = ""
-        if !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if authMode == .deepseekAccount {
             authMode = .apiKey
         }
         accountBalance = nil
         UserDefaults.standard.removeObject(forKey: Keys.cachedBalance)
+    }
+
+    func enableRankAIFree() {
+        authMode = .rankaiFree
+        accountBalance = nil
+        UserDefaults.standard.removeObject(forKey: Keys.cachedBalance)
+    }
+
+    func disableRankAIFree() {
+        let hasToken = !dshToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        authMode = hasToken ? .deepseekAccount : .apiKey
+        Task { await refreshBalance(force: true) }
     }
 
     func signOutAll() {
@@ -326,7 +359,7 @@ final class SettingsStore: ObservableObject {
     }
 
     func refreshBalance(force: Bool = false) async {
-        guard hasActiveCredential else {
+        guard hasActiveCredential, !isUsingRankAIFree else {
             accountBalance = nil
             return
         }

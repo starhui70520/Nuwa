@@ -34,8 +34,11 @@ import { getRegionName, provinces, regionCodes } from '../../services/location.j
 import {
   CHAT_FONT_SIZES,
   DEFAULT_CHAT_FONT_SIZE,
+  disableRankAIFreeAuth,
+  enableRankAIFreeAuth,
   isChineseBrowser,
   isUsingDeepSeekAccount,
+  isUsingRankAIFree,
   setApiBaseUrl,
   setApiKey,
   setApiModel,
@@ -118,6 +121,7 @@ const SettingsContent = () => {
   const replacingHistory = useChatStore((state) => state.importingHistory)
   const sessionCount = useChatStore((state) => state.sessions.length)
   const isAccount = useSettings((state) => isUsingDeepSeekAccount(state))
+  const isRankAIFree = useSettings((state) => isUsingRankAIFree(state))
   const dshAccountLabel = useSettings((state) => state.dshAccountLabel)
   const apiModel = useSettings((state) => state.apiModel)
   const balance = useBalance((state) => state.balance)
@@ -281,7 +285,9 @@ const SettingsContent = () => {
 
   const accountSummary = isAccount
     ? dshAccountLabel || t('dshAccountLabel')
-    : apiModel.trim() || t('settingsApiKeyMode')
+    : isRankAIFree
+      ? t('rankaiFreeLabel')
+      : apiModel.trim() || t('settingsApiKeyMode')
 
   const pageTitle =
     page === 'account'
@@ -297,6 +303,7 @@ const SettingsContent = () => {
   const onSignOutAll = () => {
     void logoutDeepSeekAccount()
     setApiKey(null)
+    setAuthMode('api-key')
     closeSettings()
   }
 
@@ -373,7 +380,9 @@ const SettingsContent = () => {
                     <IconWalletOutline18 />
                   </span>
                   <span className={styles.rowLabel}>{t('settingsApiBalance')}</span>
-                  {balance ? (
+                  {isRankAIFree ? (
+                    <span className={styles.balanceBadge}>{t('settingsApiBalanceFree')}</span>
+                  ) : balance ? (
                     <span
                       className={clsx(
                         styles.balanceBadge,
@@ -568,6 +577,7 @@ const SettingsContent = () => {
             <>
               <div className={styles.groupCard}>
                 <DeepSeekAccountSetting />
+                <RankAIFreeSetting />
               </div>
               <div className={clsx(styles.groupCard, styles.cardGap)}>
                 <ApiProviderSettings />
@@ -815,7 +825,9 @@ const DeepSeekAccountSetting = () => {
   const description = dshToken
     ? authMode === 'deepseek-account'
       ? t('dshAccountActive', { name: labelText })
-      : t('dshAccountInactive', { name: labelText })
+      : authMode === 'rankai-free'
+        ? t('dshAccountInactiveRankAI', { name: labelText })
+        : t('dshAccountInactive', { name: labelText })
     : t('dshAccountSignedOutDesc')
 
   return (
@@ -853,6 +865,51 @@ const DeepSeekAccountSetting = () => {
             onClick={() => void onSignIn()}
           >
             {t('dshAccountSignInButton')}
+          </Button>
+        )
+      }
+    />
+  )
+}
+
+const RankAIFreeSetting = () => {
+  const t = useTranslate()
+  const isActive = useSettings((state) => isUsingRankAIFree(state))
+
+  return (
+    <SettingCell
+      label={
+        <span className={styles.labelWithBadge}>
+          <span>{t('rankaiFreeLabel')}</span>
+          <span className={styles.limitedBadge}>{t('rankaiFreeLimitedBadge')}</span>
+        </span>
+      }
+      description={isActive ? t('rankaiFreeActiveDesc') : t('rankaiFreeDesc')}
+      status={null}
+      action={
+        isActive ? (
+          <Button
+            variant="outlined"
+            size="m"
+            className={styles.cellButton}
+            onClick={() => {
+              disableRankAIFreeAuth()
+              showToast({ key: 'rankaiFreeDisabledToast' })
+            }}
+          >
+            {t('rankaiFreeDisableButton')}
+          </Button>
+        ) : (
+          <Button
+            variant="primary"
+            size="m"
+            className={styles.cellButton}
+            onClick={() => {
+              enableRankAIFreeAuth()
+              showToast({ key: 'rankaiFreeEnabledToast' })
+            }}
+          >
+            {t('rankaiFreeEnableButton')}
           </Button>
         )
       }
@@ -1275,7 +1332,7 @@ const SettingCell = ({
   action,
   className,
 }: {
-  label: string
+  label: ReactNode
   description?: string
   status: Status
   action: ReactNode

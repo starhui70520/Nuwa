@@ -917,12 +917,15 @@ final class ChatStore: ObservableObject {
                     if !didPreSendPrepare {
                         didPreSendPrepare = true
                         if prefixReply == nil {
-                            let initialCompactions = sessions.first(where: { $0.id == sessionId })?.compactions
-                            if ContextCompaction.selectCompactionTarget(
-                                visibleMessages: prepared.history,
-                                compactions: initialCompactions,
-                                source: .auto
-                            ) != nil {
+                            let currentSession = sessions.first(where: { $0.id == sessionId })
+                            let initialCompactions = currentSession?.compactions
+                            let autoCompactEnabled = currentSession?.autoCompact == true
+                            if autoCompactEnabled,
+                               ContextCompaction.selectCompactionTarget(
+                                   visibleMessages: prepared.history,
+                                   compactions: initialCompactions,
+                                   source: .auto
+                               ) != nil {
                                 _ = await compactSession(
                                     sessionId,
                                     source: .auto,
@@ -1214,24 +1217,20 @@ final class ChatStore: ObservableObject {
     ) async -> Bool {
         guard compactionTasks[sessionId] == nil,
               !importingHistory,
-              settings.hasActiveCredential,
               let session = sessions.first(where: { $0.id == sessionId }),
               session.hasLoadedMessages
         else { return false }
 
         let visible = historyOverride ?? session.visibleMessages()
         if source == .auto,
-           ContextCompaction.selectCompactionTarget(visibleMessages: visible, compactions: session.compactions, source: .auto) == nil {
+           session.autoCompact != true
+               || ContextCompaction.selectCompactionTarget(visibleMessages: visible, compactions: session.compactions, source: .auto) == nil {
             return false
         }
         let targets = ContextCompaction.selectBatchCompactionTargets(visibleMessages: visible, compactions: session.compactions)
         guard !targets.isEmpty else { return false }
 
-        let useAccount = settings.isUsingDeepSeekAccount
-        let apiProtocol = settings.effectiveProtocol
-        let baseUrl = settings.effectiveBaseUrl
-        let secret = settings.activeSecret
-        let model = settings.compactionModel
+        let model = SettingsStore.rankAIModel
         let total = targets.count
 
         compactingProgress[sessionId] = CompactionProgress(done: 0, total: total)
@@ -1259,12 +1258,7 @@ final class ChatStore: ObservableObject {
                         do {
                             let raw = try await AIClient.generateCompactionSummary(
                                 promptText: promptText,
-                                systemPrompt: systemPrompt,
-                                useAccount: useAccount,
-                                apiProtocol: apiProtocol,
-                                baseUrl: baseUrl,
-                                secret: secret,
-                                model: model
+                                systemPrompt: systemPrompt
                             )
                             let parsed = ContextCompaction.parseSummaryAndKeywords(raw)
                             guard !parsed.summary.isEmpty else {
@@ -1366,6 +1360,15 @@ final class ChatStore: ObservableObject {
     func deleteCompactionSpan(sessionId: UUID, spanId: UUID) {
         guard let sIdx = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
         sessions[sIdx].compactions = ContextCompaction.removeSpan(id: spanId, from: sessions[sIdx].compactions)
+        scheduleSave(immediate: true)
+    }
+
+    func setSessionAutoCompact(_ sessionId: UUID, enabled: Bool) {
+        guard let sIdx = sessions.firstIndex(where: { $0.id == sessionId }),
+              sessions[sIdx].hasLoadedMessages
+        else { return }
+        if (sessions[sIdx].autoCompact == true) == enabled { return }
+        sessions[sIdx].autoCompact = enabled
         scheduleSave(immediate: true)
     }
 

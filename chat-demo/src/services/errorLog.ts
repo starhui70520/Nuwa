@@ -47,6 +47,7 @@ export const ISSUE_TYPE_OPTIONS = [
 const sanitizeText = (input: string, maxLen = 1000): string => {
   const masked = input
     .replace(/sk-[a-zA-Z0-9_-]{8,}/g, 'sk-***')
+    .replace(/chd_[a-zA-Z0-9_-]{8,}/g, 'chd_***')
     .replace(/Bearer\s+[a-zA-Z0-9._-]{8,}/gi, 'Bearer ***')
     .replace(/(x-api-key|x-dsh-auth-token|apiKey|dshToken)\s*[:=]\s*["']?[^\s"',}]+/gi, '$1: ***')
   return masked.length > maxLen ? `${masked.slice(0, maxLen)}…` : masked

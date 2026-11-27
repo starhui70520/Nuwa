@@ -1,4 +1,4 @@
-import { isUsingDeepSeekAccount, useSettings } from '../settings.js'
+import { isUsingDeepSeekAccount, isUsingRankAIFree, useSettings } from '../settings.js'
 import { ApiError, API_ORIGIN, request } from './client.js'
 
 /**
@@ -52,7 +52,10 @@ export const transcribe = async (
 ): Promise<string> => {
   const state = useSettings.getState()
   const useAccount = isUsingDeepSeekAccount(state)
-  const effectiveKey = state.apiKey ?? apiKey
+  const effectiveKey = state.apiKey ?? (isUsingRankAIFree(state) ? '' : apiKey)
+  if (!effectiveKey) {
+    throw new ApiError('http', 'No speech API key configured', 401)
+  }
   const useBearer = Boolean(state.apiKey) || !useAccount
   const origin = useAccount ? API_ORIGIN : normalizeOrigin(state.apiBaseUrl)
   const headers = speechAuthHeaders(effectiveKey, useBearer)
@@ -93,7 +96,10 @@ export const synthesize = async (
 ): Promise<ReadableStream<Uint8Array>> => {
   const state = useSettings.getState()
   const useAccount = isUsingDeepSeekAccount(state)
-  const effectiveKey = state.apiKey ?? apiKey
+  const effectiveKey = state.apiKey ?? (isUsingRankAIFree(state) ? '' : apiKey)
+  if (!effectiveKey) {
+    throw new ApiError('http', 'No speech API key configured', 401)
+  }
   const useBearer = Boolean(state.apiKey) || !useAccount
   const origin = useAccount ? API_ORIGIN : normalizeOrigin(state.apiBaseUrl)
   const response = await request(`${origin}/v1/tools/tts`, {
