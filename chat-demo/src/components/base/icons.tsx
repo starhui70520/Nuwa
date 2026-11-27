@@ -891,3 +891,19 @@ export const IconPaperclipOutline22 = () => (
     />
   </svg>
 )
+
+export const IconCoinsOutline16 = () => (
+  <svg width={16} height={16} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <ellipse cx="8" cy="4" rx="5.25" ry="2.1" stroke="currentColor" strokeWidth="1.35" />
+    <path
+      d="M2.75 4V8C2.75 9.16 5.1 10.1 8 10.1C10.9 10.1 13.25 9.16 13.25 8V4"
+      stroke="currentColor"
+      strokeWidth="1.35"
+    />
+    <path
+      d="M2.75 8V12C2.75 13.16 5.1 14.1 8 14.1C10.9 14.1 13.25 13.16 13.25 12V8"
+      stroke="currentColor"
+      strokeWidth="1.35"
+    />
+  </svg>
+)

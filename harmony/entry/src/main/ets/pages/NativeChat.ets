@@ -5951,6 +5951,23 @@ struct NativeChat {
       triggerNativeHaptic('warning');
       void this.signOutAll();
     })
+    Column({ space: 4 }) {
+      Text('粤ICP备2026010599号-2A')
+        .fontSize(this.appFontSize(12))
+        .fontColor($r('app.color.native_chat_secondary'))
+        .onClick(() => {
+          void this.openLink('https://beian.miit.gov.cn/');
+        })
+      Text(this.label('内容由 AI 生成，请仔细甄别，并合法使用',
+        'AI-generated content. Please verify carefully and use lawfully.'))
+        .fontSize(this.appFontSize(12))
+        .fontColor($r('app.color.native_chat_secondary'))
+        .opacity(0.85)
+        .textAlign(TextAlign.Center)
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Center)
+    .padding({ top: 14, bottom: 6, left: 12, right: 12 })
   }
 
   @Builder

@@ -16,6 +16,7 @@ import { Markdown } from '../markdown/Markdown.js'
 import { SiteThumbnails } from '../search/SiteLogo.js'
 import { toggleSearchPanel, useSearchPanel } from '../search/searchPanelState.js'
 import { ReadAloudButton } from './ReadAloudButton.js'
+import { ReplyBillingButton } from './ReplyBillingModal.js'
 import { CopyButton } from './CopyButton.js'
 import { ReplyArea } from './ReplyArea.js'
 import { useReplyView } from './useReplyView.js'
@@ -188,6 +189,7 @@ export const AssistantMessage = memo(function AssistantMessage({
             {responseText && !refused ? (
               <ReadAloudButton messageId={message.id} text={responseText} />
             ) : null}
+            <ReplyBillingButton message={message} />
             <IconButton
               icon={<IconRefreshOutline16 />}
               tooltip={t('regenerate')}

@@ -594,6 +594,29 @@ struct SettingsView: View {
             .buttonStyle(.plain)
         }
         .padding(.top, 16)
+
+        VStack(spacing: 4) {
+            Button {
+                if let url = URL(string: "https://beian.miit.gov.cn/") {
+                    openURL(url)
+                }
+            } label: {
+                Text("粤ICP备2026010599号-2A")
+                    .font(NuwaFont.badge(fontScale))
+                    .foregroundStyle(Color.nuwaLabelTertiary)
+            }
+            .buttonStyle(.plain)
+
+            Text(loc == .enUS
+                 ? "AI-generated content. Please verify carefully and use lawfully."
+                 : "内容由 AI 生成，请仔细甄别，并合法使用")
+                .font(NuwaFont.badge(fontScale))
+                .foregroundStyle(Color.nuwaLabelTertiary.opacity(0.85))
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 16)
+        .padding(.bottom, 6)
     }
 
     // MARK: - Subpage: 账号管理

@@ -572,6 +572,19 @@ const SettingsContent = () => {
                   <span className={styles.rowLabel}>{t('settingsSignOut')}</span>
                 </button>
               </div>
+
+              <div className={styles.complianceFooter}>
+                <a
+                  className={styles.icpLink}
+                  href="https://beian.miit.gov.cn/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(event) => handleExternalAnchorClick(event, 'https://beian.miit.gov.cn/')}
+                >
+                  粤ICP备2026010599号-2A
+                </a>
+                <div className={styles.aiDisclaimer}>{t('settingsAiDisclaimer')}</div>
+              </div>
             </>
           ) : page === 'account' ? (
             <>

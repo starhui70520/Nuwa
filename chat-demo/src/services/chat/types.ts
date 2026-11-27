@@ -92,6 +92,8 @@ export type AssistantMessage = MessageBranch & {
   stopDetails?: StopDetails
   /** 最近一次请求的用量，续写后更新 */
   usage?: MessageUsage
+  /** 本条回复计费来源：RankAI 免费额度或 DeepSeek 官方计费 */
+  billingSource?: 'deepseek' | 'rankai'
   /** 本轮请求自动回溯的历史原文轮次（同时保留 blockText 供后续轮次复原字节级前缀以命中 Prefix Cache） */
   recalledMemory?: {
     roundNumbers: number[]

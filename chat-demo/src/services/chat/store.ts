@@ -28,6 +28,7 @@ import {
   RANKAI_MODEL,
   useSettings,
 } from '../settings.js'
+import { isBillingSupportedSettings } from './billing.js'
 import { appendBranch, getVisibleMessages, normalizeSession, selectVersion } from './branches.js'
 import * as db from './db.js'
 import {
@@ -629,16 +630,28 @@ export const bindChatPersistence = () => {
 /** 按当前开关创建回复：深度思考对应 thinking，智能搜索控制 deepseek_web_search。 */
 const createReply = (): AssistantMessage => {
   const { thinking, search } = useSettings.getState()
+  const settings = useSettings.getState()
+  const resolvedModel = isUsingRankAIFree(settings)
+    ? RANKAI_MODEL
+    : isUsingDeepSeekAccount(settings)
+      ? MODEL
+      : settings.apiModel.trim() || MODEL
+  const billingSource: AssistantMessage['billingSource'] = isUsingRankAIFree(settings)
+    ? 'rankai'
+    : isBillingSupportedSettings(settings)
+      ? 'deepseek'
+      : undefined
   return {
     id: createId(),
     role: 'assistant',
     createdAt: Date.now(),
-    model: MODEL,
+    model: resolvedModel,
     thinking,
     search,
     prefix: true,
     status: 'pending',
     blocks: [],
+    ...(billingSource ? { billingSource } : {}),
   }
 }
 

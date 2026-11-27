@@ -15,6 +15,9 @@ import {
   useChatStore,
 } from '../../services/chat/store.js'
 import type { CompactionSpan, Session } from '../../services/chat/types.js'
+import { setTtsMuted, useSettings } from '../../services/settings.js'
+import { stopReadAloud, useReadAloud } from '../../services/speech/readAloud.js'
+import { IconSpeakerMutedOutline20, IconSpeakerOutline20 } from '../base/icons.js'
 import { Modal } from '../base/Modal.js'
 import { showToast } from '../base/toastState.js'
 import styles from './ContextStatus.module.css'
@@ -34,7 +37,9 @@ const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS
 /** 进度环与进度条对应的满载上下文刻度（DeepSeek 1M 窗口） */
 const DISPLAY_CONTEXT_WINDOW_TOKENS = 1_000_000
 
-const getPressureLevel = (pressure: number): 'green' | 'yellow' | 'orange' | 'red' => {
+export type ContextPressureLevel = 'green' | 'yellow' | 'orange' | 'red'
+
+const getPressureLevel = (pressure: number): ContextPressureLevel => {
   if (pressure >= 0.9) {
     return 'red'
   }
@@ -45,6 +50,14 @@ const getPressureLevel = (pressure: number): 'green' | 'yellow' | 'orange' | 're
     return 'yellow'
   }
   return 'green'
+}
+
+/** 计算指定会话的上下文压力档位（供移动端顶栏状态点使用） */
+export const getSessionPressureLevel = (session: Session): ContextPressureLevel => {
+  const visible = getVisibleMessages(session)
+  const base = inspectContextStats(visible, session.compactions)
+  const pressure = Math.min(1, base.effectiveTokens / DISPLAY_CONTEXT_WINDOW_TOKENS)
+  return getPressureLevel(pressure)
 }
 
 const MemoryListItem = ({
@@ -179,19 +192,13 @@ export const ContextStatus = memo(function ContextStatus({
   const [open, setOpen] = useState(false)
   const compactProgress = useChatStore((state) => state.compacting[session.id])
   const compacting = Boolean(compactProgress)
-  const importingHistory = useChatStore((state) => state.importingHistory)
 
   const stats = useMemo(() => {
     const visible = getVisibleMessages(session)
     const base = inspectContextStats(visible, session.compactions)
-    const compactedRounds = base.activeCompactions.reduce(
-      (sum, item) => sum + item.span.coveredRounds,
-      0
-    )
     const pressure = Math.min(1, base.effectiveTokens / DISPLAY_CONTEXT_WINDOW_TOKENS)
     return {
       ...base,
-      compactedRounds,
       pressure,
     }
   }, [session])
@@ -216,14 +223,6 @@ export const ContextStatus = memo(function ContextStatus({
         : level === 'yellow'
           ? styles.levelYellow
           : styles.levelGreen
-  const barLevelClass =
-    level === 'red'
-      ? styles.barRed
-      : level === 'orange'
-        ? styles.barOrange
-        : level === 'yellow'
-          ? styles.barYellow
-          : styles.barGreen
 
   const dashOffset = compacting
     ? RING_CIRCUMFERENCE * 0.65
@@ -268,51 +267,147 @@ export const ContextStatus = memo(function ContextStatus({
       </button>
 
       {open ? (
-        <Modal
-          title={t('contextStatusModalTitle')}
-          closable
-          className={styles.modal}
-          mainClassName={styles.modalMain}
+        <SessionSettingsModal
+          session={session}
+          streaming={streaming}
           onClose={() => setOpen(false)}
-          footer={
-            <div className={styles.modalFooter}>
-              <span className={styles.footerHint}>
-                {compactProgress
-                  ? compactProgress.total > 1
-                    ? t('compactMemoryProgress', {
-                        done: compactProgress.done,
-                        total: compactProgress.total,
-                      })
-                    : t('compactMemoryRunning')
-                  : stats.canManualCompact
-                    ? t('contextStatusAutoHint')
-                    : t('contextStatusUpToDate')}
-              </span>
-              {compacting ? (
-                <button
-                  type="button"
-                  className={clsx(styles.btn, styles.btnGhostDanger)}
-                  onClick={() => stopCompaction(session.id)}
-                >
-                  {t('compactMemoryStopButton')}
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  className={clsx(styles.btn, styles.btnPrimary)}
-                  disabled={streaming || importingHistory || !stats.canManualCompact}
-                  onClick={() => {
-                    void compactSession(session.id, 'manual').then((ok) => {
-                      showToast({ key: ok ? 'compactMemorySuccess' : 'compactMemoryEmpty' })
+        />
+      ) : null}
+    </>
+  )
+})
+
+/** 统一的「会话设置」弹窗：整合语音朗读静音、上下文水位与自动压缩开关、记忆片段管理 */
+export const SessionSettingsModal = ({
+  session,
+  streaming = false,
+  onClose,
+}: {
+  session?: Session
+  streaming?: boolean
+  onClose: () => void
+}) => {
+  const t = useTranslate()
+  const reading = useReadAloud((state) => state.status !== 'idle')
+  const ttsMuted = useSettings((state) => state.ttsMuted)
+  const speakerActive = reading || !ttsMuted
+  const compactProgress = useChatStore((state) =>
+    session ? state.compacting[session.id] : undefined
+  )
+  const compacting = Boolean(compactProgress)
+  const importingHistory = useChatStore((state) => state.importingHistory)
+  const autoCompact = session?.autoCompact === true
+
+  const stats = useMemo(() => {
+    if (!session) {
+      return null
+    }
+    const visible = getVisibleMessages(session)
+    const base = inspectContextStats(visible, session.compactions)
+    const compactedRounds = base.activeCompactions.reduce(
+      (sum, item) => sum + item.span.coveredRounds,
+      0
+    )
+    const pressure = Math.min(1, base.effectiveTokens / DISPLAY_CONTEXT_WINDOW_TOKENS)
+    return {
+      ...base,
+      compactedRounds,
+      pressure,
+    }
+  }, [session])
+
+  const level = stats ? getPressureLevel(stats.pressure) : 'green'
+  const barLevelClass =
+    level === 'red'
+      ? styles.barRed
+      : level === 'orange'
+        ? styles.barOrange
+        : level === 'yellow'
+          ? styles.barYellow
+          : styles.barGreen
+
+  const onToggleSpeaker = () => {
+    if (reading) {
+      stopReadAloud()
+      setTtsMuted(true)
+      return
+    }
+    const next = !ttsMuted
+    setTtsMuted(next)
+    showToast({ key: next ? 'ttsMuteToggleOn' : 'ttsMuteToggleOff' })
+  }
+
+  return (
+    <Modal
+      title="会话设置"
+      closable
+      className={styles.modal}
+      mainClassName={styles.modalMain}
+      onClose={onClose}
+      footer={
+        session && stats ? (
+          <div className={styles.modalFooter}>
+            <span className={styles.footerHint}>
+              {compactProgress
+                ? compactProgress.total > 1
+                  ? t('compactMemoryProgress', {
+                      done: compactProgress.done,
+                      total: compactProgress.total,
                     })
-                  }}
-                >
-                  {t('compactMemoryNowButton')}
-                </button>
-              )}
-            </div>
-          }
+                  : t('compactMemoryRunning')
+                : stats.canManualCompact
+                  ? t('contextStatusAutoHint')
+                  : t('contextStatusUpToDate')}
+            </span>
+            {compacting ? (
+              <button
+                type="button"
+                className={clsx(styles.btn, styles.btnGhostDanger)}
+                onClick={() => stopCompaction(session.id)}
+              >
+                {t('compactMemoryStopButton')}
+              </button>
+            ) : (
+              <button
+                type="button"
+                className={clsx(styles.btn, styles.btnPrimary)}
+                disabled={streaming || importingHistory || !stats.canManualCompact}
+                onClick={() => {
+                  void compactSession(session.id, 'manual').then((ok) => {
+                    showToast({ key: ok ? 'compactMemorySuccess' : 'compactMemoryEmpty' })
+                  })
+                }}
+              >
+                {t('compactMemoryNowButton')}
+              </button>
+            )}
+          </div>
+        ) : undefined
+      }
+    >
+      <div className={styles.quickRow}>
+        <div className={styles.quickInfo}>
+          <span className={styles.quickTitle}>语音朗读</span>
+          <span className={styles.quickDesc}>
+            {reading ? '正在朗读当前回复' : ttsMuted ? '已静音，不会自动播报' : '已开启，可朗读回复'}
+          </span>
+        </div>
+        <button
+          type="button"
+          className={clsx(styles.btn, speakerActive && styles.btnPrimary)}
+          onClick={onToggleSpeaker}
         >
+          <span className={styles.btnIcon} aria-hidden="true">
+            {speakerActive ? <IconSpeakerOutline20 /> : <IconSpeakerMutedOutline20 />}
+          </span>
+          <span>{reading ? '停止朗读' : ttsMuted ? '已静音' : '已开启'}</span>
+        </button>
+      </div>
+
+      <div className={styles.divider} />
+
+      {session && stats ? (
+        <>
           <div className={styles.overview}>
             <div className={styles.tokenLine}>
               {t('contextStatusCurrentTokens', { tokens: formatTokens(stats.effectiveTokens) })}
@@ -376,8 +471,12 @@ export const ContextStatus = memo(function ContextStatus({
               ))}
             </div>
           )}
-        </Modal>
-      ) : null}
-    </>
+        </>
+      ) : (
+        <div className={styles.emptyState}>
+          开始对话后，这里将实时显示上下文水位、自动压缩与记忆管理。
+        </div>
+      )}
+    </Modal>
   )
-})
+}

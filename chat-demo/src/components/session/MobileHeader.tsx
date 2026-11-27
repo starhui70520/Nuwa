@@ -1,76 +1,115 @@
-import type { ReactNode } from 'react'
+import clsx from 'clsx'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslate } from '../../i18n/index.js'
-import { newChat } from '../../services/chat/store.js'
-import { setTtsMuted, useSettings } from '../../services/settings.js'
-import { stopReadAloud, useReadAloud } from '../../services/speech/readAloud.js'
-import {
-  IconNativeMenu20,
-  IconNewChatBubble20,
-  IconSpeakerMutedOutline20,
-  IconSpeakerOutline20,
-} from '../base/icons.js'
-import { showToast } from '../base/toastState.js'
+import { newChat, useChatStore } from '../../services/chat/store.js'
+import type { Session } from '../../services/chat/types.js'
+import { IconNativeMenu20, IconNewChatBubble20 } from '../base/icons.js'
 import { openMobileSider } from '../sider/mobileSiderState.js'
+import { getSessionPressureLevel, SessionSettingsModal } from './ContextStatus.js'
 import styles from './MobileHeader.module.css'
 
-/** 移动端顶栏：左上角悬浮圆形菜单按钮 + 中间标题 + 右上角朗读静音与新对话悬浮胶囊 */
+const DOUBLE_TAP_WINDOW_MS = 260
+
+/**
+ * 移动端极简对称顶栏：
+ * 左：侧边栏圆形按钮 | 中：纯净状态点标题/会话设置胶囊（单击进会话设置，双击回顶部） | 右：新建对话圆形按钮
+ */
 export const MobileHeader = ({
+  session,
+  streaming = false,
   title,
-  onTitleTap,
-  statusSlot,
+  onTitleDoubleTap,
 }: {
+  session?: Session
+  streaming?: boolean
   title?: string
-  onTitleTap?: () => void
-  statusSlot?: ReactNode
+  onTitleDoubleTap?: () => void
 }) => {
   const t = useTranslate()
-  const reading = useReadAloud((state) => state.status !== 'idle')
-  const ttsMuted = useSettings((state) => state.ttsMuted)
-  const speakerActive = reading || !ttsMuted
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const singleTapTimerRef = useRef<number | null>(null)
+  const compacting = useChatStore((state) => (session ? Boolean(state.compacting[session.id]) : false))
 
-  const onToggleSpeaker = () => {
-    if (reading) {
-      stopReadAloud()
-      setTtsMuted(true)
+  useEffect(
+    () => () => {
+      if (singleTapTimerRef.current !== null) {
+        window.clearTimeout(singleTapTimerRef.current)
+      }
+    },
+    []
+  )
+
+  const pressureLevel = useMemo(
+    () => (session ? getSessionPressureLevel(session) : null),
+    [session]
+  )
+
+  const dotColorClass =
+    pressureLevel === 'red'
+      ? styles.dotRed
+      : pressureLevel === 'orange'
+        ? styles.dotOrange
+        : pressureLevel === 'yellow'
+          ? styles.dotYellow
+          : pressureLevel === 'green'
+            ? styles.dotGreen
+            : undefined
+
+  const pillLabel = title !== undefined ? title : '会话设置'
+
+  const handlePillClick = () => {
+    if (!onTitleDoubleTap) {
+      setSettingsOpen(true)
       return
     }
-    const next = !ttsMuted
-    setTtsMuted(next)
-    showToast({ key: next ? 'ttsMuteToggleOn' : 'ttsMuteToggleOff' })
+    if (singleTapTimerRef.current !== null) {
+      window.clearTimeout(singleTapTimerRef.current)
+      singleTapTimerRef.current = null
+      onTitleDoubleTap()
+      return
+    }
+    singleTapTimerRef.current = window.setTimeout(() => {
+      singleTapTimerRef.current = null
+      setSettingsOpen(true)
+    }, DOUBLE_TAP_WINDOW_MS)
   }
 
   return (
-    <div className={styles.header}>
-      <button
-        type="button"
-        className={styles.circleButton}
-        aria-label={t('expandSiderbarButton')}
-        onClick={openMobileSider}
-      >
-        <IconNativeMenu20 />
-      </button>
-      {title !== undefined ? (
-        <div className={styles.title} onClick={onTitleTap}>
-          {title}
-        </div>
-      ) : (
-        <div className={styles.spacer} />
-      )}
-      <div className={styles.capsule}>
-        {statusSlot}
+    <>
+      <div className={styles.header}>
         <button
           type="button"
-          className={styles.capsuleAction}
-          aria-label={
-            reading ? t('ttsStop') : ttsMuted ? t('ttsMuteToggleOff') : t('ttsMuteToggleOn')
-          }
-          onClick={onToggleSpeaker}
+          className={styles.circleButton}
+          aria-label={t('expandSiderbarButton')}
+          onClick={openMobileSider}
         >
-          {speakerActive ? <IconSpeakerOutline20 /> : <IconSpeakerMutedOutline20 />}
+          <IconNativeMenu20 />
         </button>
+
+        <div className={styles.centerSlot}>
+          <button
+            type="button"
+            className={styles.titlePill}
+            aria-label={pillLabel}
+            onClick={handlePillClick}
+          >
+            {dotColorClass ? (
+              <span
+                className={clsx(
+                  styles.statusDot,
+                  dotColorClass,
+                  compacting && styles.statusDotPulsing
+                )}
+                aria-hidden="true"
+              />
+            ) : null}
+            <span className={styles.titleText}>{pillLabel}</span>
+          </button>
+        </div>
+
         <button
           type="button"
-          className={styles.capsuleAction}
+          className={styles.circleButton}
           aria-label={t('newChat')}
           onClick={() => {
             newChat()
@@ -79,6 +118,14 @@ export const MobileHeader = ({
           <IconNewChatBubble20 />
         </button>
       </div>
-    </div>
+
+      {settingsOpen ? (
+        <SessionSettingsModal
+          session={session}
+          streaming={streaming}
+          onClose={() => setSettingsOpen(false)}
+        />
+      ) : null}
+    </>
   )
 }

@@ -38,12 +38,21 @@ export const SessionView = ({
     lastTitleTapRef.current = now
   }, [])
 
+  const onMobileTitleDoubleTap = useCallback(() => {
+    scrollToTopRef.current?.()
+  }, [])
+
   const contextStatusNode = <ContextStatus session={session} streaming={streaming} />
 
   return (
     <div className={styles.view}>
       {isMobile ? (
-        <MobileHeader title={title} onTitleTap={onTitleTap} statusSlot={contextStatusNode} />
+        <MobileHeader
+          session={session}
+          streaming={streaming}
+          title={title}
+          onTitleDoubleTap={onMobileTitleDoubleTap}
+        />
       ) : (
         <div className={styles.header}>
           <div

@@ -259,6 +259,7 @@ export const en = {
   settingsHarmonyVoiceHint: 'HarmonyOS handles voice input and read-aloud using system speech services',
   settingsVersion: 'Version',
   settingsPrivacyPolicy: 'Privacy Policy',
+  settingsAiDisclaimer: 'AI-generated content. Please verify carefully and use lawfully.',
   settingsDocs: 'API Docs & Help',
   settingsSignOut: 'Sign Out',
   settingsSessionCount: '{count} chats',

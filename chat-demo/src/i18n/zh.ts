@@ -248,6 +248,7 @@ export const zh = {
   settingsHarmonyVoiceHint: '语音输入与回答朗读由鸿蒙系统语音服务处理',
   settingsVersion: '当前版本',
   settingsPrivacyPolicy: '隐私政策',
+  settingsAiDisclaimer: '内容由 AI 生成，请仔细甄别，并合法使用',
   settingsDocs: 'API 文档与帮助',
   settingsSignOut: '退出登录',
   settingsSessionCount: '{count} 条对话',

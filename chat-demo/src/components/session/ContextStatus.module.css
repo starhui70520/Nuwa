@@ -394,3 +394,41 @@
   font-size: 12px;
   color: var(--dsw-alias-label-tertiary);
 }
+
+.quickRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 0;
+}
+
+.quickInfo {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.quickTitle {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
+}
+
+.quickDesc {
+  font-size: 0.75rem;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.btnIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 4px;
+
+  svg {
+    width: 15px;
+    height: 15px;
+  }
+}
