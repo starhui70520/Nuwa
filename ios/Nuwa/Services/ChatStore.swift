@@ -296,6 +296,11 @@ final class ChatStore: ObservableObject {
     private var saveDeferredByImport = false
     private var activeTimelineCache: ActiveTimeline?
     private var sessionLoadTask: Task<Void, Never>?
+    private var activeKeepAliveCount = 0
+    private var backgroundTaskId: UIBackgroundTaskIdentifier = .invalid
+    private var isInBackground = false
+    private var lastBackgroundedAt: Date?
+    private var foregroundWaiters: [UUID: CheckedContinuation<Bool, Never>] = [:]
 
     private static let persistenceQueue = DispatchQueue(label: "com.rankchord.nuwa.persistence", qos: .utility)
     nonisolated(unsafe) private static let persistence = ChatHistoryPersistence()
@@ -309,6 +314,115 @@ final class ChatStore: ObservableObject {
     init() {
         loadRejectedHistoryImages()
         loadAsync()
+    }
+
+    // MARK: - Background Stream Keep-Alive & Foreground Recovery
+
+    func handleBackground() {
+        isInBackground = true
+        lastBackgroundedAt = Date()
+        if activeKeepAliveCount > 0 {
+            armBackgroundTaskIfNeeded()
+        }
+    }
+
+    func handleForegroundActive() {
+        isInBackground = false
+        if activeKeepAliveCount > 0 {
+            UIApplication.shared.isIdleTimerDisabled = true
+            armBackgroundTaskIfNeeded()
+        }
+        let tokens = Array(foregroundWaiters.keys)
+        for token in tokens {
+            resolveForegroundWaiter(token, resumed: true)
+        }
+    }
+
+    private func beginNetworkKeepAlive() {
+        activeKeepAliveCount += 1
+        UIApplication.shared.isIdleTimerDisabled = true
+        armBackgroundTaskIfNeeded()
+    }
+
+    private func endNetworkKeepAlive() {
+        activeKeepAliveCount = max(0, activeKeepAliveCount - 1)
+        guard activeKeepAliveCount == 0 else { return }
+        UIApplication.shared.isIdleTimerDisabled = false
+        endBackgroundTaskOnly()
+    }
+
+    private func armBackgroundTaskIfNeeded() {
+        guard backgroundTaskId == .invalid else { return }
+        backgroundTaskId = UIApplication.shared.beginBackgroundTask(withName: "NuwaStreamReply") { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.endBackgroundTaskOnly()
+            }
+        }
+    }
+
+    private func endBackgroundTaskOnly() {
+        guard backgroundTaskId != .invalid else { return }
+        let taskId = backgroundTaskId
+        backgroundTaskId = .invalid
+        UIApplication.shared.endBackgroundTask(taskId)
+    }
+
+    private func resolveForegroundWaiter(_ token: UUID, resumed: Bool) {
+        guard let continuation = foregroundWaiters.removeValue(forKey: token) else { return }
+        continuation.resume(returning: resumed)
+    }
+
+    private func waitForForegroundActive(maxWaitSeconds: TimeInterval) async -> Bool {
+        if Task.isCancelled { return false }
+        if !isInBackground && UIApplication.shared.applicationState == .active {
+            return true
+        }
+        guard maxWaitSeconds > 0 else { return false }
+        let token = UUID()
+        let timeoutTask = Task { @MainActor [weak self] in
+            let nanos = UInt64(max(1, maxWaitSeconds) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: nanos)
+            self?.resolveForegroundWaiter(token, resumed: false)
+        }
+        defer { timeoutTask.cancel() }
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume(returning: false)
+                    return
+                }
+                if !self.isInBackground && UIApplication.shared.applicationState == .active {
+                    continuation.resume(returning: true)
+                    return
+                }
+                self.foregroundWaiters[token] = continuation
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.resolveForegroundWaiter(token, resumed: false)
+            }
+        }
+    }
+
+    private static func isTransientBackgroundDisconnect(_ error: Error) -> Bool {
+        if error is CancellationError { return false }
+        if case AIClientError.streamInterrupted = error { return true }
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain {
+            return [
+                NSURLErrorNetworkConnectionLost,
+                NSURLErrorNotConnectedToInternet,
+                NSURLErrorTimedOut,
+                NSURLErrorCannotConnectToHost,
+                NSURLErrorInternationalRoamingOff,
+                NSURLErrorDataNotAllowed,
+            ].contains(nsError.code)
+        }
+        if nsError.domain == NSPOSIXErrorDomain {
+            // ECONNABORTED (53), ECONNRESET (54), ENOTCONN (57), ETIMEDOUT (60)
+            return [53, 54, 57, 60].contains(nsError.code)
+        }
+        return false
     }
 
     private func loadRejectedHistoryImages() {
@@ -881,6 +995,10 @@ final class ChatStore: ObservableObject {
         let initialWantsTitle = sessions.first(where: { $0.id == sessionId })?.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true
 
         activeTask = Task {
+            beginNetworkKeepAlive()
+            defer { endNetworkKeepAlive() }
+            let requestStartedAt = Date()
+            var backgroundRetryUsed = false
             let supportsReplyHaptics = UIDevice.current.userInterfaceIdiom == .phone
             var lastReplyHaptic: TimeInterval?
             var replyHaptics: UIImpactFeedbackGenerator?
@@ -1157,6 +1275,25 @@ final class ChatStore: ObservableObject {
                     break
                 } catch {
                     guard generationID == generation else { return }
+                    let backgroundedDuringStream = isInBackground
+                        || UIApplication.shared.applicationState != .active
+                        || (lastBackgroundedAt.map { $0 >= requestStartedAt } ?? false)
+                    if !receivedContent && !backgroundRetryUsed && !Task.isCancelled
+                        && backgroundedDuringStream
+                        && Self.isTransientBackgroundDisconnect(error) {
+                        let elapsed = lastBackgroundedAt.map { Date().timeIntervalSince($0) } ?? 0
+                        let remaining = max(0, 300 - elapsed)
+                        if remaining > 0 {
+                            backgroundRetryUsed = true
+                            let resumed = await waitForForegroundActive(maxWaitSeconds: remaining)
+                            guard generationID == generation, !Task.isCancelled else { return }
+                            if resumed {
+                                try? await Task.sleep(nanoseconds: 450_000_000)
+                                guard generationID == generation, !Task.isCancelled else { return }
+                                continue
+                            }
+                        }
+                    }
                     if var partial = working, receivedContent {
                         partial.status = .error
                         partial.errorMessage = error.localizedDescription
@@ -1236,7 +1373,9 @@ final class ChatStore: ObservableObject {
         compactingProgress[sessionId] = CompactionProgress(done: 0, total: total)
 
         let workerTask = Task<Bool, Never> { @MainActor in
+            self.beginNetworkKeepAlive()
             defer {
+                self.endNetworkKeepAlive()
                 self.compactionTasks.removeValue(forKey: sessionId)
                 self.compactingProgress.removeValue(forKey: sessionId)
             }

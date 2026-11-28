@@ -6,7 +6,8 @@ import {
   NativeDocumentCard, NATIVE_DOCUMENT_CARD_HEIGHT, NATIVE_DOCUMENT_CARD_WIDTH,
 } from '../native/NativeDocumentCard';
 import { common, ConfigurationConstant, wantConstant } from '@kit.AbilityKit';
-import { FrameCallback, KeyboardAvoidMode, LengthMetrics } from '@kit.ArkUI';
+import { FrameCallback, KeyboardAvoidMode, LengthMetrics, window } from '@kit.ArkUI';
+import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 import { KeyCode } from '@kit.InputKit';
 import { inputMethod } from '@kit.IMEKit';
 import { url, util } from '@kit.ArkTS';
@@ -356,6 +357,8 @@ struct NativeChat {
   private composerFocused: boolean = false;
   @State private replies: NativeReply[] = [];
   private readonly stoppedUploadReplies = new Map<NativeChatClient, NativeReply>();
+  private replySuspendDelayId: number = -1;
+  private replyKeepScreenOn: boolean = false;
   @State private recognitionId: string = '';
   @State private readingId: string = '';
   @State private readingState: 'idle' | 'loading' | 'playing' = 'idle';
@@ -541,6 +544,7 @@ struct NativeChat {
 
   onPageShow(): void {
     this.visible = true;
+    this.releaseReplySuspendDelay();
     this.proximityShare.register();
     this.showPendingAuthorizationSuccess();
     this.refreshSidebarHistory();
@@ -610,6 +614,9 @@ struct NativeChat {
     this.clearUploadQuota();
     this.sidebarSearch.cancel();
     this.visible = false;
+    if (this.replies.length > 0) {
+      this.acquireReplySuspendDelay();
+    }
     clearTimeout(this.sidebarDateTimer);
     this.sidebarDateTimer = -1;
     this.cancelHistorySaveRetry();
@@ -643,6 +650,8 @@ struct NativeChat {
     this.balanceRefreshEnabled = false;
     this.resetBalance();
     this.cancelAllReplies();
+    this.releaseReplySuspendDelay();
+    this.setReplyScreenKeepOn(false);
     this.stopVoice();
     this.speaker.destroy();
     this.closeAuthorization();
@@ -2698,6 +2707,7 @@ struct NativeChat {
       attachmentBinding: this.settings.attachmentBinding,
     };
     this.replies = [...this.replies, reply];
+    this.syncReplyKeepAlive();
     if (clearDraft) {
       void this.persistDrafts();
       this.draftHistoryWrites.set(message.id, next.id);
@@ -3155,7 +3165,62 @@ struct NativeChat {
       }
       this.replies = this.replies.filter((item: NativeReply): boolean => item.sessionId !== reply.sessionId);
       if (!this.replies.length) this.cancelStreamCheckpoint();
+      this.syncReplyKeepAlive();
       this.queueBalanceRefresh(reply.attachmentBinding);
+    }
+  }
+
+  private setReplyScreenKeepOn(active: boolean): void {
+    if (this.replyKeepScreenOn === active) {
+      return;
+    }
+    this.replyKeepScreenOn = active;
+    try {
+      void window.getLastWindow(this.host()).then((mainWindow: window.Window): Promise<void> =>
+        mainWindow.setWindowKeepScreenOn(active)
+      ).catch((): void => {});
+    } catch {
+      // Ignore window keep-screen-on errors on restricted hosts.
+    }
+  }
+
+  private acquireReplySuspendDelay(): void {
+    if (this.replySuspendDelayId >= 0 || !this.replies.length) {
+      return;
+    }
+    try {
+      const info: backgroundTaskManager.DelaySuspendInfo = backgroundTaskManager.requestSuspendDelay(
+        'Nuwa streaming reply',
+        (): void => {
+          this.releaseReplySuspendDelay();
+        }
+      );
+      this.replySuspendDelayId = info.requestId;
+    } catch {
+      // Ignore when the host denies or does not support transient tasks.
+    }
+  }
+
+  private releaseReplySuspendDelay(): void {
+    const id = this.replySuspendDelayId;
+    if (id < 0) {
+      return;
+    }
+    this.replySuspendDelayId = -1;
+    try {
+      backgroundTaskManager.cancelSuspendDelay(id);
+    } catch {
+      // System may already have expired the transient task.
+    }
+  }
+
+  private syncReplyKeepAlive(): void {
+    const active = this.replies.length > 0;
+    this.setReplyScreenKeepOn(active);
+    if (!active) {
+      this.releaseReplySuspendDelay();
+    } else if (!this.visible) {
+      this.acquireReplySuspendDelay();
     }
   }
 
@@ -3220,6 +3285,7 @@ struct NativeChat {
     this.stopVoice();
     this.status = '';
     this.replies = [...this.replies, reply];
+    this.syncReplyKeepAlive();
     this.history = upsertConversation(this.history, next);
     this.jumpToNewestMessages();
     reply.completion = this.receive(this.host(), config, next, reply);

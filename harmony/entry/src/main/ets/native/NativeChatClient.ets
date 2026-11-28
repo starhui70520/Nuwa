@@ -1066,7 +1066,7 @@ export class NativeChatClient {
       usingProxy: apiKey || accountToken ? undefined : false,
       maxRedirects: 0,
       connectTimeout: 15000,
-      readTimeout: 300000,
+      readTimeout: 600000,
     };
     const request = http.createHttp();
     return new Promise<NativeReplyOutcome>((resolve, reject) => {

@@ -31,6 +31,10 @@ type OpenAIChunk = {
   usage?: {
     prompt_tokens?: number
     completion_tokens?: number
+    prompt_cache_hit_tokens?: number
+    prompt_tokens_details?: {
+      cached_tokens?: number
+    }
   }
 }
 
@@ -188,10 +192,20 @@ export async function* parseOpenAIStream(
       }
     }
     if (chunk.usage) {
+      const totalPrompt = chunk.usage.prompt_tokens ?? 0
+      const cached = Math.min(
+        totalPrompt,
+        Math.max(
+          0,
+          chunk.usage.prompt_tokens_details?.cached_tokens ??
+            chunk.usage.prompt_cache_hit_tokens ??
+            0
+        )
+      )
       usage = {
-        input_tokens: chunk.usage.prompt_tokens ?? 0,
+        input_tokens: Math.max(0, totalPrompt - cached),
         cache_creation_input_tokens: 0,
-        cache_read_input_tokens: 0,
+        cache_read_input_tokens: cached,
         output_tokens: chunk.usage.completion_tokens ?? 0,
       }
     }

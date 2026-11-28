@@ -33,6 +33,7 @@ public class DeepSeekMigrationPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "downloadRemoteFile", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getRecentPhotos", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "readRecentPhoto", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setStreamKeepAlive", returnType: CAPPluginReturnPromise),
     ]
 
     private var pendingAuthCall: CAPPluginCall?
@@ -52,6 +53,37 @@ public class DeepSeekMigrationPlugin: CAPPlugin, CAPBridgedPlugin {
     private var speechSynthesizer: AVSpeechSynthesizer?
     private var activeUtteranceId: String?
     private var pendingChunkCount = 0
+    private var streamBackgroundTaskId: UIBackgroundTaskIdentifier = .invalid
+
+    @objc func setStreamKeepAlive(_ call: CAPPluginCall) {
+        let active = call.getBool("active") ?? false
+        DispatchQueue.main.async { [weak self] in
+            guard let self else {
+                call.resolve()
+                return
+            }
+            UIApplication.shared.isIdleTimerDisabled = active
+            if active {
+                if self.streamBackgroundTaskId == .invalid {
+                    self.streamBackgroundTaskId = UIApplication.shared.beginBackgroundTask(
+                        withName: "NuwaStreamReply"
+                    ) { [weak self] in
+                        DispatchQueue.main.async {
+                            guard let self, self.streamBackgroundTaskId != .invalid else { return }
+                            let taskId = self.streamBackgroundTaskId
+                            self.streamBackgroundTaskId = .invalid
+                            UIApplication.shared.endBackgroundTask(taskId)
+                        }
+                    }
+                }
+            } else if self.streamBackgroundTaskId != .invalid {
+                let taskId = self.streamBackgroundTaskId
+                self.streamBackgroundTaskId = .invalid
+                UIApplication.shared.endBackgroundTask(taskId)
+            }
+            call.resolve()
+        }
+    }
 
     @objc func startPlatformAuth(_ call: CAPPluginCall) {
         if pendingAuthCall != nil {

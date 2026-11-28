@@ -262,8 +262,13 @@ export const inspectContextStats = (
   let latestUsageInput: number | undefined
   for (let i = rounds.length - 1; i >= 0; i--) {
     const reply = rounds[i][1]
-    const tokens = reply.usage?.input_tokens
-    if (typeof tokens === 'number' && tokens > 0) {
+    const usage = reply.usage
+    const tokens = usage
+      ? (usage.input_tokens || 0) +
+        (usage.cache_creation_input_tokens || 0) +
+        (usage.cache_read_input_tokens || 0)
+      : 0
+    if (tokens > 0) {
       if (latestCompactionTime === 0 || reply.createdAt > latestCompactionTime) {
         latestUsageInput = tokens
       }

@@ -159,6 +159,14 @@ enum AIClient {
     static let filesBetaHeader = "files-api-2025-04-14"
     static let maxRequestImages = 600
 
+    /// 专用流式会话：单帧空闲超时 300s（覆盖 450K+ 冷启动 Prefill / 深度思考停顿），单次流总时长上限 3600s。
+    private static let streamSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 300
+        config.timeoutIntervalForResource = 3600
+        return URLSession(configuration: config)
+    }()
+
     static func normalizeOrigin(_ rawBaseUrl: String) -> String {
         let trimmed = rawBaseUrl.trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
@@ -653,7 +661,7 @@ enum AIClient {
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = 120
+        request.timeoutInterval = 300
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         if params.useAccount {
@@ -669,7 +677,7 @@ enum AIClient {
         }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        let (bytes, response) = try await streamSession.bytes(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw AIClientError.decodingError
         }
@@ -737,10 +745,15 @@ enum AIClient {
             case "message_start":
                 if let messageObj = obj["message"] as? [String: Any],
                    let usageObj = messageObj["usage"] as? [String: Any] {
-                    let inputTokens = usageObj["input_tokens"] as? Int
+                    let rawInput = usageObj["input_tokens"] as? Int
+                    let cacheCreate = usageObj["cache_creation_input_tokens"] as? Int
+                    let cacheRead = usageObj["cache_read_input_tokens"] as? Int
+                    let totalInput: Int? = (rawInput != nil || cacheCreate != nil || cacheRead != nil)
+                        ? (rawInput ?? 0) + (cacheCreate ?? 0) + (cacheRead ?? 0)
+                        : nil
                     let outputTokens = usageObj["output_tokens"] as? Int
-                    if inputTokens != nil || outputTokens != nil {
-                        continuation.yield(.usage(inputTokens: inputTokens, outputTokens: outputTokens))
+                    if totalInput != nil || outputTokens != nil {
+                        continuation.yield(.usage(inputTokens: totalInput, outputTokens: outputTokens))
                     }
                 }
 
@@ -795,10 +808,15 @@ enum AIClient {
 
             case "message_delta":
                 if let usageObj = obj["usage"] as? [String: Any] {
-                    let inputTokens = usageObj["input_tokens"] as? Int
+                    let rawInput = usageObj["input_tokens"] as? Int
+                    let cacheCreate = usageObj["cache_creation_input_tokens"] as? Int
+                    let cacheRead = usageObj["cache_read_input_tokens"] as? Int
+                    let totalInput: Int? = (rawInput != nil || cacheCreate != nil || cacheRead != nil)
+                        ? (rawInput ?? 0) + (cacheCreate ?? 0) + (cacheRead ?? 0)
+                        : nil
                     let outputTokens = usageObj["output_tokens"] as? Int
-                    if inputTokens != nil || outputTokens != nil {
-                        continuation.yield(.usage(inputTokens: inputTokens, outputTokens: outputTokens))
+                    if totalInput != nil || outputTokens != nil {
+                        continuation.yield(.usage(inputTokens: totalInput, outputTokens: outputTokens))
                     }
                 }
                 if let delta = obj["delta"] as? [String: Any] {
@@ -1227,13 +1245,13 @@ enum AIClient {
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = 120
+        request.timeoutInterval = 300
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(params.secret)", forHTTPHeaderField: "Authorization")
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        let (bytes, response) = try await streamSession.bytes(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw AIClientError.decodingError
         }

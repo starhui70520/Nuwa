@@ -98,6 +98,7 @@ public class DeepSeekMigrationPlugin extends Plugin {
         }
     };
     private volatile boolean updateDownloading = false;
+    private volatile boolean streamKeepAliveActive = false;
     @PluginMethod
     public void openExportBrowser(PluginCall call) {
         boolean clearSession = Boolean.TRUE.equals(call.getBoolean("clearSession", false));
@@ -544,7 +545,28 @@ public class DeepSeekMigrationPlugin extends Plugin {
     }
 
     @Override
+    protected void handleOnResume() {
+        super.handleOnResume();
+        if (streamKeepAliveActive) {
+            mainHandler.post(() -> {
+                if (!streamKeepAliveActive) {
+                    return;
+                }
+                try {
+                    StreamKeepAliveService.start(getContext());
+                    if (getActivity() instanceof MainActivity) {
+                        ((MainActivity) getActivity()).setStreamKeepAliveUi(true);
+                    }
+                } catch (Throwable ignored) {
+                }
+            });
+        }
+    }
+
+    @Override
     protected void handleOnDestroy() {
+        streamKeepAliveActive = false;
+        StreamKeepAliveService.stop(getContext());
         mainHandler.post(() -> {
             speechActive = false;
             pendingStopCall = null;
@@ -775,6 +797,26 @@ public class DeepSeekMigrationPlugin extends Plugin {
         mainHandler.post(() -> {
             if (getActivity() instanceof MainActivity) {
                 ((MainActivity) getActivity()).applySystemBarsStyle(dark);
+            }
+            call.resolve();
+        });
+    }
+
+    @PluginMethod
+    public void setStreamKeepAlive(PluginCall call) {
+        final boolean active = Boolean.TRUE.equals(call.getBoolean("active", false));
+        streamKeepAliveActive = active;
+        mainHandler.post(() -> {
+            try {
+                if (active) {
+                    StreamKeepAliveService.start(getContext());
+                } else {
+                    StreamKeepAliveService.stop(getContext());
+                }
+                if (getActivity() instanceof MainActivity) {
+                    ((MainActivity) getActivity()).setStreamKeepAliveUi(active);
+                }
+            } catch (Throwable ignored) {
             }
             call.resolve();
         });

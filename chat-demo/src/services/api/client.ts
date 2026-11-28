@@ -219,10 +219,19 @@ async function* streamOpenAICompatible(
     )
     throw protocolErr
   }
-  yield* parseOpenAIStream(response.body, signal, (message) => {
-    recordAppLog('error', 'api.stream', `OpenAI stream error`, message)
-    return new ApiError('stream', message)
-  })
+  try {
+    yield* parseOpenAIStream(response.body, signal, (message) => {
+      recordAppLog('error', 'api.stream', `OpenAI stream error`, message)
+      return new ApiError('stream', message)
+    })
+  } catch (error) {
+    if (signal.aborted || error instanceof ApiError) {
+      throw error
+    }
+    const msg = error instanceof Error ? error.message : String(error)
+    recordAppLog('error', 'api.stream', `POST ${endpoint.split('?')[0]} stream read failed`, msg)
+    throw new ApiError('interrupted', '')
+  }
 }
 
 /**
@@ -300,31 +309,45 @@ export async function* streamMessage(
     )
     throw protocolErr
   }
-  for await (const { event: eventName, data } of readServerSentEvents(response.body, signal)) {
-    let payload: unknown
-    try {
-      payload = JSON.parse(data)
-    } catch {
-      if (eventName !== 'error') {
+  try {
+    for await (const { event: eventName, data } of readServerSentEvents(response.body, signal)) {
+      let payload: unknown
+      try {
+        payload = JSON.parse(data)
+      } catch {
+        if (eventName !== 'error') {
+          continue
+        }
+      }
+      if (isErrorBody(payload)) {
+        recordAppLog('error', 'api.stream', 'Anthropic stream error', payload.error.message)
+        throw new ApiError('stream', payload.error.message)
+      }
+      if (eventName === 'error') {
+        recordAppLog('error', 'api.stream', 'Anthropic stream error event', data)
+        throw new ApiError('stream', data)
+      }
+      const event = readMessageEvent(payload)
+      if (!event) {
         continue
       }
+      yield event
+      if (event.type === 'message_stop') {
+        return
+      }
     }
-    if (isErrorBody(payload)) {
-      recordAppLog('error', 'api.stream', 'Anthropic stream error', payload.error.message)
-      throw new ApiError('stream', payload.error.message)
+  } catch (error) {
+    if (signal.aborted || error instanceof ApiError) {
+      throw error
     }
-    if (eventName === 'error') {
-      recordAppLog('error', 'api.stream', 'Anthropic stream error event', data)
-      throw new ApiError('stream', data)
-    }
-    const event = readMessageEvent(payload)
-    if (!event) {
-      continue
-    }
-    yield event
-    if (event.type === 'message_stop') {
-      return
-    }
+    const msg = error instanceof Error ? error.message : String(error)
+    recordAppLog(
+      'error',
+      'api.stream',
+      `POST ${anthropicUrl.split('?')[0]} stream read failed`,
+      msg
+    )
+    throw new ApiError('interrupted', '')
   }
   recordAppLog(
     'error',

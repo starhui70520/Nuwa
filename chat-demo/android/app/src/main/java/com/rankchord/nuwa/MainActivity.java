@@ -139,6 +139,35 @@ public class MainActivity extends BridgeActivity {
         }
     }
 
+    public void setStreamKeepAliveUi(boolean active) {
+        Window window = getWindow();
+        if (window != null) {
+            if (active) {
+                window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            } else {
+                window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+            && getBridge() != null
+            && getBridge().getWebView() != null) {
+            try {
+                if (active) {
+                    getBridge().getWebView().setRendererPriorityPolicy(
+                        WebView.RENDERER_PRIORITY_IMPORTANT,
+                        false
+                    );
+                } else {
+                    getBridge().getWebView().setRendererPriorityPolicy(
+                        WebView.RENDERER_PRIORITY_BOUND,
+                        true
+                    );
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
     private void enableHighRefreshRate() {
         Window window = getWindow();
         if (window == null) {

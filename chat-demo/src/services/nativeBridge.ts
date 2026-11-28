@@ -34,6 +34,7 @@ export type DeepSeekMigrationPlugin = {
   updateReadAloudNotification: (options: { line: string }) => Promise<void>
   clearReadAloudNotification: () => Promise<void>
   setSystemBarsStyle: (options: { dark: boolean }) => Promise<void>
+  setStreamKeepAlive: (options: { active: boolean }) => Promise<void>
   getSpeechEngineInfo: () => Promise<{
     brand: string
     osLabel: string
@@ -85,6 +86,14 @@ export const isNativeAndroid = (): boolean =>
 
 export const isNativeIos = (): boolean =>
   Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'ios'
+
+/** 在流式回复或上下文整理期间通知原生层开启/关闭后台保活与防休眠 */
+export const setNativeStreamKeepAlive = (active: boolean): void => {
+  if (!isNativeAndroid() && !isNativeIos()) {
+    return
+  }
+  void DeepSeekMigration.setStreamKeepAlive({ active }).catch(() => {})
+}
 
 const MIN_MODERN_WEBVIEW_CHROME_MAJOR = 80
 

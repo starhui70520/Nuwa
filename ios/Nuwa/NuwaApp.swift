@@ -51,10 +51,12 @@ struct NuwaApp: App {
             }
             .nuwaOnChange(of: scenePhase) { phase in
                 if phase == .active {
+                    chatStore.handleForegroundActive()
                     updateMonitor.handleForegroundActive()
                     ShareSuggestionDonor.donateDefaultSuggestionsIfNeeded()
                     chatStore.consumePendingAppGroupShares(settings: settings)
                 } else if phase == .background {
+                    chatStore.handleBackground()
                     updateMonitor.handleBackground()
                 }
             }

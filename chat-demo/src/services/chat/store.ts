@@ -21,6 +21,7 @@ import {
   useUploads,
 } from '../attachments.js'
 import { recordAppLog } from '../errorLog.js'
+import { setNativeStreamKeepAlive } from '../nativeBridge.js'
 import {
   getActiveSecret,
   isUsingDeepSeekAccount,
@@ -86,6 +87,10 @@ const SAFETY_CHECK_LOW = { level: 'low' } as const
 const FILE_RETRY_LIMIT = 2
 /** 退避基数，第 n 次重试等待 2^n 倍；连续失败达到上限就放弃，把原始报错展示出来 */
 const FILE_RETRY_BASE_DELAY = 1000
+/** 切后台断链后允许回前台自动无缝重连的最长间隔（5 分钟） */
+const BACKGROUND_RESUME_RETRY_WINDOW_MS = 5 * 60 * 1000
+/** 切回前台后等待网络接口恢复的短暂缓冲时间 */
+const BACKGROUND_RESUME_SETTLE_DELAY_MS = 450
 
 /**
  * 扩展工具会触发服务端 32K 输入上限；仅在需要时声明：
@@ -1664,6 +1669,75 @@ const waitForRetry = (attempt: number, signal: AbortSignal) =>
     signal.addEventListener('abort', onAbort, { once: true })
   })
 
+let streamKeepAliveActive = false
+
+const syncStreamKeepAlive = () => {
+  const state = get()
+  const active =
+    Object.keys(state.streaming).length > 0 || Object.keys(state.compacting).length > 0
+  if (active === streamKeepAliveActive) {
+    return
+  }
+  streamKeepAliveActive = active
+  setNativeStreamKeepAlive(active)
+}
+
+/** 等待页面回到前台（或原生层 resume）；超时或停止生成时返回 false */
+const waitForForegroundResume = (signal: AbortSignal, maxWaitMs: number): Promise<boolean> => {
+  if (signal.aborted) {
+    return Promise.resolve(false)
+  }
+  if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+    return Promise.resolve(true)
+  }
+  return new Promise<boolean>((resolve) => {
+    let settled = false
+    const finish = (resumed: boolean) => {
+      if (settled) {
+        return
+      }
+      settled = true
+      clearTimeout(timer)
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('dsapp:native-resume', onResume)
+      signal.removeEventListener('abort', onAbort)
+      resolve(resumed)
+    }
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        finish(true)
+      }
+    }
+    const onResume = () => {
+      if (document.visibilityState === 'visible') {
+        finish(true)
+      }
+    }
+    const onAbort = () => finish(false)
+    const timer = setTimeout(() => finish(false), maxWaitMs)
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('dsapp:native-resume', onResume)
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+const waitAbortableDelay = (ms: number, signal: AbortSignal): Promise<boolean> => {
+  if (signal.aborted) {
+    return Promise.resolve(false)
+  }
+  return new Promise<boolean>((resolve) => {
+    const onAbort = () => {
+      clearTimeout(timer)
+      resolve(false)
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve(true)
+    }, ms)
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
 /**
  * 请求并消费流：先补齐附件的 serverId，再发请求；流式增量按动画帧刷新内存，完成、失败或停止后落盘。
  * 补传失败时回复记为 upload 错误，可重试。
@@ -1675,6 +1749,7 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
     titleRequests.add(controller)
   }
   set((state) => ({ streaming: { ...state.streaming, [sessionId]: controller } }))
+  syncStreamKeepAlive()
   let reply = initial
   let frame = 0
   let flushTimer: ReturnType<typeof setTimeout> | null = null
@@ -1683,6 +1758,18 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
   let imageCap = MAX_REQUEST_IMAGES
   let sentMessages: MessageParam[] = []
   let cachedPrepared: Request | null = null
+  let sawBackground = typeof document !== 'undefined' && document.visibilityState === 'hidden'
+  let backgroundedAt = sawBackground ? Date.now() : 0
+  let backgroundRetryUsed = false
+  const trackVisibility = () => {
+    if (document.visibilityState === 'hidden') {
+      sawBackground = true
+      backgroundedAt = Date.now()
+    }
+  }
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', trackVisibility)
+  }
   const cancelScheduledFlush = () => {
     if (frame) {
       cancelAnimationFrame(frame)
@@ -1919,6 +2006,40 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
           }
           continue
         }
+        // 切后台期间在收到任何内容前被系统断链时：回到前台后自动无缝重连一次，避免直接弹「请重试」。
+        if (
+          !receivedContent &&
+          !backgroundRetryUsed &&
+          error instanceof ApiError &&
+          (error.kind === 'network' || error.kind === 'interrupted') &&
+          (sawBackground ||
+            (typeof document !== 'undefined' && document.visibilityState === 'hidden'))
+        ) {
+          const elapsedSinceHide = backgroundedAt > 0 ? Date.now() - backgroundedAt : 0
+          const remainingWait = Math.max(0, BACKGROUND_RESUME_RETRY_WINDOW_MS - elapsedSinceHide)
+          if (remainingWait > 0) {
+            backgroundRetryUsed = true
+            const resumed = await waitForForegroundResume(controller.signal, remainingWait)
+            if (controller.signal.aborted) {
+              reply = settleReply(reply, 'stopped', Date.now())
+              break
+            }
+            if (resumed) {
+              const readyToRetry = await waitAbortableDelay(
+                BACKGROUND_RESUME_SETTLE_DELAY_MS,
+                controller.signal
+              )
+              if (!readyToRetry || controller.signal.aborted) {
+                reply = settleReply(reply, 'stopped', Date.now())
+                break
+              }
+              sawBackground =
+                typeof document !== 'undefined' && document.visibilityState === 'hidden'
+              backgroundedAt = sawBackground ? Date.now() : 0
+              continue
+            }
+          }
+        }
         if (error instanceof ApiError && error.kind === 'interrupted' && reply.stopReason) {
           // 已收到 message_delta 的结束原因，只是缺了结尾的 message_stop
           reply = settleReply(reply, 'done', Date.now())
@@ -1939,6 +2060,9 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
       }
     }
   } finally {
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', trackVisibility)
+    }
     titleRequests.delete(controller)
     streamFlushes.delete(sessionId)
     cancelScheduledFlush()
@@ -1948,6 +2072,7 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
         Object.entries(state.streaming).filter(([id]) => id !== sessionId)
       ),
     }))
+    syncStreamKeepAlive()
     persist(sessionId)
     refreshBalanceAfterReply()
   }
@@ -2010,6 +2135,7 @@ export const compactSession = async (
     }))
   }
   updateProgress()
+  syncStreamKeepAlive()
 
   try {
     let nextIndex = 0
@@ -2054,6 +2180,7 @@ export const compactSession = async (
         Object.entries(state.compacting).filter(([id]) => id !== sessionId)
       ),
     }))
+    syncStreamKeepAlive()
   }
 }
 
