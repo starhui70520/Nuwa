@@ -270,7 +270,7 @@ export function App() {
             </div>
 
             <a
-              href="https://chordai.rankchord.com/status"
+              href="https://rankai.rankchord.com/status"
               target="_blank"
               rel="noreferrer"
               className="h-10 px-[14px] rounded-full inline-flex items-center text-[15px] font-medium leading-none text-[#18181b] hover:bg-[#f6f6f6] transition-colors"
@@ -298,7 +298,7 @@ export function App() {
           {/* Desktop Right Actions */}
           <div className="hidden min-[861px]:flex ml-auto items-center gap-[10px]">
             <a
-              href="https://chordai.rankchord.com/login"
+              href="https://rankai.rankchord.com/login"
               target="_blank"
               rel="noreferrer"
               className="min-w-[74px] min-h-[44px] px-[20px] py-[10px] rounded-full bg-[#f6f6f6] hover:bg-[#e8e8e8] inline-flex items-center justify-center text-[14px] font-medium leading-none text-[#18181b] transition-colors"
@@ -372,7 +372,7 @@ export function App() {
 
           <div className="border-t border-[#e8e8e8] pt-4 space-y-1">
             <a
-              href="https://chordai.rankchord.com/status"
+              href="https://rankai.rankchord.com/status"
               target="_blank"
               rel="noreferrer"
               className="block px-2 py-2.5 text-[16px] font-medium text-[#18181b]"
@@ -397,7 +397,7 @@ export function App() {
 
           <div className="pt-2 pb-8 flex gap-3">
             <a
-              href="https://chordai.rankchord.com/login"
+              href="https://rankai.rankchord.com/login"
               target="_blank"
               rel="noreferrer"
               className="rc-pill-soft flex-1"
@@ -503,12 +503,12 @@ export function App() {
                 GitHub ↗
               </a>
               <a
-                href="https://chordai.rankchord.com"
+                href="https://rankai.rankchord.com"
                 target="_blank"
                 rel="noreferrer"
                 className="hover:opacity-55 transition-opacity"
               >
-                ChordAI ↗
+                秩算平台 ↗
               </a>
               <button
                 type="button"
