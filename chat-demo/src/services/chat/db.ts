@@ -1,6 +1,15 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb'
 import { isLowPerfDevice, yieldToMain } from '../../app/devicePerf.js'
 import { createId } from '../../utils/id.js'
+import { recordAppLog } from '../errorLog.js'
+import {
+  clearNativeVaultSessions,
+  deleteSessionFromNativeVault,
+  isNativeAndroid,
+  listNativeVaultSessionIds,
+  readSessionFromNativeVault,
+  saveSessionToNativeVault,
+} from '../nativeBridge.js'
 import { toSessionSummary, type Message, type Session, type SessionSummary } from './types.js'
 
 /** IndexedDB 存储结构版本；新增或调整存储、索引时递增。 */
@@ -34,6 +43,94 @@ interface ChatDB extends DBSchema {
 }
 
 let dbPromise: Promise<IDBPDatabase<ChatDB>> | null = null
+let persistRequested = false
+let vaultEpoch = 0
+const deletedInVaultEpoch = new Set<string>()
+
+const requestPersistentStorage = () => {
+  if (persistRequested || typeof navigator === 'undefined') {
+    return
+  }
+  persistRequested = true
+  try {
+    void navigator.storage?.persist?.().catch(() => {})
+  } catch {
+    // 忽略低版本 WebView 不支持 storage.persist
+  }
+}
+
+const hasExistingLoginInLocalStorage = (): boolean => {
+  try {
+    return Boolean(
+      localStorage.getItem('chat-demo:dsh-token') || localStorage.getItem('chat-demo:api-key')
+    )
+  } catch {
+    return false
+  }
+}
+
+const mirrorSessionToVault = (session: Session) => {
+  if (!isNativeAndroid()) {
+    return
+  }
+  deletedInVaultEpoch.delete(session.id)
+  try {
+    saveSessionToNativeVault(session.id, JSON.stringify(session))
+  } catch {
+    // 序列化或原生桥接异常不阻断主流程
+  }
+}
+
+/** 仅在用户主动确认「删除所有对话」时同步清空 Android 原生会话保险库。 */
+export const clearNativeVault = async (): Promise<void> => {
+  vaultEpoch += 1
+  deletedInVaultEpoch.clear()
+  await clearNativeVaultSessions()
+}
+
+const isValidVaultSession = (value: unknown): value is Session => {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+  const s = value as Partial<Session>
+  return (
+    typeof s.id === 'string' &&
+    s.id.length > 0 &&
+    typeof s.title === 'string' &&
+    typeof s.createdAt === 'number' &&
+    typeof s.updatedAt === 'number' &&
+    Array.isArray(s.messages)
+  )
+}
+
+const backfillVaultFromDb = async (sessionIds: string[], epoch: number): Promise<void> => {
+  if (!isNativeAndroid() || sessionIds.length === 0) {
+    return
+  }
+  for (let i = 0; i < sessionIds.length; i++) {
+    if (epoch !== vaultEpoch) {
+      return
+    }
+    const id = sessionIds[i]
+    if (deletedInVaultEpoch.has(id)) {
+      continue
+    }
+    try {
+      const session = await loadSession(id)
+      if (epoch !== vaultEpoch || deletedInVaultEpoch.has(id)) {
+        continue
+      }
+      if (session) {
+        mirrorSessionToVault(session)
+      }
+    } catch {
+      // 单条补齐失败跳过，不影响其余会话备份
+    }
+    if ((i + 1) % 4 === 0) {
+      await yieldToMain()
+    }
+  }
+}
 
 const storedSummary = (session: Session): StoredSessionSummary => {
   let seen: Set<string> | null = null
@@ -69,9 +166,17 @@ const abortTransaction = (tx: { abort(): void }) => {
 }
 
 // 每个操作拿到连接后立即创建事务；IndexedDB 按创建顺序执行范围重叠的事务，读取总能看到之前发起的写入。
-const getDB = () =>
-  (dbPromise ??= openDB<ChatDB>('chat-demo', DB_VERSION, {
-    upgrade(db, _oldVersion, _newVersion, tx) {
+const getDB = () => {
+  requestPersistentStorage()
+  return (dbPromise ??= openDB<ChatDB>('chat-demo', DB_VERSION, {
+    upgrade(db, oldVersion, _newVersion, tx) {
+      if (oldVersion === 0 && hasExistingLoginInLocalStorage()) {
+        recordAppLog(
+          'warn',
+          'storage.db',
+          'IndexedDB initialized from v0 while user credential already exists'
+        )
+      }
       // 初始化当前格式需要的存储与索引，不迁移旧消息。
       for (const name of ['sessions', 'files', 'sessionsStaging', 'filesStaging'] as const) {
         if (!db.objectStoreNames.contains(name)) {
@@ -94,6 +199,7 @@ const getDB = () =>
     dbPromise = null
     throw error
   }))
+}
 
 const isConnectionClosedError = (error: unknown): boolean => {
   if (!(error instanceof Error)) {
@@ -123,14 +229,148 @@ const withDbReconnect = async <T>(run: (db: IDBPDatabase<ChatDB>) => Promise<T>)
   }
 }
 
-export const loadSessionSummaries = async (): Promise<SessionSummary[]> =>
-  withDbReconnect(async (db) => (await db.getAll('sessionSummaries')).map(toSessionSummary))
+const rebuildSummariesFromSessions = async (
+  db: IDBPDatabase<ChatDB>
+): Promise<SessionSummary[]> => {
+  const rebuilt: SessionSummary[] = []
+  const tx = db.transaction(['sessions', 'sessionSummaries'], 'readwrite')
+  await Promise.all([
+    (async () => {
+      try {
+        const summaryStore = tx.objectStore('sessionSummaries')
+        for (
+          let cursor = await tx.objectStore('sessions').openCursor();
+          cursor;
+          cursor = await cursor.continue()
+        ) {
+          const summary = storedSummary(cursor.value)
+          await summaryStore.put(summary)
+          rebuilt.push(toSessionSummary(summary))
+        }
+      } catch (error) {
+        abortTransaction(tx)
+        throw error
+      }
+    })(),
+    tx.done,
+  ])
+  return rebuilt
+}
 
-export const loadSession = async (id: string): Promise<Session | undefined> =>
-  withDbReconnect((db) => db.get('sessions', id))
+export const loadSessionSummaries = async (): Promise<SessionSummary[]> => {
+  let summaries = await withDbReconnect(async (db) => {
+    const list = (await db.getAll('sessionSummaries')).map(toSessionSummary)
+    if (list.length > 0) {
+      return list
+    }
+    // 摘要表异常为空但主表仍有记录时，自动从 sessions 主表重建摘要
+    const count = await db.count('sessions')
+    if (count > 0) {
+      const rebuilt = await rebuildSummariesFromSessions(db)
+      if (rebuilt.length > 0) {
+        recordAppLog(
+          'warn',
+          'storage.db',
+          `Rebuilt ${rebuilt.length} sessionSummaries from sessions store`
+        )
+      }
+      return rebuilt
+    }
+    return list
+  })
 
-export const saveSession = async (session: Session, files: StoredFile[] = []): Promise<void> =>
-  withDbReconnect(async (db) => {
+  if (isNativeAndroid()) {
+    const epoch = vaultEpoch
+    const vaultKeys = await listNativeVaultSessionIds()
+    const existingIds = new Set(summaries.map((s) => s.id))
+    const candidateVaultKeys = vaultKeys.filter((key) => !existingIds.has(key))
+
+    // 当 WebView IndexedDB 因大退损坏或系统配额驱逐丢失记录时，自动从 Android 原生保险库恢复
+    if (candidateVaultKeys.length > 0) {
+      const recovered: SessionSummary[] = []
+      for (let i = 0; i < candidateVaultKeys.length; i++) {
+        if (epoch !== vaultEpoch) {
+          break
+        }
+        const key = candidateVaultKeys[i]
+        try {
+          const raw = await readSessionFromNativeVault(key)
+          if (!raw) {
+            continue
+          }
+          const parsed: unknown = JSON.parse(raw)
+          if (!isValidVaultSession(parsed) || existingIds.has(parsed.id)) {
+            continue
+          }
+          const summary = storedSummary(parsed)
+          await withDbReconnect(async (db) => {
+            const tx = db.transaction(['sessions', 'sessionSummaries'], 'readwrite')
+            await Promise.all([
+              (async () => {
+                try {
+                  await tx.objectStore('sessions').put(parsed)
+                  await tx.objectStore('sessionSummaries').put(summary)
+                } catch (error) {
+                  abortTransaction(tx)
+                  throw error
+                }
+              })(),
+              tx.done,
+            ])
+          })
+          existingIds.add(parsed.id)
+          recovered.push(toSessionSummary(summary))
+        } catch {
+          // 单条损坏跳过，继续恢复其余会话
+        }
+        if ((i + 1) % 6 === 0) {
+          await yieldToMain()
+        }
+      }
+      if (recovered.length > 0) {
+        summaries = [...summaries, ...recovered]
+        recordAppLog(
+          'warn',
+          'storage.vault',
+          `Recovered ${recovered.length} sessions from native Android vault`
+        )
+      }
+    }
+
+    // 首次升级或新增尚未备份到原生保险库的会话，后台分片静默补齐，不阻塞启动
+    const vaultKeySet = new Set(vaultKeys)
+    const missingInVault = summaries
+      .filter((s) => !vaultKeySet.has(s.id))
+      .map((s) => s.id)
+    if (missingInVault.length > 0) {
+      void backfillVaultFromDb(missingInVault, epoch)
+    }
+  }
+
+  return summaries
+}
+
+export const loadSession = async (id: string): Promise<Session | undefined> => {
+  const fromDb = await withDbReconnect((db) => db.get('sessions', id))
+  if (fromDb || !isNativeAndroid()) {
+    return fromDb
+  }
+  const raw = await readSessionFromNativeVault(id)
+  if (!raw) {
+    return undefined
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    return isValidVaultSession(parsed) ? parsed : undefined
+  } catch {
+    return undefined
+  }
+}
+
+export const saveSession = async (session: Session, files: StoredFile[] = []): Promise<void> => {
+  // 先向 Android 原生保险库异步原子落盘，即使随后 IndexedDB 连接意外中断也能保住本轮记录
+  mirrorSessionToVault(session)
+  await withDbReconnect(async (db) => {
     const summary = storedSummary(session)
     const tx = db.transaction(['sessions', 'sessionSummaries', 'files'], 'readwrite')
     await Promise.all([
@@ -149,10 +389,12 @@ export const saveSession = async (session: Session, files: StoredFile[] = []): P
       tx.done,
     ])
   })
+}
 
 /** 未打开的会话也可重命名，只读取该会话，原子更新详情和列表。 */
-export const renameSession = async (id: string, title: string): Promise<void> =>
-  withDbReconnect(async (db) => {
+export const renameSession = async (id: string, title: string): Promise<void> => {
+  let updated: Session | undefined
+  await withDbReconnect(async (db) => {
     const tx = db.transaction(['sessions', 'sessionSummaries'], 'readwrite')
     await Promise.all([
       (async () => {
@@ -163,6 +405,7 @@ export const renameSession = async (id: string, title: string): Promise<void> =>
             session.title = title
             await sessions.put(session)
             await tx.objectStore('sessionSummaries').put(storedSummary(session))
+            updated = session
           }
         } catch (error) {
           abortTransaction(tx)
@@ -172,10 +415,15 @@ export const renameSession = async (id: string, title: string): Promise<void> =>
       tx.done,
     ])
   })
+  if (updated) {
+    mirrorSessionToVault(updated)
+  }
+}
 
 /** 未打开的会话也可置顶/取消置顶，原子更新详情和列表。 */
-export const setSessionPinned = async (id: string, pinnedAt: number | undefined): Promise<void> =>
-  withDbReconnect(async (db) => {
+export const setSessionPinned = async (id: string, pinnedAt: number | undefined): Promise<void> => {
+  let updated: Session | undefined
+  await withDbReconnect(async (db) => {
     const tx = db.transaction(['sessions', 'sessionSummaries'], 'readwrite')
     await Promise.all([
       (async () => {
@@ -190,6 +438,7 @@ export const setSessionPinned = async (id: string, pinnedAt: number | undefined)
             }
             await sessions.put(session)
             await tx.objectStore('sessionSummaries').put(storedSummary(session))
+            updated = session
           }
         } catch (error) {
           abortTransaction(tx)
@@ -199,10 +448,17 @@ export const setSessionPinned = async (id: string, pinnedAt: number | undefined)
       tx.done,
     ])
   })
+  if (updated) {
+    mirrorSessionToVault(updated)
+  }
+}
 
 /** 删除会话，仅清理已无会话引用的本地原件；远端文件不删。 */
-export const deleteSession = async (sessionId: string): Promise<void> =>
-  withDbReconnect(async (db) => {
+export const deleteSession = async (sessionId: string): Promise<void> => {
+  // 先删原生保险库再删 IndexedDB，防止中途强杀导致已删除会话在下次启动被恢复
+  deletedInVaultEpoch.add(sessionId)
+  await deleteSessionFromNativeVault(sessionId)
+  await withDbReconnect(async (db) => {
     const tx = db.transaction(['sessions', 'sessionSummaries', 'files'], 'readwrite')
     await Promise.all([
       (async () => {
@@ -224,6 +480,7 @@ export const deleteSession = async (sessionId: string): Promise<void> =>
       tx.done,
     ])
   })
+}
 
 const putFiles = async (store: 'files' | 'filesStaging', files: StoredFile[]) =>
   withDbReconnect(async (db) => {
@@ -375,6 +632,12 @@ export const commitStaging = async (): Promise<SessionSummary[]> => {
     tx.done,
   ])
   // 直接返回本次提交的列表，调用方无需在替换成功后再发起可能失败的读取。
+  if (summaries.length > 0) {
+    void backfillVaultFromDb(
+      summaries.map((s) => s.id),
+      vaultEpoch
+    )
+  }
   return summaries
 }
 
@@ -480,6 +743,7 @@ export const mergeStaging = async (): Promise<{
 }> => {
   let importedCount = 0
   let stored: StoredSessionSummary[] = []
+  const changedSessionIds: string[] = []
   const tx = (await getDB()).transaction(
     ['sessions', 'sessionSummaries', 'files', 'sessionsStaging', 'filesStaging'],
     'readwrite'
@@ -497,6 +761,7 @@ export const mergeStaging = async (): Promise<{
       if (!existing) {
         await target.put(incoming)
         await summaryStore.put(storedSummary(incoming))
+        changedSessionIds.push(incoming.id)
         importedCount += 1
         continue
       }
@@ -530,6 +795,7 @@ export const mergeStaging = async (): Promise<{
         }
         await target.put(merged)
         await summaryStore.put(storedSummary(merged))
+        changedSessionIds.push(merged.id)
         importedCount += 1
         continue
       }
@@ -547,6 +813,7 @@ export const mergeStaging = async (): Promise<{
       await summaryStore.put(storedSummary(localBranched))
       await target.put(incomingBranched)
       await summaryStore.put(storedSummary(incomingBranched))
+      changedSessionIds.push(localBranched.id, incomingBranched.id)
       importedCount += 1
     }
     await tx.objectStore('sessionsStaging').clear()
@@ -575,6 +842,9 @@ export const mergeStaging = async (): Promise<{
     })(),
     tx.done,
   ])
+  if (changedSessionIds.length > 0) {
+    void backfillVaultFromDb(changedSessionIds, vaultEpoch)
+  }
   return { importedCount, summaries: stored.map(toSessionSummary) }
 }
 
@@ -642,6 +912,7 @@ export const searchSessionIdsByContent = async (
       break
     }
     const tx = db.transaction('sessions', 'readonly')
+    tx.done.catch(() => {})
     const store = tx.store
     // 同一只读事务内并发管线化批读，消除逐条 await 的 IDB IPC 往返延迟，同时保持峰值驻留可控
     const sessions = await Promise.all(keys.map((id) => store.get(id)))

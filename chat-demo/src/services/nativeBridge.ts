@@ -35,6 +35,11 @@ export type DeepSeekMigrationPlugin = {
   clearReadAloudNotification: () => Promise<void>
   setSystemBarsStyle: (options: { dark: boolean }) => Promise<void>
   setStreamKeepAlive: (options: { active: boolean }) => Promise<void>
+  vaultSaveSession: (options: { id: string; json: string }) => Promise<void>
+  vaultDeleteSession: (options: { id: string }) => Promise<void>
+  vaultClearSessions: () => Promise<void>
+  vaultListSessionIds: () => Promise<{ ids: string[] }>
+  vaultReadSession: (options: { id: string }) => Promise<{ json?: string }>
   getSpeechEngineInfo: () => Promise<{
     brand: string
     osLabel: string
@@ -93,6 +98,60 @@ export const setNativeStreamKeepAlive = (active: boolean): void => {
     return
   }
   void DeepSeekMigration.setStreamKeepAlive({ active }).catch(() => {})
+}
+
+/** Android 原生沙盒会话保险库：异步镜像写入，抵御 WebView IndexedDB 损坏或配额驱逐 */
+export const saveSessionToNativeVault = (id: string, json: string): void => {
+  if (!isNativeAndroid() || !id || !json) {
+    return
+  }
+  void DeepSeekMigration.vaultSaveSession({ id, json }).catch(() => {})
+}
+
+export const deleteSessionFromNativeVault = async (id: string): Promise<void> => {
+  if (!isNativeAndroid() || !id) {
+    return
+  }
+  try {
+    await DeepSeekMigration.vaultDeleteSession({ id })
+  } catch {
+    // 忽略低版本壳未实现或 I/O 异常
+  }
+}
+
+export const clearNativeVaultSessions = async (): Promise<void> => {
+  if (!isNativeAndroid()) {
+    return
+  }
+  try {
+    await DeepSeekMigration.vaultClearSessions()
+  } catch {
+    // 忽略低版本壳未实现或 I/O 异常
+  }
+}
+
+export const listNativeVaultSessionIds = async (): Promise<string[]> => {
+  if (!isNativeAndroid()) {
+    return []
+  }
+  try {
+    const res = await DeepSeekMigration.vaultListSessionIds()
+    return Array.isArray(res?.ids) ? res.ids.filter((id): id is string => typeof id === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+export const readSessionFromNativeVault = async (id: string): Promise<string | null> => {
+  if (!isNativeAndroid() || !id) {
+    return null
+  }
+  try {
+    const res = await DeepSeekMigration.vaultReadSession({ id })
+    return typeof res?.json === 'string' && res.json.length > 0 ? res.json : null
+  } catch {
+    return null
+  }
 }
 
 const MIN_MODERN_WEBVIEW_CHROME_MAJOR = 80

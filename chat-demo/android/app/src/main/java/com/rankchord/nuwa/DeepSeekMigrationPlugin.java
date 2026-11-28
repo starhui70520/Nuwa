@@ -823,6 +823,78 @@ public class DeepSeekMigrationPlugin extends Plugin {
     }
 
     @PluginMethod
+    public void vaultSaveSession(PluginCall call) {
+        String id = call.getString("id", "");
+        String json = call.getString("json", "");
+        if (id != null && !id.trim().isEmpty() && json != null && !json.isEmpty()) {
+            SessionVault.getInstance(getContext()).enqueueSave(id, json);
+        }
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void vaultDeleteSession(PluginCall call) {
+        final String id = call.getString("id", "");
+        new Thread(() -> {
+            try {
+                if (id != null && !id.trim().isEmpty()) {
+                    SessionVault.getInstance(getContext()).deleteSync(id);
+                }
+            } catch (Throwable ignored) {
+            }
+            mainHandler.post(call::resolve);
+        }).start();
+    }
+
+    @PluginMethod
+    public void vaultClearSessions(PluginCall call) {
+        new Thread(() -> {
+            try {
+                SessionVault.getInstance(getContext()).clearSync();
+            } catch (Throwable ignored) {
+            }
+            mainHandler.post(call::resolve);
+        }).start();
+    }
+
+    @PluginMethod
+    public void vaultListSessionIds(PluginCall call) {
+        new Thread(() -> {
+            JSArray ids = new JSArray();
+            try {
+                List<String> keys = SessionVault.getInstance(getContext()).listKeysSync();
+                for (String key : keys) {
+                    ids.put(key);
+                }
+            } catch (Throwable ignored) {
+            }
+            JSObject ret = new JSObject();
+            ret.put("ids", ids);
+            mainHandler.post(() -> call.resolve(ret));
+        }).start();
+    }
+
+    @PluginMethod
+    public void vaultReadSession(PluginCall call) {
+        final String id = call.getString("id", "");
+        new Thread(() -> {
+            String json = null;
+            try {
+                if (id != null && !id.trim().isEmpty()) {
+                    json = SessionVault.getInstance(getContext()).readSync(id);
+                }
+            } catch (Throwable ignored) {
+            }
+            final String finalJson = json;
+            JSObject ret = new JSObject();
+            if (finalJson != null) {
+                ret.put("json", finalJson);
+            }
+            mainHandler.post(() -> call.resolve(ret));
+        }).start();
+    }
+
+    @PluginMethod
     public void getSpeechEngineInfo(PluginCall call) {
         OemSpeechHelper.Brand brand = OemSpeechHelper.detectBrand();
         boolean hyperOs = OemSpeechHelper.isHyperOs();
